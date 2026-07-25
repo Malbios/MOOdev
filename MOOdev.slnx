@@ -1,0 +1,15 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Client/Client.fsproj" />
+    <Project Path="src/Language/Language.fsproj" />
+    <Project Path="src/LanguageServer/LanguageServer.fsproj" />
+    <Project Path="src/Metadata/Metadata.fsproj" />
+    <Project Path="src/Sidecar/Sidecar.fsproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Language.Tests/Language.Tests.fsproj" />
+    <Project Path="tests/LanguageServer.Tests/LanguageServer.Tests.fsproj" />
+    <Project Path="tests/Metadata.Tests/Metadata.Tests.fsproj" />
+    <Project Path="tests/Sidecar.Tests/Sidecar.Tests.fsproj" />
+  </Folder>
+</Solution>
