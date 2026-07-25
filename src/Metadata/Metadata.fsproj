@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="Schema.fs" />
+    <Compile Include="Loader.fs" />
+    <Compile Include="Resolver.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Real parameter names for ~55 builtins, extracted once from
+         ToastStunt's own C source comments (see
+         C:\dev\moo\toaststunt\src, `/* (param, names) */` above each
+         bf_* implementation) - a static, build-time resource, not
+         per-Survive-checkout data, so it's embedded rather than loaded
+         from `surviveRoot`. -->
+    <EmbeddedResource Include="builtin-param-names.json" />
+    <!-- One-line "what does this do" hover text for all 238 builtins,
+         hand-written against the C source and docs/Features/new_builtins.md
+         (no source-comment convention documents behavior the way param
+         names are documented) - same "static, build-time resource"
+         treatment as builtin-param-names.json above. -->
+    <EmbeddedResource Include="builtin-descriptions.json" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Language\Language.fsproj" />
+  </ItemGroup>
+
+</Project>

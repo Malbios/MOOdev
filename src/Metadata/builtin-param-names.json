@@ -1,0 +1,233 @@
+{
+  "salt": [
+    "prefix",
+    "input"
+  ],
+  "crypt": [
+    "string",
+    "salt"
+  ],
+  "read": [
+    "object",
+    "non_blocking"
+  ],
+  "read_http": [
+    "\"request\" | \"response\"",
+    "object"
+  ],
+  "set_task_perms": [
+    "player"
+  ],
+  "all_members": [
+    "source",
+    "what",
+    "with",
+    "case-matters"
+  ],
+  "index": [
+    "source",
+    "what",
+    "case-matters",
+    "offset"
+  ],
+  "rindex": [
+    "source",
+    "what",
+    "case-matters",
+    "offset"
+  ],
+  "strcmp": [
+    "string1",
+    "string2"
+  ],
+  "strsub": [
+    "source",
+    "what",
+    "with",
+    "case-matters"
+  ],
+  "strtr": [
+    "subject",
+    "from",
+    "to",
+    "case_matters"
+  ],
+  "random_bytes": [
+    "count"
+  ],
+  "floatstr": [
+    "float",
+    "precision",
+    "sci-notation"
+  ],
+  "valid": [
+    "object"
+  ],
+  "chparents": [
+    "OBJ obj",
+    "OBJ|LIST what"
+  ],
+  "chparent": [
+    "OBJ obj",
+    "OBJ|LIST what"
+  ],
+  "parents": [
+    "OBJ object"
+  ],
+  "parent": [
+    "OBJ object"
+  ],
+  "children": [
+    "object"
+  ],
+  "ancestors": [
+    "OBJ object"
+  ],
+  "descendants": [
+    "OBJ object"
+  ],
+  "is_player": [
+    "object"
+  ],
+  "set_player_flag": [
+    "object",
+    "yes/no"
+  ],
+  "isa": [
+    "object",
+    "parent",
+    "return_object"
+  ],
+  "properties": [
+    "object"
+  ],
+  "property_info": [
+    "object",
+    "prop-name"
+  ],
+  "set_property_info": [
+    "object",
+    "prop-name",
+    "{owner",
+    "perms",
+    "new-name}"
+  ],
+  "add_property": [
+    "object",
+    "prop-name",
+    "initial-value",
+    "initial-info"
+  ],
+  "delete_property": [
+    "object",
+    "prop-name"
+  ],
+  "clear_property": [
+    "object",
+    "prop-name"
+  ],
+  "is_clear_property": [
+    "object",
+    "prop-name"
+  ],
+  "connected_seconds": [
+    "player"
+  ],
+  "idle_seconds": [
+    "player"
+  ],
+  "connection_name": [
+    "player",
+    "IP | LEGACY"
+  ],
+  "notify": [
+    "player",
+    "string",
+    "no_flush"
+  ],
+  "boot_player": [
+    "object"
+  ],
+  "set_connection_option": [
+    "conn",
+    "option",
+    "value"
+  ],
+  "connection_options": [
+    "conn",
+    "opt-name"
+  ],
+  "connection_info": [
+    "conn"
+  ],
+  "listen": [
+    "oid",
+    "desc"
+  ],
+  "unlisten": [
+    "desc"
+  ],
+  "listeners": [
+    "find"
+  ],
+  "buffered_output_length": [
+    "connection"
+  ],
+  "force_input": [
+    "conn",
+    "string",
+    "at_front"
+  ],
+  "flush_input": [
+    "conn",
+    "show_messages"
+  ],
+  "set_task_local": [
+    "ANY value"
+  ],
+  "verbs": [
+    "object"
+  ],
+  "verb_info": [
+    "object",
+    "verb-desc"
+  ],
+  "set_verb_info": [
+    "object",
+    "verb-desc",
+    "{owner",
+    "flags",
+    "names}"
+  ],
+  "verb_args": [
+    "object",
+    "verb-desc"
+  ],
+  "set_verb_args": [
+    "object",
+    "verb-desc",
+    "{dobj",
+    "prep",
+    "iobj}"
+  ],
+  "add_verb": [
+    "object",
+    "info",
+    "args"
+  ],
+  "delete_verb": [
+    "object",
+    "verb-desc"
+  ],
+  "verb_code": [
+    "object",
+    "verb-desc",
+    "fully-paren",
+    "indent"
+  ],
+  "set_verb_code": [
+    "object",
+    "verb-desc",
+    "code"
+  ]
+}
