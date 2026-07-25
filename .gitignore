@@ -1,0 +1,7 @@
+bin/
+obj/
+node_modules/
+src/Client/output/
+src/Client/dist/
+.vs/
+*.user
