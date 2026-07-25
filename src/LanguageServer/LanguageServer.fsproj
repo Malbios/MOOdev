@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="AstQuery.fs" />
+    <Compile Include="Handlers.fs" />
+    <Compile Include="WsTransport.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Ionide.LanguageServerProtocol" Version="0.7.0" />
+    <!-- Ionide -> StreamJsonRpc 2.16.36 pulls in MessagePack 2.5.108, which has
+         published CVEs (NU1902/NU1903). Our own code path never touches
+         MessagePack at all - `Server.defaultJsonRpcFormatter` uses
+         StreamJsonRpc's JSON.NET-based `JsonMessageFormatter`, not
+         `MessagePackFormatter` - so this is unreachable dead weight in the
+         dependency graph, not a live vulnerability, but pin a patched
+         version directly rather than leave the warning in every build. -->
+    <PackageReference Include="MessagePack" Version="3.1.8" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Metadata\Metadata.fsproj" />
+  </ItemGroup>
+
+</Project>
