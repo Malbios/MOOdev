@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>MOOdev terminal</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <button id="settings-btn" title="Settings">⚙</button>
+
+  <div id="settings-overlay">
+    <div id="settings-panel">
+      <div class="settings-header">
+        <span>Settings</span>
+        <button id="settings-close">×</button>
+      </div>
+      <label class="settings-row">
+        <input type="checkbox" id="setting-wordwrap" />
+        Word wrap
+      </label>
+      <label class="settings-row">
+        Font size
+        <input type="number" id="setting-fontsize" min="8" max="32" />
+      </label>
+      <label class="settings-row">
+        <input type="checkbox" id="setting-minimap" />
+        Show minimap
+      </label>
+      <div class="settings-row">
+        <button id="setting-forget-login">Forget saved login</button>
+        <span id="setting-forget-login-status"></span>
+      </div>
+    </div>
+  </div>
+
+  <div id="layout">
+    <div id="sidebar">
+      <div id="objects-pane">
+        <div class="sidebar-header">Objects</div>
+        <input id="objects-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
+        <ul id="objects-list" class="picker-list"></ul>
+      </div>
+      <div id="sidebar-split-resizer" class="resizer resizer-updown"></div>
+      <div id="verbs-pane">
+        <div class="sidebar-header">Verbs</div>
+        <input id="verbs-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
+        <ul id="verbs-list" class="picker-list"></ul>
+      </div>
+    </div>
+    <div id="sidebar-resizer" class="resizer resizer-leftright"></div>
+    <div id="main-pane">
+      <div id="main-tabs">
+        <button id="tab-game" class="main-tab pinned">Game</button>
+        <div id="verb-tabs"></div>
+      </div>
+      <div id="editor-pane">
+        <div id="editor-monaco"></div>
+        <pre id="editor-diagnostics"></pre>
+        <div id="editor-status">
+          <span id="status-dirty"></span>
+          <span id="status-position"></span>
+        </div>
+      </div>
+      <div id="inspector-pane">
+        <pre id="inspector-diagnostics"></pre>
+        <div id="inspector-content"></div>
+      </div>
+      <div id="terminal-pane">
+        <div id="login-pane">
+          <input id="login-user" type="text" placeholder="player name" autocomplete="username" spellcheck="false" />
+          <input id="login-pass" type="password" placeholder="password" autocomplete="current-password" />
+          <button id="login-connect">Connect</button>
+        </div>
+        <pre id="output"></pre>
+        <input id="input" type="text" autocomplete="off" spellcheck="false" />
+      </div>
+    </div>
+  </div>
+  <script type="module" src="/output/App.js"></script>
+</body>
+</html>
