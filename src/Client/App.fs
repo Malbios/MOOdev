@@ -869,6 +869,9 @@ and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
 
     for v in verbs do
         let tr = document.createElement ("tr")
+        tr.classList.add "inspector-verb-row"
+        let verbName: string = v?name
+        tr.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
 
         for cellText in [ v?name; v?perms; v?dobj; v?prep; v?iobj ] do
             let td = document.createElement ("td")

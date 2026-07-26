@@ -440,6 +440,14 @@ html, body {
   font-weight: normal;
 }
 
+.inspector-verb-row {
+  cursor: pointer;
+}
+
+.inspector-verb-row:hover {
+  background: #2a2a2a;
+}
+
 .inspector-property-value {
   width: 100%;
   box-sizing: border-box;
