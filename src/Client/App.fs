@@ -53,6 +53,7 @@ let private objectsPaneEl = document.getElementById ("objects-pane")
 
 let private mainTabsEl = document.getElementById ("main-tabs")
 let private tabGameBtn = document.getElementById ("tab-game")
+let private tabNearbyBtn = document.getElementById ("tab-nearby")
 let private verbTabsEl = document.getElementById ("verb-tabs")
 let private editorPaneEl = document.getElementById ("editor-pane")
 let private editorMonacoEl = document.getElementById ("editor-monaco")
@@ -63,6 +64,8 @@ let private terminalPaneEl = document.getElementById ("terminal-pane")
 let private inspectorPaneEl = document.getElementById ("inspector-pane")
 let private inspectorContentEl = document.getElementById ("inspector-content")
 let private inspectorDiagnosticsEl = document.getElementById ("inspector-diagnostics")
+let private nearbyPaneEl = document.getElementById ("nearby-pane")
+let private nearbyContentEl = document.getElementById ("nearby-content")
 
 let private appendOutput (text: string) : unit =
     outputEl.textContent <- outputEl.textContent + text
@@ -329,8 +332,15 @@ type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
     | InspectorTab of objRef: int64
+    | NearbyTab
 
 let mutable private activeTab: OpenTab = GameTab
+
+/// Whether a real MOO login has succeeded this session - set by the
+/// `moodev-login-result` handler. Nothing client-side previously needed this
+/// as a standing boolean; the Nearby tab uses it to skip firing
+/// `ide_get_location()` before there's a logged-in player to ask about.
+let mutable private isLoggedIn = false
 
 /// Open verb tabs, in the order they were opened. Game isn't stored here -
 /// it's permanent and rendered separately.
@@ -383,7 +393,8 @@ let private currentVerbDoc () : (int64 * string) option =
     match activeTab with
     | VerbTab(o, v) -> Some(o, v)
     | GameTab
-    | InspectorTab _ -> None
+    | InspectorTab _
+    | NearbyTab -> None
 
 /// Quotes and escapes a raw string for splicing into MOO source as a string
 /// literal - backslash and double-quote are the only two characters classic
@@ -472,11 +483,13 @@ let private showPaneFor (tab: OpenTab) : unit =
         terminalPaneEl.classList.add "active"
         editorPaneEl.classList.remove "active"
         inspectorPaneEl.classList.remove "active"
+        nearbyPaneEl.classList.remove "active"
         inputEl.focus ()
     | VerbTab _ ->
         terminalPaneEl.classList.remove "active"
         editorPaneEl.classList.add "active"
         inspectorPaneEl.classList.remove "active"
+        nearbyPaneEl.classList.remove "active"
         // The container was `display:none` a moment ago - force Monaco to
         // re-measure rather than rely on ResizeObserver picking this up.
         editor.layout ()
@@ -485,6 +498,12 @@ let private showPaneFor (tab: OpenTab) : unit =
         terminalPaneEl.classList.remove "active"
         editorPaneEl.classList.remove "active"
         inspectorPaneEl.classList.add "active"
+        nearbyPaneEl.classList.remove "active"
+    | NearbyTab ->
+        terminalPaneEl.classList.remove "active"
+        editorPaneEl.classList.remove "active"
+        inspectorPaneEl.classList.remove "active"
+        nearbyPaneEl.classList.add "active"
 
 /// Snapshots whatever's currently in the editor into `tabContent`, if the
 /// active tab is a verb - called right before navigating away from it.
@@ -492,7 +511,8 @@ let private cacheCurrentEditorContent () : unit =
     match activeTab with
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
     | GameTab
-    | InspectorTab _ -> ()
+    | InspectorTab _
+    | NearbyTab -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -589,7 +609,8 @@ let rec private switchToTab (tab: OpenTab) : unit =
 
         match tab with
         | GameTab
-        | InspectorTab _ -> ()
+        | InspectorTab _
+        | NearbyTab -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -635,7 +656,8 @@ and private closeTab (objRef: int64, verbName: string) : unit =
             editor.setValue (Map.find (o, v) tabContent)
             setDirty false
         | GameTab
-        | InspectorTab _ -> ()
+        | InspectorTab _
+        | NearbyTab -> ()
 
         showPaneFor activeTab
 
@@ -663,7 +685,8 @@ and private closeInspectorTab (objRef: int64) : unit =
         match activeTab with
         | InspectorTab o -> loadInspector o
         | GameTab
-        | VerbTab _ -> ()
+        | VerbTab _
+        | NearbyTab -> ()
 
     renderTabs ()
 
@@ -709,6 +732,30 @@ and private loadInspector (objRef: int64) : unit =
     |> Async.StartImmediate
 
     ws.send (sprintf "; $vcs:ide_get_properties(#%d)" objRef)
+
+/// Renders a titled list of clickable object links into `container` - shared
+/// by the inspector pane's Parents/Children sections and the Nearby pane's
+/// Exits/Contents sections. Each entry opens that object's own inspector on
+/// click.
+and private renderObjRefList (container: HTMLElement) (title: string) (refs: (int64 * string) list) : unit =
+    let section = document.createElement ("div")
+    let titleEl = document.createElement ("div")
+    titleEl.classList.add "inspector-section-title"
+    titleEl.textContent <- sprintf "%s (%d)" title refs.Length
+    section.appendChild titleEl |> ignore
+
+    let list = document.createElement ("div")
+    list.classList.add "inspector-refs"
+
+    for objRef, name in refs do
+        let link = document.createElement ("span")
+        link.classList.add "inspector-link"
+        link.textContent <- name
+        link.onclick <- fun _ -> openOrSwitchToInspector objRef
+        list.appendChild link |> ignore
+
+    section.appendChild list |> ignore
+    container.appendChild section |> ignore
 
 /// Builds the inspector pane's DOM from a `moodev/getObjectInfo` result:
 /// header, a clickable owner link, permission-flag badges, clickable
@@ -777,30 +824,13 @@ and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
 
     inspectorContentEl.appendChild flagsRow |> ignore
 
-    let renderRefSection (title: string) (refs: obj[]) : unit =
-        let section = document.createElement ("div")
-        let titleEl = document.createElement ("div")
-        titleEl.classList.add "inspector-section-title"
-        titleEl.textContent <- sprintf "%s (%d)" title refs.Length
-        section.appendChild titleEl |> ignore
+    // `?objRef` here is a value freshly parsed from the LSP's JSON response -
+    // see the matching comment on `ownerRef` above, same fix, same reason.
+    let toRefList (refs: obj[]) : (int64 * string) list =
+        refs |> Array.map (fun r -> int64 (r?objRef: float), (r?name: string)) |> Array.toList
 
-        let list = document.createElement ("div")
-        list.classList.add "inspector-refs"
-
-        for r in refs do
-            // See the matching comment on `ownerRef` above - same fix, same reason.
-            let refObjRef: int64 = int64 (r?objRef: float)
-            let link = document.createElement ("span")
-            link.classList.add "inspector-link"
-            link.textContent <- (r?name: string)
-            link.onclick <- fun _ -> openOrSwitchToInspector refObjRef
-            list.appendChild link |> ignore
-
-        section.appendChild list |> ignore
-        inspectorContentEl.appendChild section |> ignore
-
-    renderRefSection "Parents" (unbox info?parents)
-    renderRefSection "Children" (unbox info?children)
+    renderObjRefList inspectorContentEl "Parents" (toRefList (unbox info?parents))
+    renderObjRefList inspectorContentEl "Children" (toRefList (unbox info?children))
 
     let verbsSection = document.createElement ("div")
     let verbsTitle = document.createElement ("div")
@@ -899,6 +929,56 @@ and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
     propsSection.appendChild propsTable |> ignore
     inspectorContentEl.appendChild propsSection |> ignore
 
+/// Builds the Nearby pane's DOM from a parsed `moodev-location-content`
+/// payload: the room itself (name, clickable through to its own inspector),
+/// then its exits and non-player contents via the shared `renderObjRefList`.
+/// `roomRef = None` means the player has no valid location (see
+/// `$vcs:ide_get_location`'s own guard).
+and private renderNearbyStructure
+    (roomRef: int64 option)
+    (roomName: string)
+    (exits: (int64 * string) list)
+    (contents: (int64 * string) list)
+    : unit =
+    nearbyContentEl.innerHTML <- ""
+
+    match roomRef with
+    | None -> nearbyContentEl.textContent <- "Not in a valid location."
+    | Some room ->
+        let header = document.createElement ("div")
+        header.classList.add "inspector-header"
+
+        let roomLink = document.createElement ("span")
+        roomLink.classList.add "inspector-link"
+        roomLink.textContent <- roomName
+        roomLink.onclick <- fun _ -> openOrSwitchToInspector room
+        header.appendChild roomLink |> ignore
+        nearbyContentEl.appendChild header |> ignore
+
+        renderObjRefList nearbyContentEl "Exits" exits
+        renderObjRefList nearbyContentEl "Contents" contents
+
+/// Kicks off a fresh location fetch - always, even if Nearby is already the
+/// active tab (same "always fresh, no client cache" model `loadInspector`
+/// uses, for the same reason: this is live, mutable game state no
+/// client-side copy can be trusted to still be current).
+and private loadNearby () : unit =
+    nearbyContentEl.textContent <- "Loading..."
+    ws.send "; $vcs:ide_get_location()"
+
+/// Switches to the Nearby tab, then unconditionally refetches - simpler than
+/// `openOrSwitchToInspector`'s pattern since Nearby has no dynamic per-object
+/// tab list, it's a second permanent/pinned tab like Game. Guarded on
+/// `isLoggedIn` so clicking it before a real MOO login shows a plain
+/// placeholder instead of firing a request nothing will answer usefully.
+and private openOrSwitchToNearby () : unit =
+    switchToTab NearbyTab
+
+    if isLoggedIn then
+        loadNearby ()
+    else
+        nearbyContentEl.textContent <- "Connect and log in first."
+
 /// Rebuilds `#verb-tabs` (the dynamic, closable tabs) and the static
 /// `#tab-game` button's `.active` state. `#tab-game` itself is never
 /// recreated - only its highlight changes.
@@ -960,6 +1040,11 @@ and private renderTabs () : unit =
         tabGameBtn.classList.add "active"
     else
         tabGameBtn.classList.remove "active"
+
+    if activeTab = NearbyTab then
+        tabNearbyBtn.classList.add "active"
+    else
+        tabNearbyBtn.classList.remove "active"
 
 /// Selects `objRef` in the object list, refreshes the verb list for it, and
 /// (`autoSelectVerb` non-empty) opens a specific verb once the verb list
@@ -1023,6 +1108,7 @@ and private renderVerbsList () : unit =
             None
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
+tabNearbyBtn.onclick <- fun _ -> openOrSwitchToNearby ()
 // `switchToTab` no-ops when its argument already equals `activeTab` (to
 // avoid redundant work re-clicking the tab you're already on) - but
 // `activeTab` *starts* as `GameTab`, so that guard also skipped the very
@@ -1174,6 +1260,7 @@ ws.onmessage <-
                     if ok then "" else String.concat "\n" lines
             elif header.StartsWith("moodev-login-result") then
                 if headerField "ok: " header = Some "1" then
+                    isLoggedIn <- true
                     Login.hide ()
 
                     async {
@@ -1216,6 +1303,40 @@ ws.onmessage <-
                         inspectorDiagnosticsEl.textContent <- (if ok then "" else String.concat "\n" lines)
                     | _ -> ()
                 | None -> ()
+            elif header.StartsWith("moodev-location-content") then
+                // Each line is "kind<TAB>objref<TAB>name" (see
+                // `$vcs:ide_get_location`) - objref is "#N"-shaped
+                // (`tostr(OBJ)`, same convention every other `ide_*` verb
+                // uses), stripped of its leading '#' and parsed via
+                // `Int64.TryParse` here - a genuine string parse, not a bare
+                // dynamic cast on parsed JSON, so this can't reintroduce the
+                // JS-number-vs-BigInt bug the `ownerRef`/`refObjRef` comments
+                // above describe (that payload was never JSON to begin
+                // with). Only applied if Nearby is still the active tab -
+                // the user may have switched away before this round-trip
+                // returned.
+                if activeTab = NearbyTab then
+                    let mutable roomRef: int64 option = None
+                    let mutable roomName = ""
+                    let mutable exits: (int64 * string) list = []
+                    let mutable contents: (int64 * string) list = []
+
+                    for line in lines do
+                        let parts = line.Split('\t')
+
+                        if parts.Length = 3 then
+                            match System.Int64.TryParse(parts.[1].TrimStart '#') with
+                            | true, objRef ->
+                                match parts.[0] with
+                                | "room" ->
+                                    roomRef <- Some objRef
+                                    roomName <- parts.[2]
+                                | "exit" -> exits <- exits @ [ objRef, parts.[2] ]
+                                | "content" -> contents <- contents @ [ objRef, parts.[2] ]
+                                | _ -> ()
+                            | false, _ -> ()
+
+                    renderNearbyStructure roomRef roomName exits contents
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text
