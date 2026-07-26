@@ -347,9 +347,8 @@ let mutable private isLoggedIn = false
 let mutable private openVerbTabs: (int64 * string) list = []
 
 /// Open inspector tabs, in the order they were opened - parallel to
-/// `openVerbTabs`, but with none of that list's caching or preview-tab
-/// mechanics: an inspector tab is always permanent (one per object; opening
-/// an already-open one just switches to it) and its content is never cached
+/// `openVerbTabs`, including the same preview-tab mechanic (see
+/// `previewInspectorTab`). Unlike verb tabs, content is never cached
 /// client-side - see `loadInspector`'s own comment for why.
 let mutable private openInspectorTabs: int64 list = []
 
@@ -385,6 +384,15 @@ let mutable private tabContent: Map<int64 * string, string> = Map.empty
 /// already-open tab (preview or pinned) never changes this - only opening
 /// something *not yet open* does.
 let mutable private previewTab: (int64 * string) option = None
+
+/// Same "preview tab" mechanic as `previewTab`, for inspector tabs: at most
+/// one open inspector tab is a preview at a time (shown in italics via the
+/// same `.preview` CSS class). Opening a brand-new inspector while a preview
+/// exists replaces it in place rather than piling up tabs - useful since
+/// clicking through owner/parent/child/verb-object links tends to hop
+/// between objects quickly. Double-clicking pins it. Switching to an
+/// already-open tab (preview or pinned) never touches this.
+let mutable private previewInspectorTab: int64 option = None
 
 /// The `(objRef, verb) option` shape a couple of call sites still need
 /// (`saveIfDirty`, `Monaco.wireLsp`'s hover/definition callback) - derived
@@ -690,6 +698,7 @@ and private closeInspectorTab (objRef: int64) : unit =
     let wasActive = activeTab = InspectorTab objRef
     let idx = openInspectorTabs |> List.findIndex (fun r -> r = objRef)
     openInspectorTabs <- openInspectorTabs |> List.filter (fun r -> r <> objRef)
+    if previewInspectorTab = Some objRef then previewInspectorTab <- None
 
     if wasActive then
         activeTab <-
@@ -716,7 +725,16 @@ and private closeInspectorTab (objRef: int64) : unit =
 /// and "always fresh" are each handled in exactly one place.
 and private openOrSwitchToInspector (objRef: int64) : unit =
     if not (openInspectorTabs |> List.contains objRef) then
-        openInspectorTabs <- openInspectorTabs @ [ objRef ]
+        // Same preview-tab replacement `moodev-edit-content` does for verb
+        // tabs (see `previewTab`'s own comment) - replace the current
+        // preview inspector tab in place if there is one, otherwise append.
+        match previewInspectorTab with
+        | Some oldPreview ->
+            let idx = openInspectorTabs |> List.findIndex (fun r -> r = oldPreview)
+            openInspectorTabs <- openInspectorTabs |> List.mapi (fun i r -> if i = idx then objRef else r)
+        | None -> openInspectorTabs <- openInspectorTabs @ [ objRef ]
+
+        previewInspectorTab <- Some objRef
 
     switchToTab (InspectorTab objRef)
     loadInspector objRef
@@ -1034,18 +1052,27 @@ and private renderTabs () : unit =
         verbTabsEl.appendChild tab |> ignore
 
     // Inspector tabs share the same strip as verb tabs (an "ⓘ #N" label,
-    // same close-× behavior) but skip the preview-tab mechanic entirely -
-    // each is a permanent tab, and clicking one always re-loads it fresh
+    // same close-× behavior, and the same preview-tab mechanic) - unlike
+    // verb tabs, clicking one always re-loads it fresh
     // (`openOrSwitchToInspector`, not a bare `switchToTab`).
     for objRef in openInspectorTabs do
         let tab = document.createElement ("div")
         tab.classList.add "main-tab"
         if activeTab = InspectorTab objRef then tab.classList.add "active"
+        if previewInspectorTab = Some objRef then tab.classList.add "preview"
 
         let label = document.createElement ("span")
         label.classList.add "main-tab-label"
         label.textContent <- sprintf "ⓘ #%d" objRef
         label.onclick <- fun _ -> openOrSwitchToInspector objRef
+
+        // Double-click "pins" a preview inspector tab - same mechanic as
+        // verb tabs.
+        label.ondblclick <-
+            fun _ ->
+                if previewInspectorTab = Some objRef then
+                    previewInspectorTab <- None
+                    renderTabs ()
 
         let closeBtn = document.createElement ("button")
         closeBtn.classList.add "main-tab-close"
