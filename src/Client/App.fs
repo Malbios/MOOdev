@@ -738,7 +738,16 @@ and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
     if isNullOrUndefined ownerVal then
         ownerRow.appendChild (document.createTextNode "?") |> ignore
     else
-        let ownerRef: int64 = ownerVal?objRef
+        // `?objRef` here is a value freshly parsed from the LSP's JSON
+        // response - a plain JS number, not Fable's actual `int64` (a native
+        // `BigInt`, compared via `===` in `openInspectorTabs`' `List.contains`).
+        // Left as a bare dynamic cast, this silently fails to match against
+        // entries added via the sidebar's `int64 (value.TrimStart '#')`
+        // round-trip (a genuine `BigInt`), producing a duplicate tab instead
+        // of switching to the one already open - confirmed live. The
+        // explicit `int64 (... : float)` conversion below forces a real
+        // `BigInt`, matching the sidebar's path.
+        let ownerRef: int64 = int64 (ownerVal?objRef: float)
         let link = document.createElement ("span")
         link.classList.add "inspector-link"
         link.textContent <- (ownerVal?name: string)
@@ -779,7 +788,8 @@ and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
         list.classList.add "inspector-refs"
 
         for r in refs do
-            let refObjRef: int64 = r?objRef
+            // See the matching comment on `ownerRef` above - same fix, same reason.
+            let refObjRef: int64 = int64 (r?objRef: float)
             let link = document.createElement ("span")
             link.classList.add "inspector-link"
             link.textContent <- (r?name: string)
