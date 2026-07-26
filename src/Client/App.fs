@@ -529,6 +529,23 @@ let private headerField (marker: string) (header: string) : string option =
 
 let private isMcpMessage (data: obj) : bool = emitJsExpr data "typeof $0 === 'string'"
 
+/// Parses a "Line N:  message" compile-error string (set_verb_code()'s own
+/// format) into (line, message). Errors that don't match this shape (should
+/// not happen in practice, but not asserted) are just skipped for markers -
+/// they still show in the plain-text diagnostics area either way.
+let private parseErrorLine (line: string) : (int * string) option =
+    if line.StartsWith("Line ") then
+        let colonIdx = line.IndexOf(':')
+
+        if colonIdx > 5 then
+            match System.Int32.TryParse(line.Substring(5, colonIdx - 5)) with
+            | true, lineNum -> Some(lineNum, line.Substring(colonIdx + 1).TrimStart())
+            | false, _ -> None
+        else
+            None
+    else
+        None
+
 /// Replaces `listEl`'s children with one clickable `<li>` per `(value,
 /// label)` pair. When `items` is empty, shows a single unselectable
 /// placeholder instead - once there are real items, the list contains ONLY
@@ -1223,6 +1240,13 @@ ws.onmessage <-
                 // the user has edited yet, so undo that.
                 setDirty false
                 editorDiagnosticsEl.textContent <- ""
+                // Monaco reuses one editor instance (and its one underlying
+                // model) across every verb tab - `setValue` just replaces
+                // that model's text, it never creates a new model per verb -
+                // so without this, switching to a different verb would
+                // carry over stale squigglies from whatever verb was open
+                // before.
+                Monaco.setErrorMarkers editor []
 
                 match headerField "object: #" header, headerField "verb: " header with
                 | Some objNum, Some verb ->
@@ -1258,6 +1282,9 @@ ws.onmessage <-
 
                 editorDiagnosticsEl.textContent <-
                     if ok then "" else String.concat "\n" lines
+
+                let lineErrors = lines |> Array.toList |> List.choose parseErrorLine
+                Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
             elif header.StartsWith("moodev-login-result") then
                 if headerField "ok: " header = Some "1" then
                     isLoggedIn <- true

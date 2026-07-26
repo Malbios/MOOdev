@@ -120,7 +120,9 @@ let registerMoocodeLanguage () : unit =
     monaco?languages?setMonarchTokensProvider ("moocode", moocodeLanguage)
     monaco?languages?setLanguageConfiguration ("moocode", moocodeLanguageConfiguration)
 
-type ITextModel = obj
+type ITextModel =
+    /// Confirmed in the installed package's own `editor.api.d.ts:2093`.
+    abstract getLineMaxColumn: lineNumber: int -> int
 
 /// Just enough of Monaco's `IEditorAction` to invoke a built-in action by
 /// id - see `reindentLinesActionId` below for the one this app actually
@@ -177,6 +179,7 @@ type IStandaloneCodeEditor =
     /// same-document go-to-definition jump is actually visible, not just
     /// technically-moved off-screen.
     abstract revealPositionInCenter: position: obj -> unit
+    abstract getModel: unit -> ITextModel
 
 /// Creates a standalone editor in the given DOM element, defaulting to the
 /// "moocode" language and a dark theme matching the terminal's own styling.
@@ -197,6 +200,28 @@ let create (container: Browser.Types.HTMLElement) : IStandaloneCodeEditor =
               "minimap" ==> createObj [ "enabled" ==> true ] ]
 
     monaco?editor?create (container, options)
+
+/// Replaces every compile-error marker on `editor`'s current model with
+/// `lineErrors` (line number, message) - an empty list clears them. Owner
+/// string is just a namespace so this diagnostic source can't collide with
+/// another one setting markers on the same model; there's only one source
+/// today. `MarkerSeverity.Error = 8`, confirmed in editor.api.d.ts:90-95.
+let setErrorMarkers (editor: IStandaloneCodeEditor) (lineErrors: (int * string) list) : unit =
+    let model = editor.getModel ()
+
+    let markers =
+        lineErrors
+        |> List.map (fun (line, message) ->
+            createObj
+                [ "severity" ==> 8
+                  "message" ==> message
+                  "startLineNumber" ==> line
+                  "startColumn" ==> 1
+                  "endLineNumber" ==> line
+                  "endColumn" ==> model.getLineMaxColumn line ])
+        |> List.toArray
+
+    monaco?editor?setModelMarkers (model, "moocode-compile", markers)
 
 /// Wires the Phase 4.4 LSP server's hover/definition/completion/signature
 /// help/find-references into this Monaco instance for "moocode" - see
