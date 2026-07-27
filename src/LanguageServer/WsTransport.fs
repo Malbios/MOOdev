@@ -16,8 +16,7 @@ open LanguageServer.Handlers
 let run (socket: WebSocket) (graph: Graph) : unit =
     let handlings =
         Server.defaultRequestHandlings ()
-        |> Map.add "moodev/listObjects" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.ListObjects p))
-        |> Map.add "moodev/listVerbs" (Server.serverRequestHandling (fun (s: MooLspServer) (p: ListVerbsParams) -> s.ListVerbs p))
+        |> Map.add "moodev/getObjectTree" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetObjectTree p))
         |> Map.add "moodev/getObjectInfo" (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetObjectInfoParams) -> s.GetObjectInfo p))
 
     let clientCreator (_notify, _request) = new MooLspClient()

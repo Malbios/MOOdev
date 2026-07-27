@@ -26,6 +26,10 @@
         <input type="checkbox" id="setting-minimap" />
         Show minimap
       </label>
+      <label class="settings-row">
+        <input type="checkbox" id="setting-hide-empty-leaves" />
+        Hide empty leaf objects
+      </label>
       <div class="settings-row">
         <button id="setting-forget-login">Forget saved login</button>
         <span id="setting-forget-login-status"></span>
@@ -35,17 +39,9 @@
 
   <div id="layout">
     <div id="sidebar">
-      <div id="objects-pane">
-        <div class="sidebar-header">Objects</div>
-        <input id="objects-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
-        <ul id="objects-list" class="picker-list"></ul>
-      </div>
-      <div id="sidebar-split-resizer" class="resizer resizer-updown"></div>
-      <div id="verbs-pane">
-        <div class="sidebar-header">Verbs</div>
-        <input id="verbs-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
-        <ul id="verbs-list" class="picker-list"></ul>
-      </div>
+      <div class="sidebar-header">Objects</div>
+      <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
+      <ul id="tree-list" class="picker-list"></ul>
     </div>
     <div id="sidebar-resizer" class="resizer resizer-leftright"></div>
     <div id="main-pane">

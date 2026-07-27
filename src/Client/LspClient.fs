@@ -118,39 +118,45 @@ let private monacoCompletionKind (lspKind: int) : int =
     | 6 -> 4 // Variable
     | _ -> 18 // Text
 
-/// Custom method (not part of the LSP spec) - every object with at least
-/// one verb of its own, `(objRef, name)`, sorted by name (matching
-/// `Handlers.MooLspServer.ListObjects`'s own sort - relied on here rather
-/// than re-sorting client-side, so both ends agree on ordering).
-let listObjectsAsync () : Async<(int64 * string)[]> =
+/// Custom method (not part of the LSP spec) - one shot at login: the whole
+/// object universe (not just verb-owners), with parent/child edges and
+/// each object's own verb names folded in (matches
+/// `Handlers.MooLspServer.GetObjectTree`), so the sidebar tree never needs
+/// a per-click round trip to fetch a newly-expanded object's verbs.
+///
+/// Every ref here is read as `float` and explicitly converted via
+/// `int64 (...)`, never a bare `?field: int64` cast - a JSON-RPC ref is a
+/// plain JS number, not Fable's actual `int64` (a native `BigInt`), and a
+/// bare dynamic cast silently produces a value that looks right but fails
+/// `Map`/`Set` membership against genuine `int64`s built elsewhere (same
+/// class of bug `renderInspectorStructure`'s `ownerRef`/`toRefList` already
+/// hit and fixed for the inspector's parent/child refs - confirmed live
+/// there as a real "duplicate tab instead of switching to the open one"
+/// symptom, not a hypothetical).
+let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * string[])[]> =
     async {
-        let! result = requestAsync "moodev/listObjects" (createObj [])
+        let! result = requestAsync "moodev/getObjectTree" (createObj [])
 
         if isNullOrUndefined result then
             return [||]
         else
             let items: obj[] = unbox result
-            return items |> Array.map (fun o -> (o?objRef: int64), (o?name: string))
-    }
 
-/// Custom method - every verb defined directly on `objRef`, by primary
-/// name (matches `Handlers.MooLspServer.ListVerbs`).
-let listVerbsAsync (objRef: int64) : Async<string[]> =
-    async {
-        let! result = requestAsync "moodev/listVerbs" (createObj [ "objRef" ==> objRef ])
-
-        if isNullOrUndefined result then
-            return [||]
-        else
-            let items: obj[] = unbox result
-            return items |> Array.map (fun v -> v?name: string)
+            return
+                items
+                |> Array.map (fun o ->
+                    int64 (o?objRef: float),
+                    (o?name: string),
+                    ((o?parents: float[]) |> Array.map int64),
+                    ((o?children: float[]) |> Array.map int64),
+                    (o?verbs: string[]))
     }
 
 /// Custom method - the object inspector's structural data (owner, flags,
 /// parents/children, verbs, properties) for `objRef` (matches
 /// `Handlers.MooLspServer.GetObjectInfo`). Kept as a loosely-typed `obj`
 /// (dynamic `?` field access at the render site in `App.fs`), matching this
-/// file's existing style for `listObjectsAsync`/`listVerbsAsync` rather than
+/// file's existing style for `getObjectTreeAsync` rather than
 /// introducing heavier typed modeling just for this one screen. `None` if
 /// `objRef` isn't in the loaded graph at all.
 let getObjectInfoAsync (objRef: int64) : Async<obj option> =

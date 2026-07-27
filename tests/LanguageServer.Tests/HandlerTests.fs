@@ -549,57 +549,64 @@ let ``references to a verb with no callers anywhere returns an empty (not null) 
     | Ok None -> ()
     | other -> Assert.Fail(sprintf "expected Ok None (no VerbCall under cursor), got %A" other)
 
-// --- ListObjects / ListVerbs (custom, non-LSP-spec methods) --------------
+// --- GetObjectTree (custom, non-LSP-spec method) -------------------------
 
 [<Fact>]
-let ``ListObjects includes VCS, named, and excludes objects with no verbs`` () =
-    match server.Value.ListObjects(null) |> Async.RunSynchronously with
-    | Ok objects ->
-        // Name is now a full display label - live name (falling back to
-        // lookups.toml's sanitized name), the object number, then its
-        // corified $-name if registered - not just the bare sanitized name.
-        Assert.Contains(objects, (fun (o: ObjectSummary) -> o.Name = "VCS (#127) [$vcs]" && o.ObjRef = 127L))
-        Assert.True(objects.Length > 1)
-        // every entry must have at least one verb - the real Graph itself
-        // is the source of truth for which objects qualify, not a
-        // hardcoded count.
-        let allObjs = graph.Value.Objects
-
-        for o in objects do
-            let node = Map.find o.ObjRef allObjs
-            Assert.NotEmpty(node.Verbs)
+let ``GetObjectTree includes every object in the graph, not just verb-owners`` () =
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes -> Assert.Equal(graph.Value.Objects.Count, nodes.Length)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``ListObjects shows an object's real live name plus its corified $-name`` () =
+let ``GetObjectTree shows an object's real live name plus its corified $-name`` () =
     // #3 is "Generic Room" (real, space-containing live name) and is
     // registered as $room - the label should read from the real name, not
     // lookups.toml's sanitized "Generic_Room", and should surface the
     // corified alias too.
-    match server.Value.ListObjects(null) |> Async.RunSynchronously with
-    | Ok objects -> Assert.Contains(objects, (fun (o: ObjectSummary) -> o.Name = "Generic Room (#3) [$room]" && o.ObjRef = 3L))
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes -> Assert.Contains(nodes, (fun (n: ObjectTreeNode) -> n.Name = "Generic Room (#3) [$room]" && n.ObjRef = 3L))
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``ListObjects sorts by name`` () =
-    match server.Value.ListObjects(null) |> Async.RunSynchronously with
-    | Ok objects ->
-        let names = objects |> Array.map (fun o -> o.Name)
+let ``GetObjectTree sorts by name`` () =
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes ->
+        let names = nodes |> Array.map (fun n -> n.Name)
         Assert.Equal<string[]>(names, Array.sort names)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``ListVerbs on VCS includes every real verb by primary name`` () =
-    match server.Value.ListVerbs({ ObjRef = 127L }) |> Async.RunSynchronously with
-    | Ok verbs ->
-        let names = verbs |> Array.map (fun v -> v.Name) |> Set.ofArray
-        Assert.Contains("sanitize_name", names)
-        Assert.Contains("export_builtins", names)
-        Assert.Contains("export_metadata", names)
+let ``GetObjectTree's root class has no parents`` () =
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes ->
+        let root = nodes |> Array.find (fun n -> n.ObjRef = 1L)
+        Assert.Empty(root.Parents)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``ListVerbs on an object with no verbs returns an empty array, not an error`` () =
+let ``GetObjectTree's parent/child edges agree with each other`` () =
+    // #3 (Generic Room) is a direct child of #1 (Root Class) in the real
+    // corpus - the tree's edges should be consistent in both directions,
+    // not just individually plausible.
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes ->
+        let byRef = nodes |> Array.map (fun n -> n.ObjRef, n) |> Map.ofArray
+        Assert.Contains(1L, byRef.[3L].Parents)
+        Assert.Contains(3L, byRef.[1L].Children)
+    | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
+
+[<Fact>]
+let ``GetObjectTree reports VCS's own verbs by primary name`` () =
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes ->
+        let vcs = nodes |> Array.find (fun n -> n.ObjRef = 127L)
+        Assert.Contains("sanitize_name", vcs.Verbs)
+        Assert.Contains("export_builtins", vcs.Verbs)
+        Assert.Contains("export_metadata", vcs.Verbs)
+    | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
+
+[<Fact>]
+let ``GetObjectTree gives an object with no verbs of its own an empty Verbs array, not an error`` () =
     let noVerbsObj =
         graph.Value.Objects
         |> Map.toSeq
@@ -609,15 +616,9 @@ let ``ListVerbs on an object with no verbs returns an empty array, not an error`
     match noVerbsObj with
     | None -> () // every object in this corpus happens to have a verb - nothing to assert
     | Some o ->
-        match server.Value.ListVerbs({ ObjRef = o.Num }) |> Async.RunSynchronously with
-        | Ok verbs -> Assert.Empty(verbs)
+        match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+        | Ok nodes -> Assert.Empty((nodes |> Array.find (fun n -> n.ObjRef = o.Num)).Verbs)
         | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
-
-[<Fact>]
-let ``ListVerbs on an unknown object returns an empty array, not a crash`` () =
-    match server.Value.ListVerbs({ ObjRef = 999999L }) |> Async.RunSynchronously with
-    | Ok verbs -> Assert.Empty(verbs)
-    | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 // --- GetObjectInfo (custom, non-LSP-spec method) -------------------------
 

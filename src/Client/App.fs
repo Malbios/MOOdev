@@ -37,19 +37,16 @@ let private settingsCloseBtn = document.getElementById ("settings-close")
 let private settingWordWrapEl = document.getElementById ("setting-wordwrap") :?> HTMLInputElement
 let private settingFontSizeEl = document.getElementById ("setting-fontsize") :?> HTMLInputElement
 let private settingMinimapEl = document.getElementById ("setting-minimap") :?> HTMLInputElement
+let private settingHideEmptyLeavesEl = document.getElementById ("setting-hide-empty-leaves") :?> HTMLInputElement
 let private settingForgetLoginBtn = document.getElementById ("setting-forget-login")
 let private settingForgetLoginStatusEl = document.getElementById ("setting-forget-login-status")
 
 let private layoutEl = document.getElementById ("layout")
 
 let private sidebarEl = document.getElementById ("sidebar")
-let private objectsFilterEl = document.getElementById ("objects-filter") :?> HTMLInputElement
-let private objectsListEl = document.getElementById ("objects-list")
-let private verbsFilterEl = document.getElementById ("verbs-filter") :?> HTMLInputElement
-let private verbsListEl = document.getElementById ("verbs-list")
+let private treeFilterEl = document.getElementById ("tree-filter") :?> HTMLInputElement
+let private treeListEl = document.getElementById ("tree-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
-let private sidebarSplitResizerEl = document.getElementById ("sidebar-split-resizer")
-let private objectsPaneEl = document.getElementById ("objects-pane")
 let private sidebarToggleBtn = document.getElementById ("sidebar-toggle")
 
 let private mainTabsEl = document.getElementById ("main-tabs")
@@ -72,14 +69,16 @@ let private appendOutput (text: string) : unit =
     outputEl.textContent <- outputEl.textContent + text
     outputEl.scrollTop <- outputEl.scrollHeight
 
-/// Draggable dividers between panes - two of them (sidebar/main-area,
-/// objects/verbs within the sidebar), each independently resizable and
+/// Draggable divider between the sidebar and the main area, resizable and
 /// persisted across reloads via localStorage, same "remember what the user
 /// set" idea as command history's in-memory list, just surviving a refresh
-/// too. (The editor/terminal split used to be a third one, but that pair is
-/// now tabs sharing one space instead of a resizable split.)
+/// too. (Used to also split the sidebar's objects/verbs panes, and the
+/// editor/terminal split before that - both are gone now, folded into the
+/// unified tree and tabs respectively - but the module stays generic over
+/// both drag axes since a future resizable split is one `PaneResizer.init`
+/// call away either way.)
 ///
-/// Both share one pair of `window`-level mouse handlers rather than each
+/// Uses one pair of `window`-level mouse handlers rather than each resizer
 /// owning its own - assigning `window.onmousemove` replaces whatever
 /// handler was there before, so independent per-resizer handlers would just
 /// keep clobbering each other. Instead, one shared mutable "which resizer
@@ -278,11 +277,25 @@ module private Settings =
     let private wordWrapKey = "moodev-wordwrap" // "on" | "off", matches Monaco's own value domain
     let private fontSizeKey = "moodev-fontsize" // stringified int
     let private minimapKey = "moodev-minimap" // "on" | "off"
+    let private hideEmptyLeavesKey = "moodev-hide-empty-leaves" // "on" | "off"
 
     let private loadString (key: string) (fallback: string) : string =
         match window.localStorage.getItem key with
         | null -> fallback
         | v -> v
+
+    /// Default ON: once the tree includes the full object universe (not
+    /// just verb-owners, like the old flat list), pure dead-ends (no
+    /// children, no verbs of their own - stray/leftover objects) are almost
+    /// always noise for day-to-day editing. Hiding them by default keeps
+    /// the common case at least as compact as the old, familiar list; the
+    /// checkbox lets a rarer "audit the whole database" session turn them
+    /// back on. Read directly (not cached) since it only needs checking
+    /// once per tree render, not on any hot path.
+    let hideEmptyLeavesEnabled () : bool = loadString hideEmptyLeavesKey "on" = "on"
+
+    let setHideEmptyLeaves (enabled: bool) : unit =
+        window.localStorage.setItem (hideEmptyLeavesKey, (if enabled then "on" else "off"))
 
     let private apply (wordWrap: string) (fontSize: int) (minimap: bool) : unit =
         editor.updateOptions (
@@ -328,10 +341,15 @@ module private Settings =
         settingWordWrapEl.``checked`` <- (wordWrap = "on")
         settingFontSizeEl.value <- string fontSize
         settingMinimapEl.``checked`` <- minimap
+        settingHideEmptyLeavesEl.``checked`` <- hideEmptyLeavesEnabled ()
 
         settingWordWrapEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingFontSizeEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingMinimapEl.onchange <- fun _ -> applyAndSaveFromControls ()
+        // The hide-empty-leaves checkbox's onchange redraws the tree, not
+        // just Monaco (unlike the three above) - wired separately, later in
+        // this file, once `renderTree` exists (this module is defined
+        // before it).
 
         settingForgetLoginBtn.onclick <-
             fun _ ->
@@ -585,75 +603,79 @@ let private parseErrorLine (line: string) : (int * string) option =
     else
         None
 
-/// Replaces `listEl`'s children with one clickable `<li>` per `(value,
-/// label)` pair. When `items` is empty, shows a single unselectable
-/// placeholder instead - once there are real items, the list contains ONLY
-/// those (no permanent blank entry to navigate past), each highlighted via
-/// `isSelected` and wired to `onClick`. `secondaryIcon`, when `Some`, adds a
-/// small "ⓘ" button to each row (used by the objects list to open that
-/// object's inspector without disturbing the row's own click behavior;
-/// `None` for the verbs list, which has no such secondary action).
-let private renderList
-    (listEl: HTMLElement)
-    (placeholder: string)
-    (items: (string * string) seq)
-    (isSelected: string -> bool)
-    (onClick: string -> unit)
-    (secondaryIcon: (string -> unit) option)
-    : unit =
-    listEl.innerHTML <- ""
-    let itemsList = items |> List.ofSeq
-
-    if List.isEmpty itemsList then
-        let li = document.createElement ("li")
-        li.textContent <- placeholder
-        li.classList.add "placeholder"
-        listEl.appendChild li |> ignore
-    else
-        for value, label in itemsList do
-            let li = document.createElement ("li")
-
-            match secondaryIcon with
-            | None -> li.textContent <- label
-            | Some onIconClick ->
-                li.classList.add "picker-row"
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- label
-                li.appendChild labelSpan |> ignore
-
-                let iconBtn = document.createElement ("button")
-                iconBtn.classList.add "picker-row-icon"
-                iconBtn.textContent <- "ⓘ" // ⓘ
-                iconBtn.title <- "Open inspector"
-                iconBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; onIconClick value
-                li.appendChild iconBtn |> ignore
-
-            if isSelected value then li.classList.add "selected"
-            li.onclick <- fun _ -> onClick value
-            listEl.appendChild li |> ignore
-
-/// All objects the object list currently knows about (populated once, on
-/// login) - kept around so `renderObjectsList` can re-render just the
-/// `.selected` highlight without re-fetching.
-let mutable private allObjects: (int64 * string)[] = [||]
-
-/// Which object's verbs the verb list is currently showing, if any.
-let mutable private selectedObjRef: int64 option = None
-
-/// The verb list's data for `selectedObjRef` - cached so `renderVerbsList`
-/// can refresh the `.selected` highlight (e.g. right after a verb finishes
-/// loading) without re-fetching from the server.
-let mutable private currentVerbsForSelectedObj: string[] = [||]
-
-/// Live filter text for each list, updated on every keystroke in the
-/// corresponding filter box - see the `oninput` wiring below.
-let mutable private objectsFilterText = ""
-let mutable private verbsFilterText = ""
-
 /// Case-insensitive substring match - an empty filter matches everything.
 let private matchesFilter (filterText: string) (label: string) : bool =
     filterText = "" || label.ToLowerInvariant().Contains(filterText.ToLowerInvariant())
+
+/// One in-memory node per object, built once from `LspClient.getObjectTreeAsync`'s
+/// flat response at login - keyed by objRef (`treeNodes`) so parent/child
+/// lookups don't re-scan the array. `Verbs` is this object's own verbs
+/// only (already filtered server-side), in the server's declaration order -
+/// never re-fetched per click, unlike the old per-selection `listVerbsAsync`
+/// round-trip.
+type private TreeNode =
+    { ObjRef: int64
+      Name: string
+      Parents: int64[]
+      Children: int64[]
+      Verbs: string[] }
+
+let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
+
+/// True roots of the object tree - objects with zero parents (`$root_class`
+/// and a handful of others, confirmed against the real corpus rather than
+/// assumed: `parents(obj)` already returns `{}` for a parentless object,
+/// no sentinel ref filtering needed).
+let mutable private rootRefs: int64[] = [||]
+
+let private buildTree (nodes: (int64 * string * int64[] * int64[] * string[])[]) : unit =
+    treeNodes <-
+        nodes
+        |> Array.map (fun (objRef, name, parents, children, verbs) ->
+            objRef, { ObjRef = objRef; Name = name; Parents = parents; Children = children; Verbs = verbs })
+        |> Map.ofArray
+
+    rootRefs <-
+        nodes
+        |> Array.filter (fun (_, _, parents, _, _) -> Array.isEmpty parents)
+        |> Array.map (fun (objRef, _, _, _, _) -> objRef)
+
+/// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
+/// expanding #7 once should reveal its children under *every* parent it
+/// appears under (the object graph is a DAG - see the project plan's
+/// "Known hazards"), not just the occurrence that was clicked, since expand
+/// state belongs to the object, not to one place it happens to be reachable
+/// from. Reset on every fresh login/tree rebuild, never persisted across
+/// reloads - unlike the font-size/word-wrap settings (stable preferences),
+/// which nodes are expanded is transient exploration state, and the
+/// filter's auto-expand (below) already covers "reveal what I'm looking
+/// for" on demand.
+let mutable private expandedRefs: Set<int64> = Set.empty
+
+/// Every ancestor of `objRef`, walking `Parents` upward, recursively - a
+/// DAG node can have more than one parent path to a root, so this returns
+/// every one of them, not just one. `visited` is a defensive cycle guard
+/// (the graph shouldn't have cycles, but a hand-edited `metadata.json`
+/// could introduce one - without this, that would hang the tab). Shared by
+/// both the filter's auto-expand and go-to-definition's reveal.
+let rec private ancestorsOf (visited: Set<int64>) (objRef: int64) : Set<int64> =
+    if Set.contains objRef visited then
+        Set.empty
+    else
+        let visited = Set.add objRef visited
+
+        match Map.tryFind objRef treeNodes with
+        | None -> Set.empty
+        | Some node -> node.Parents |> Array.fold (fun acc p -> Set.add p acc |> Set.union (ancestorsOf visited p)) Set.empty
+
+/// Live filter text, updated on every keystroke in the tree's filter box -
+/// see the `oninput` wiring below.
+let mutable private treeFilterText = ""
+
+/// One row of the flattened, currently-visible tree.
+type private TreeRow =
+    | ObjectRow of objRef: int64 * depth: int * isExpandable: bool
+    | VerbRow of objRef: int64 * verbName: string * depth: int
 
 /// Switches the main area to `tab`, caching whatever was showing before the
 /// switch. A no-op if `tab` is already active (e.g. clicking the tab you're
@@ -675,13 +697,13 @@ let rec private switchToTab (tab: OpenTab) : unit =
 
         showPaneFor tab
         renderTabs ()
-        renderVerbsList ()
+        renderTree ()
 
 /// Opens `(objRef, verbName)` - switches instantly from the client-side
 /// cache if it's already an open tab, otherwise fetches it from the server
 /// (the `moodev-edit-content` handler below adds it to `openVerbTabs` and
-/// switches to it once the content arrives). Used by the sidebar verb
-/// list's click handler and by go-to-definition (via `selectObject`) - both
+/// switches to it once the content arrives). Used by the tree's verb-row
+/// click handler and by go-to-definition (via `revealAndOpenVerb`) - both
 /// funnel every verb-open through here so "already open" is checked in
 /// exactly one place.
 and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
@@ -718,7 +740,7 @@ and private closeTab (objRef: int64, verbName: string) : unit =
         showPaneFor activeTab
 
     renderTabs ()
-    renderVerbsList ()
+    renderTree ()
 
 /// Closes an open inspector tab. If it was the active one, falls back the
 /// same way `closeTab` does for verb tabs (the tab to its left, or the new
@@ -830,8 +852,8 @@ and private renderObjRefList (container: HTMLElement) (title: string) (refs: (in
 /// once `ide_get_properties`'s response arrives, matched up by property
 /// name via `inspectorPropertyInputs`). Kept as loosely-typed `obj` (dynamic
 /// `?` field access), matching this file's existing style for
-/// `listObjectsAsync`/`listVerbsAsync`'s results rather than introducing
-/// heavier typed modeling for this one screen.
+/// `getObjectTreeAsync`'s results rather than introducing heavier typed
+/// modeling for this one screen.
 and private renderInspectorStructure (objRef: int64) (info: obj) : unit =
     inspectorContentEl.innerHTML <- ""
     inspectorPropertyInputs <- Map.empty
@@ -1124,66 +1146,173 @@ and private renderTabs () : unit =
     else
         tabNearbyBtn.classList.remove "active"
 
-/// Selects `objRef` in the object list, refreshes the verb list for it, and
-/// (`autoSelectVerb` non-empty) opens a specific verb once the verb list
-/// loads - used both by the object list's own click handler (no verb chosen
-/// yet) and by `LspClient`'s go-to-definition jump (which knows exactly
-/// which verb it wants open in the newly-selected object). Resets the verb
-/// filter on every switch - an old query carried over from a different
-/// object's verb set is more likely to confuse than help.
-and private selectObject (objRef: int64) (autoSelectVerb: string option) : unit =
-    selectedObjRef <- Some objRef
-    currentVerbsForSelectedObj <- [||]
-    verbsFilterText <- ""
-    verbsFilterEl.value <- ""
-    renderObjectsList ()
-    renderVerbsList ()
+/// True if `node` itself is a filter match - its display name, or any of
+/// its own verb names.
+and private nodeMatches (filterText: string) (node: TreeNode) : bool =
+    matchesFilter filterText node.Name || node.Verbs |> Array.exists (matchesFilter filterText)
 
-    async {
-        let! verbs = LspClient.listVerbsAsync objRef
-        currentVerbsForSelectedObj <- verbs
-        renderVerbsList ()
+/// Every objRef that needs to be expanded for at least one filter match to
+/// be reachable - a match's *every* parent, recursively (via `ancestorsOf`),
+/// since a DAG node can have more than one parent path to a root and each
+/// occurrence needs its own ancestor chain expanded for the match to be
+/// visible wherever it appears.
+and private ancestorExpansionSet (filterText: string) : Set<int64> =
+    if filterText = "" then
+        Set.empty
+    else
+        treeNodes
+        |> Map.toSeq
+        |> Seq.map snd
+        |> Seq.filter (nodeMatches filterText)
+        |> Seq.map (fun n -> n.ObjRef)
+        |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
 
-        match autoSelectVerb with
-        | Some verb when verbs |> Array.contains verb -> openOrSwitchToVerb objRef verb
-        | _ -> ()
-    }
-    |> Async.StartImmediate
+/// One row of the flattened, currently-*visible* tree - either an object
+/// (with its depth and whether it has anything to expand into) or one of
+/// an expanded object's own verbs.
+and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (roots: int64[]) : TreeRow list =
+    let childrenOf (node: TreeNode) : int64[] =
+        node.Children
+        |> Array.filter (fun childRef ->
+            not hideEmptyLeaves
+            || match Map.tryFind childRef treeNodes with
+               | None -> true // unknown ref - show rather than silently drop
+               | Some c -> not (Array.isEmpty c.Children) || not (Array.isEmpty c.Verbs))
 
-and private renderObjectsList () : unit =
-    let filtered =
-        allObjects
-        |> Array.map (fun (objRef, name) -> sprintf "#%d" objRef, name)
-        |> Array.filter (fun (_, label) -> matchesFilter objectsFilterText label)
+    let byName (r: int64) =
+        Map.tryFind r treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue ""
 
-    let placeholder = if objectsFilterText <> "" then "no matches" else "no objects yet"
+    let rec go (visited: Set<int64>) (depth: int) (objRef: int64) : TreeRow list =
+        match Map.tryFind objRef treeNodes with
+        | None -> []
+        | Some _ when Set.contains objRef visited ->
+            [ ObjectRow(objRef, depth, false) ] // cycle guard: render once, never recurse again
+        | Some node ->
+            let visited = Set.add objRef visited
+            let visibleChildren = childrenOf node
+            let isExpandable = not (Array.isEmpty visibleChildren) || not (Array.isEmpty node.Verbs)
+            let selfRow = ObjectRow(objRef, depth, isExpandable)
 
-    renderList
-        objectsListEl
-        placeholder
-        filtered
-        (fun value -> selectedObjRef = Some(int64 (value.TrimStart '#')))
-        (fun value -> selectObject (int64 (value.TrimStart '#')) None)
-        (Some(fun value -> openOrSwitchToInspector (int64 (value.TrimStart '#'))))
+            if not (Set.contains objRef expanded) then
+                [ selfRow ]
+            else
+                let verbRows = node.Verbs |> Array.map (fun v -> VerbRow(objRef, v, depth + 1)) |> List.ofArray
 
-and private renderVerbsList () : unit =
-    match selectedObjRef with
-    | None -> renderList verbsListEl "select an object" [||] (fun _ -> false) (fun _ -> ()) None
-    | Some objRef ->
-        let filtered =
-            currentVerbsForSelectedObj
-            |> Array.map (fun v -> v, v)
-            |> Array.filter (fun (_, label) -> matchesFilter verbsFilterText label)
+                let childRows =
+                    visibleChildren
+                    |> Array.sortBy byName
+                    |> Array.collect (fun r -> go visited (depth + 1) r |> Array.ofList)
+                    |> List.ofArray
 
-        let placeholder = if verbsFilterText <> "" then "no matches" else "no verbs"
+                selfRow :: (verbRows @ childRows)
 
-        renderList
-            verbsListEl
-            placeholder
-            filtered
-            (fun v -> activeTab = VerbTab(objRef, v))
-            (fun verbName -> openOrSwitchToVerb objRef verbName)
-            None
+    roots |> Array.sortBy byName |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
+
+/// Renders the currently-visible tree into `#tree-list` - reuses
+/// `renderList`'s old DOM idiom (`.picker-row`/`.picker-row-icon`/
+/// `.selected`/`.placeholder`), plus depth indentation and an expand
+/// chevron on object rows.
+and private renderTreeRows (rows: TreeRow list) : unit =
+    treeListEl.innerHTML <- ""
+
+    if List.isEmpty rows then
+        let li = document.createElement ("li")
+        li.textContent <- (if treeFilterText <> "" then "no matches" else "no objects yet")
+        li.classList.add "placeholder"
+        treeListEl.appendChild li |> ignore
+    else
+        for row in rows do
+            let li = document.createElement ("li")
+            li.classList.add "picker-row"
+            li.classList.add "tree-row"
+
+            match row with
+            | ObjectRow(objRef, depth, isExpandable) ->
+                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
+
+                let chevron = document.createElement ("span")
+                chevron.classList.add "tree-chevron"
+
+                if isExpandable then
+                    chevron.textContent <- (if Set.contains objRef expandedRefs then "▾" else "▸")
+
+                li.appendChild chevron |> ignore
+
+                let labelSpan = document.createElement ("span")
+
+                labelSpan.textContent <-
+                    (Map.tryFind objRef treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" objRef))
+
+                li.appendChild labelSpan |> ignore
+
+                let iconBtn = document.createElement ("button")
+                iconBtn.classList.add "picker-row-icon"
+                iconBtn.textContent <- "ⓘ"
+                iconBtn.title <- "Open inspector"
+                iconBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; openOrSwitchToInspector objRef
+                li.appendChild iconBtn |> ignore
+
+                if activeTab = InspectorTab objRef then
+                    li.classList.add "selected"
+
+                li.onclick <-
+                    fun _ ->
+                        if isExpandable then
+                            expandedRefs <-
+                                if Set.contains objRef expandedRefs then Set.remove objRef expandedRefs
+                                else Set.add objRef expandedRefs
+
+                            renderTree ()
+            | VerbRow(objRef, verbName, depth) ->
+                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
+                let labelSpan = document.createElement ("span")
+                labelSpan.textContent <- verbName
+                li.appendChild labelSpan |> ignore
+
+                if activeTab = VerbTab(objRef, verbName) then
+                    li.classList.add "selected"
+
+                li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+
+            treeListEl.appendChild li |> ignore
+
+/// Recomputes and redraws the visible tree from `treeNodes`/`expandedRefs`/
+/// `treeFilterText` - the single entry point every state change (expand
+/// toggle, filter keystroke, tab switch, hide-empty-leaves setting) calls
+/// to stay in sync, matching this file's existing "full rebuild, no
+/// incremental DOM patching" style.
+and private renderTree () : unit =
+    let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
+
+    if treeFilterText = "" then
+        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs rootRefs)
+    else
+        let ancestorRefs = ancestorExpansionSet treeFilterText
+        let expanded = Set.union expandedRefs ancestorRefs
+        let allRows = flattenVisibleRows hideEmptyLeaves expanded rootRefs
+
+        // Keep a row if it's itself a match, or an ancestor object-row on
+        // the way to one - verb rows never need to survive purely as
+        // ancestors, only object rows do (expansion only ever reveals a
+        // path *down* to a match).
+        allRows
+        |> List.filter (fun row ->
+            match row with
+            | ObjectRow(objRef, _, _) ->
+                Set.contains objRef ancestorRefs
+                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false)
+            | VerbRow(_, verbName, _) -> matchesFilter treeFilterText verbName)
+        |> renderTreeRows
+
+/// Reveals `objRef` in the tree (expanding every ancestor path to it) and
+/// opens `verbName` directly - used by go-to-definition, which already
+/// knows exactly which verb it wants open. The bulk tree has every
+/// object's own verbs in memory already, so there's nothing to wait on the
+/// way the old `selectObject`/`listVerbsAsync` round-trip did.
+and private revealAndOpenVerb (objRef: int64) (verbName: string) : unit =
+    expandedRefs <- Set.union expandedRefs (Set.add objRef (ancestorsOf Set.empty objRef))
+    renderTree ()
+    openOrSwitchToVerb objRef verbName
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
 tabNearbyBtn.onclick <- fun _ -> openOrSwitchToNearby ()
@@ -1196,21 +1325,22 @@ tabNearbyBtn.onclick <- fun _ -> openOrSwitchToNearby ()
 showPaneFor GameTab
 renderTabs ()
 
-objectsFilterEl.oninput <-
+treeFilterEl.oninput <-
     fun _ ->
-        objectsFilterText <- objectsFilterEl.value
-        renderObjectsList ()
+        treeFilterText <- treeFilterEl.value
+        renderTree ()
 
-verbsFilterEl.oninput <-
+// Persistence + the checkbox's initial `checked` state are handled inside
+// `Settings.init()` already (called earlier, before `renderTree` existed) -
+// this just wires the redraw, now that it's in scope.
+settingHideEmptyLeavesEl.onchange <-
     fun _ ->
-        verbsFilterText <- verbsFilterEl.value
-        renderVerbsList ()
+        Settings.setHideEmptyLeaves settingHideEmptyLeavesEl.``checked``
+        renderTree ()
 
-// Both lists start out showing their empty-state placeholder - the objects
-// list is populated for real once `moodev-login-result` confirms a login
-// (see below); the verbs list stays on "select an object" until then.
-renderObjectsList ()
-renderVerbsList ()
+// Starts out showing its empty-state placeholder - populated for real once
+// `moodev-login-result` confirms a login (see below).
+renderTree ()
 
 ws.onopen <-
     fun _ ->
@@ -1220,14 +1350,13 @@ ws.onopen <-
         // first. A non-programmer just sees E_PERM in the diagnostics area
         // on save - see $vcs:ide_fetch/ide_save, which both check
         // player.programmer server-side regardless of what the client
-        // shows. The object *list* is stricter, though - see the
+        // shows. The tree is stricter, though - see the
         // `moodev-login-result` handler below - it stays empty until a real
         // MOO login succeeds, since the metadata graph it's drawn from has
         // nothing to do with which (if any) account this session is using.
         sidebarEl.classList.add ("visible")
         mainTabsEl.classList.add ("visible")
         PaneResizer.init PaneResizer.LeftRight "moodev-sidebar-width-pct" layoutEl sidebarResizerEl sidebarEl
-        PaneResizer.init PaneResizer.UpDown "moodev-objects-verbs-split-pct" sidebarEl sidebarSplitResizerEl objectsPaneEl
         Sidebar.init ()
         Login.init (fun cmd -> ws.send cmd)
 
@@ -1333,10 +1462,9 @@ ws.onmessage <-
                         activeTab <- VerbTab(objRef, verb)
                         showPaneFor activeTab
                         renderTabs ()
-                        // Refresh the verb list's highlight to follow
-                        // whatever just opened - cheap, reuses the
-                        // already-cached verb list.
-                        renderVerbsList ()
+                        // Refresh the tree's highlight to follow whatever
+                        // just opened - cheap, reuses the already-built tree.
+                        renderTree ()
                     | false, _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-edit-result") then
@@ -1353,9 +1481,10 @@ ws.onmessage <-
                     Login.hide ()
 
                     async {
-                        let! objects = LspClient.listObjectsAsync ()
-                        allObjects <- objects
-                        renderObjectsList ()
+                        let! nodes = LspClient.getObjectTreeAsync ()
+                        buildTree nodes
+                        expandedRefs <- Set.empty
+                        renderTree ()
                     }
                     |> Async.StartImmediate
             elif header.StartsWith("moodev-prop-content") then
@@ -1436,9 +1565,9 @@ Monaco.wireLsp
         if activeTab = VerbTab(objRef, verbName) then
             // Same document (e.g. a local variable's definition, which
             // always targets the verb already open) - already loaded, so
-            // the cursor can move right away; going through `selectObject`
-            // would just no-op anyway (`switchToTab` skips work when its
-            // argument already equals `activeTab`).
+            // the cursor can move right away; going through
+            // `revealAndOpenVerb` would just no-op anyway (`switchToTab`
+            // skips work when its argument already equals `activeTab`).
             editor.setPosition (createObj [ "lineNumber" ==> line; "column" ==> col ])
             editor.revealPositionInCenter (createObj [ "lineNumber" ==> line; "column" ==> col ])
         else
@@ -1447,7 +1576,7 @@ Monaco.wireLsp
             // per-statement spans to offer), which is where a freshly-
             // loaded verb's cursor starts anyway, so nothing more to do
             // once it's open.
-            selectObject objRef (Some verbName))
+            revealAndOpenVerb objRef verbName)
     (fun message -> editorDiagnosticsEl.textContent <- message)
 
 inputEl.focus ()

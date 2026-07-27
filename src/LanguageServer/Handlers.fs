@@ -14,13 +14,27 @@ open Language.Ast
 open Metadata.Schema
 
 /// Custom, non-LSP-spec request/result shapes for populating the editor's
-/// object/verb pickers - `WsTransport.fs` registers these alongside the
-/// standard handlers via `Server.serverRequestHandling`, the same escape
-/// hatch the plan's `moodev-caveat://` URI extension already uses for
-/// "this host needs something the base spec doesn't have a slot for."
-type ObjectSummary = { ObjRef: ObjRef; Name: string }
-type VerbSummary = { Name: string }
-type ListVerbsParams = { ObjRef: ObjRef }
+/// object tree - `WsTransport.fs` registers these alongside the standard
+/// handlers via `Server.serverRequestHandling`, the same escape hatch the
+/// plan's `moodev-caveat://` URI extension already uses for "this host
+/// needs something the base spec doesn't have a slot for."
+///
+/// One node of the full object tree, sent in one shot at login rather than
+/// per-click - the whole graph is small (a personal MOO's database), and
+/// the client's filter needs to search arbitrarily deep with no latency,
+/// so there's nothing to gain from a lazier per-object fetch. Flat + edges
+/// rather than a nested JSON shape - the object graph is a DAG (see
+/// "Known hazards" in the project plan), so a node can need to appear
+/// under more than one parent; the client rebuilds parent-to-children
+/// adjacency itself from these edges rather than this server picking one
+/// parent arbitrarily.
+type ObjectTreeNode =
+    { ObjRef: ObjRef
+      Name: string
+      Parents: ObjRef[]
+      Children: ObjRef[]
+      Verbs: string[] }
+
 type GetObjectInfoParams = { ObjRef: ObjRef }
 
 /// A parent/child/owner reference in `ObjectInfo`, pre-formatted with the
@@ -760,47 +774,35 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                             return Ok(Some(confirmed.ToArray()))
         }
 
-    /// Custom method (`moodev/listObjects`, no params) - every object that
-    /// has at least one verb of its own, sorted by name, for the editor's
-    /// object picker. `Name` here is a fully-formatted display label - the
+    /// Custom method (`moodev/getObjectTree`, no params) - every object in
+    /// the graph (not just ones with verbs of their own - the client's tree
+    /// needs the full structural chain to reach them), with parent/child
+    /// edges and own-verb names (declaration order, not inherited - matches
+    /// `$vcs:ide_fetch`/`ide_save`'s own scope, which only ever operates on
+    /// a verb literally defined on the object you name), for the editor's
+    /// object tree. `Name` is a fully-formatted display label - the
     /// object's real (unsanitized) live name, its object number, and its
     /// corified `$name` if it's registered as one of `#0`'s properties, e.g.
     /// "Generic Room (#3) [$room]" - not `lookups.toml`'s sanitized
     /// "Generic_Room" (that's a git-directory-safe name, not meant for a
     /// human-facing picker). Falls back to `#N` alone if the object has
     /// neither a live name nor a `lookups.toml` entry.
-    member _.ListObjects(_p: obj) : Async<Result<ObjectSummary[], JsonRpc.Error>> =
+    member _.GetObjectTree(_p: obj) : Async<Result<ObjectTreeNode[], JsonRpc.Error>> =
         async {
-            let objects =
+            let nodes =
                 graph.Objects
                 |> Map.toSeq
-                |> Seq.map snd
-                |> Seq.filter (fun o -> not (List.isEmpty o.Verbs))
-                |> Seq.map (fun o -> { ObjRef = o.Num; Name = displayNameFor graph o.Num }: ObjectSummary)
-                |> Seq.sortBy (fun o -> o.Name)
+                |> Seq.map (fun (_, o) ->
+                    { ObjRef = o.Num
+                      Name = displayNameFor graph o.Num
+                      Parents = o.Parents |> Array.ofList
+                      Children = o.Children |> Array.ofList
+                      Verbs = o.Verbs |> List.choose (fun v -> v.Meta.Names |> List.tryHead) |> Array.ofList }
+                    : ObjectTreeNode)
+                |> Seq.sortBy (fun n -> n.Name)
                 |> Array.ofSeq
 
-            return Ok objects
-        }
-
-    /// Custom method (`moodev/listVerbs`, `{objRef}`) - every verb defined
-    /// directly on `objRef` (not inherited - matches `$vcs:ide_fetch`/
-    /// `ide_save`'s own scope, which only ever operate on a verb literally
-    /// defined on the object you name), by primary name, for the editor's
-    /// verb picker.
-    member _.ListVerbs(p: ListVerbsParams) : Async<Result<VerbSummary[], JsonRpc.Error>> =
-        async {
-            let verbs =
-                graph.Objects
-                |> Map.tryFind p.ObjRef
-                |> Option.map (fun o ->
-                    o.Verbs
-                    |> List.choose (fun v -> v.Meta.Names |> List.tryHead)
-                    |> List.map (fun name -> { Name = name })
-                    |> Array.ofList)
-                |> Option.defaultValue [||]
-
-            return Ok verbs
+            return Ok nodes
         }
 
     /// Custom method (`moodev/getObjectInfo`, `{objRef}`) - the object
