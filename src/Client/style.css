@@ -232,12 +232,12 @@ html, body {
 .picker-list li.picker-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 0.4em;
 }
 
 .picker-row-icon {
   flex: none;
+  margin-left: auto;
   background: none;
   border: none;
   color: #777;
