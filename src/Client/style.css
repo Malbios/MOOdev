@@ -166,16 +166,6 @@ html, body {
   display: none;
 }
 
-.sidebar-header {
-  padding: 0.3em 0.6em;
-  background: #1a1a1a;
-  border-bottom: 1px solid #444;
-  font-size: 0.85em;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: #999;
-}
-
 .sidebar-filter {
   display: block;
   width: 100%;
