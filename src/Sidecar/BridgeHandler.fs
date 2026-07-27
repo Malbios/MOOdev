@@ -104,43 +104,67 @@ let handleConnection
     : Task =
     task {
         use tcpClient = new TcpClient()
-        do! tcpClient.ConnectAsync(endpoint.Host, endpoint.Port, ct)
-        use stream = tcpClient.GetStream()
 
-        use cts = CancellationTokenSource.CreateLinkedTokenSource(ct)
-
-        // When either pump finishes (cleanly or otherwise), cts.Cancel() stops
-        // the other one. That cancellation surfaces as OperationCanceledException
-        // on the ReadAsync/ReceiveAsync call inside it - expected shutdown, not a
-        // real failure, so it's swallowed here rather than left as an unobserved
-        // faulted task.
-        let tcpToWs =
+        // The MOO server being down/unreachable when a browser connects is a
+        // real, expected outcome (not a bug here) - e.g. mid-restart, like
+        // the connection-refused case this was written for. Caught
+        // specifically (not a catch-all) so the websocket closes with a
+        // clear reason instead of the exception surfacing as an unhandled
+        // failure in Kestrel's own request-pipeline logs.
+        let! connected =
             task {
                 try
-                    try
-                        do! pumpTcpToWebSocket stream webSocket cts.Token
-                    with :? OperationCanceledException -> ()
-                finally
-                    cts.Cancel()
+                    do! tcpClient.ConnectAsync(endpoint.Host, endpoint.Port, ct)
+                    return true
+                with :? SocketException ->
+                    return false
             }
 
-        let wsToTcp =
-            task {
-                try
+        if not connected then
+            if webSocket.State = WebSocketState.Open then
+                do!
+                    webSocket.CloseAsync(
+                        WebSocketCloseStatus.EndpointUnavailable,
+                        "Could not connect to the MOO server",
+                        CancellationToken.None
+                    )
+        else
+            use stream = tcpClient.GetStream()
+
+            use cts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+
+            // When either pump finishes (cleanly or otherwise), cts.Cancel() stops
+            // the other one. That cancellation surfaces as OperationCanceledException
+            // on the ReadAsync/ReceiveAsync call inside it - expected shutdown, not a
+            // real failure, so it's swallowed here rather than left as an unobserved
+            // faulted task.
+            let tcpToWs =
+                task {
                     try
-                        do! pumpWebSocketToTcp webSocket stream cts.Token
-                    with :? OperationCanceledException -> ()
-                finally
-                    cts.Cancel()
-            }
+                        try
+                            do! pumpTcpToWebSocket stream webSocket cts.Token
+                        with :? OperationCanceledException -> ()
+                    finally
+                        cts.Cancel()
+                }
 
-        do! Task.WhenAny(tcpToWs, wsToTcp) :> Task
+            let wsToTcp =
+                task {
+                    try
+                        try
+                            do! pumpWebSocketToTcp webSocket stream cts.Token
+                        with :? OperationCanceledException -> ()
+                    finally
+                        cts.Cancel()
+                }
 
-        if webSocket.State = WebSocketState.Open then
-            do!
-                webSocket.CloseAsync(
-                    WebSocketCloseStatus.NormalClosure,
-                    "MOO connection closed",
-                    CancellationToken.None
-                )
+            do! Task.WhenAny(tcpToWs, wsToTcp) :> Task
+
+            if webSocket.State = WebSocketState.Open then
+                do!
+                    webSocket.CloseAsync(
+                        WebSocketCloseStatus.NormalClosure,
+                        "MOO connection closed",
+                        CancellationToken.None
+                    )
     }
