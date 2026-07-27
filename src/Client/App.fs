@@ -1159,6 +1159,12 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
                 li.appendChild chevron |> ignore
 
+                let kindIcon = document.createElement ("span")
+                kindIcon.classList.add "tree-icon"
+                kindIcon.classList.add "tree-icon-object"
+                kindIcon.textContent <- "◇"
+                li.appendChild kindIcon |> ignore
+
                 let labelSpan = document.createElement ("span")
 
                 labelSpan.textContent <-
@@ -1186,6 +1192,13 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                             renderTree ()
             | VerbRow(objRef, verbName, depth) ->
                 li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
+
+                let kindIcon = document.createElement ("span")
+                kindIcon.classList.add "tree-icon"
+                kindIcon.classList.add "tree-icon-verb"
+                kindIcon.textContent <- "ƒ"
+                li.appendChild kindIcon |> ignore
+
                 let labelSpan = document.createElement ("span")
                 labelSpan.textContent <- verbName
                 li.appendChild labelSpan |> ignore

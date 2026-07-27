@@ -266,6 +266,21 @@ html, body {
   flex: none;
 }
 
+.tree-icon {
+  display: inline-block;
+  width: 1.1em;
+  text-align: center;
+  flex: none;
+}
+
+.tree-icon-object {
+  color: #6cf;
+}
+
+.tree-icon-verb {
+  color: #c9a0ff;
+}
+
 .sidebar-toggle-btn {
   flex: none;
   background: none;
