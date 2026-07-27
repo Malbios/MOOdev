@@ -1406,7 +1406,11 @@ inputEl.onkeydown <-
             if cmd <> "" then
                 commandHistory.Add cmd
 
-            ws.send cmd
+            if ws.readyState <> WebSocketState.OPEN then
+                appendOutput "\n[not connected - message not sent]\n"
+            else
+                ws.send cmd
+
             inputEl.value <- ""
             historyIndex <- -1
             historyDraft <- ""
