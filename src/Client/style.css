@@ -360,8 +360,7 @@ html, body {
 
 #editor-pane,
 #terminal-pane,
-#inspector-pane,
-#nearby-pane {
+#inspector-pane {
   flex: 1;
   min-height: 0;
   display: none;
@@ -370,8 +369,7 @@ html, body {
 
 #editor-pane.active,
 #terminal-pane.active,
-#inspector-pane.active,
-#nearby-pane.active {
+#inspector-pane.active {
   display: flex;
 }
 
@@ -392,8 +390,7 @@ html, body {
   display: none;
 }
 
-#inspector-content,
-#nearby-content {
+#inspector-content {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
