@@ -107,7 +107,7 @@ straight to `connect wizard` on a fresh ToastCore db.
 ```powershell
 cd C:\dev\moo-code\moo-dev
 dotnet tool restore
-dotnet run --project src\Sidecar\Sidecar.fsproj
+dotnet watch run --project src\Sidecar\Sidecar.fsproj
 ```
 
 ```powershell
