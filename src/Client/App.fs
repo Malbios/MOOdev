@@ -632,6 +632,13 @@ let private buildTree (nodes: (int64 * string * int64[] * int64[] * string[])[])
 /// for" on demand.
 let mutable private expandedRefs: Set<int64> = Set.empty
 
+/// Which objects have their "Verbs" virtual group node expanded, by objRef.
+/// Separate from `expandedRefs` - expanding an object reveals its verb group
+/// and child objects, but the verbs themselves stay collapsed behind that
+/// group node until it's opened too, so a deep chain of objects can be
+/// walked without wading through every intermediate object's verb list.
+let mutable private expandedVerbGroups: Set<int64> = Set.empty
+
 /// Every ancestor of `objRef`, walking `Parents` upward, recursively - a
 /// DAG node can have more than one parent path to a root, so this returns
 /// every one of them, not just one. `visited` is a defensive cycle guard
@@ -652,9 +659,13 @@ let rec private ancestorsOf (visited: Set<int64>) (objRef: int64) : Set<int64> =
 /// see the `oninput` wiring below.
 let mutable private treeFilterText = ""
 
-/// One row of the flattened, currently-visible tree.
+/// One row of the flattened, currently-visible tree. `VerbGroupRow` is a
+/// virtual node - not a real MOO object or verb - representing an object's
+/// collapsible "Verbs" bucket, so its verbs can be hidden independently of
+/// its child objects.
 type private TreeRow =
     | ObjectRow of objRef: int64 * depth: int * isExpandable: bool
+    | VerbGroupRow of objRef: int64 * depth: int * count: int
     | VerbRow of objRef: int64 * verbName: string * depth: int
 
 /// Switches the main area to `tab`, caching whatever was showing before the
@@ -1089,9 +1100,15 @@ and private ancestorExpansionSet (filterText: string) : Set<int64> =
         |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
 
 /// One row of the flattened, currently-*visible* tree - either an object
-/// (with its depth and whether it has anything to expand into) or one of
-/// an expanded object's own verbs.
-and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (roots: int64[]) : TreeRow list =
+/// (with its depth and whether it has anything to expand into), the
+/// virtual "Verbs" group node for an expanded object that has any, or (once
+/// that group is itself expanded) one of its actual verbs.
+and private flattenVisibleRows
+    (hideEmptyLeaves: bool)
+    (expanded: Set<int64>)
+    (expandedVerbGroups: Set<int64>)
+    (roots: int64[])
+    : TreeRow list =
     let childrenOf (node: TreeNode) : int64[] =
         node.Children
         |> Array.filter (fun childRef ->
@@ -1114,11 +1131,20 @@ and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (r
             if not (Set.contains objRef expanded) then
                 [ selfRow ]
             else
-                let verbRows =
-                    node.Verbs
-                    |> Array.sort
-                    |> Array.map (fun v -> VerbRow(objRef, v, depth + 1))
-                    |> List.ofArray
+                let verbGroupRows =
+                    if Array.isEmpty node.Verbs then
+                        []
+                    else
+                        let groupRow = VerbGroupRow(objRef, depth + 1, node.Verbs.Length)
+
+                        if Set.contains objRef expandedVerbGroups then
+                            groupRow
+                            :: (node.Verbs
+                                |> Array.sort
+                                |> Array.map (fun v -> VerbRow(objRef, v, depth + 2))
+                                |> List.ofArray)
+                        else
+                            [ groupRow ]
 
                 let childRows =
                     visibleChildren
@@ -1126,7 +1152,7 @@ and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (r
                     |> Array.collect (fun r -> go visited (depth + 1) r |> Array.ofList)
                     |> List.ofArray
 
-                selfRow :: (verbRows @ childRows)
+                selfRow :: (verbGroupRows @ childRows)
 
     roots |> Array.sort |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
 
@@ -1191,6 +1217,26 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                                 else Set.add objRef expandedRefs
 
                             renderTree ()
+            | VerbGroupRow(objRef, depth, count) ->
+                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
+                li.classList.add "tree-verb-group"
+
+                let chevron = document.createElement ("span")
+                chevron.classList.add "tree-chevron"
+                chevron.textContent <- (if Set.contains objRef expandedVerbGroups then "▾" else "▸")
+                li.appendChild chevron |> ignore
+
+                let labelSpan = document.createElement ("span")
+                labelSpan.textContent <- sprintf "Verbs (%d)" count
+                li.appendChild labelSpan |> ignore
+
+                li.onclick <-
+                    fun _ ->
+                        expandedVerbGroups <-
+                            if Set.contains objRef expandedVerbGroups then Set.remove objRef expandedVerbGroups
+                            else Set.add objRef expandedVerbGroups
+
+                        renderTree ()
             | VerbRow(objRef, verbName, depth) ->
                 li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
 
@@ -1220,32 +1266,48 @@ and private renderTree () : unit =
     let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
 
     if treeFilterText = "" then
-        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs rootRefs)
+        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs expandedVerbGroups rootRefs)
     else
         let ancestorRefs = ancestorExpansionSet treeFilterText
         let expanded = Set.union expandedRefs ancestorRefs
-        let allRows = flattenVisibleRows hideEmptyLeaves expanded rootRefs
+
+        // Objects whose own verbs (not just their name) are what matched -
+        // their "Verbs" group needs auto-expanding too, or a matching verb
+        // would stay hidden behind it.
+        let verbMatchOwners =
+            treeNodes
+            |> Map.toSeq
+            |> Seq.map snd
+            |> Seq.filter (fun n -> n.Verbs |> Array.exists (matchesFilter treeFilterText))
+            |> Seq.map (fun n -> n.ObjRef)
+            |> Set.ofSeq
+
+        let expandedGroups = Set.union expandedVerbGroups verbMatchOwners
+        let allRows = flattenVisibleRows hideEmptyLeaves expanded expandedGroups rootRefs
 
         // Keep a row if it's itself a match, or an ancestor object-row on
-        // the way to one - verb rows never need to survive purely as
-        // ancestors, only object rows do (expansion only ever reveals a
-        // path *down* to a match).
+        // the way to one - the verb group and verb rows never need to
+        // survive purely as ancestors, only object rows do (expansion only
+        // ever reveals a path *down* to a match).
         allRows
         |> List.filter (fun row ->
             match row with
             | ObjectRow(objRef, _, _) ->
                 Set.contains objRef ancestorRefs
                 || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false)
+            | VerbGroupRow(objRef, _, _) -> Set.contains objRef verbMatchOwners
             | VerbRow(_, verbName, _) -> matchesFilter treeFilterText verbName)
         |> renderTreeRows
 
-/// Reveals `objRef` in the tree (expanding every ancestor path to it) and
-/// opens `verbName` directly - used by go-to-definition, which already
-/// knows exactly which verb it wants open. The bulk tree has every
-/// object's own verbs in memory already, so there's nothing to wait on the
-/// way the old `selectObject`/`listVerbsAsync` round-trip did.
+/// Reveals `objRef` in the tree (expanding every ancestor path to it, and
+/// its own verb group) and opens `verbName` directly - used by
+/// go-to-definition, which already knows exactly which verb it wants open.
+/// The bulk tree has every object's own verbs in memory already, so
+/// there's nothing to wait on the way the old
+/// `selectObject`/`listVerbsAsync` round-trip did.
 and private revealAndOpenVerb (objRef: int64) (verbName: string) : unit =
     expandedRefs <- Set.union expandedRefs (Set.add objRef (ancestorsOf Set.empty objRef))
+    expandedVerbGroups <- Set.add objRef expandedVerbGroups
     renderTree ()
     openOrSwitchToVerb objRef verbName
 

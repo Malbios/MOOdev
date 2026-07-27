@@ -271,6 +271,11 @@ html, body {
   color: #c9a0ff;
 }
 
+.tree-verb-group {
+  color: #888;
+  font-style: italic;
+}
+
 .sidebar-toggle-btn {
   flex: none;
   background: none;
