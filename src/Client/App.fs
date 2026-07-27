@@ -1100,9 +1100,6 @@ and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (r
                | None -> true // unknown ref - show rather than silently drop
                | Some c -> not (Array.isEmpty c.Children) || not (Array.isEmpty c.Verbs))
 
-    let byName (r: int64) =
-        Map.tryFind r treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue ""
-
     let rec go (visited: Set<int64>) (depth: int) (objRef: int64) : TreeRow list =
         match Map.tryFind objRef treeNodes with
         | None -> []
@@ -1117,17 +1114,21 @@ and private flattenVisibleRows (hideEmptyLeaves: bool) (expanded: Set<int64>) (r
             if not (Set.contains objRef expanded) then
                 [ selfRow ]
             else
-                let verbRows = node.Verbs |> Array.map (fun v -> VerbRow(objRef, v, depth + 1)) |> List.ofArray
+                let verbRows =
+                    node.Verbs
+                    |> Array.sort
+                    |> Array.map (fun v -> VerbRow(objRef, v, depth + 1))
+                    |> List.ofArray
 
                 let childRows =
                     visibleChildren
-                    |> Array.sortBy byName
+                    |> Array.sort
                     |> Array.collect (fun r -> go visited (depth + 1) r |> Array.ofList)
                     |> List.ofArray
 
                 selfRow :: (verbRows @ childRows)
 
-    roots |> Array.sortBy byName |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
+    roots |> Array.sort |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
 
 /// Renders the currently-visible tree into `#tree-list` - reuses
 /// `renderList`'s old DOM idiom (`.picker-row`/`.picker-row-icon`/
