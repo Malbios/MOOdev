@@ -50,6 +50,7 @@ let private verbsListEl = document.getElementById ("verbs-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
 let private sidebarSplitResizerEl = document.getElementById ("sidebar-split-resizer")
 let private objectsPaneEl = document.getElementById ("objects-pane")
+let private sidebarToggleBtn = document.getElementById ("sidebar-toggle")
 
 let private mainTabsEl = document.getElementById ("main-tabs")
 let private tabGameBtn = document.getElementById ("tab-game")
@@ -165,6 +166,36 @@ module private PaneResizer =
                           LastPct = 50.0 }
 
                 resizerEl.classList.add "dragging"
+
+/// Collapsible sidebar, same idea as VS Code's explorer-panel toggle - hides
+/// the Objects/Verbs picker entirely and gives the editor/terminal the full
+/// width back. Deliberately separate from `PaneResizer`: collapsing never
+/// touches the persisted width, it just toggles a `.collapsed` class whose
+/// `!important` overrides `PaneResizer`'s inline `flex` style while active,
+/// so removing the class snaps straight back to whatever width was set
+/// before. Persisted across reloads the same way as everything else here.
+module private Sidebar =
+    let private collapsedKey = "moodev-sidebar-collapsed"
+
+    let private apply (collapsed: bool) : unit =
+        if collapsed then
+            sidebarEl.classList.add "collapsed"
+            sidebarResizerEl.classList.add "collapsed"
+        else
+            sidebarEl.classList.remove "collapsed"
+            sidebarResizerEl.classList.remove "collapsed"
+
+        sidebarToggleBtn.textContent <- (if collapsed then "▶" else "◀")
+        sidebarToggleBtn.setAttribute ("title", (if collapsed then "Show sidebar" else "Hide sidebar"))
+
+    let init () : unit =
+        apply (window.localStorage.getItem collapsedKey = "1")
+
+        sidebarToggleBtn.onclick <-
+            fun _ ->
+                let collapsed = not (sidebarEl.classList.contains "collapsed")
+                window.localStorage.setItem (collapsedKey, (if collapsed then "1" else "0"))
+                apply collapsed
 
 /// Remembers the last-used player name/password in localStorage so a
 /// returning visit can log straight back in, instead of retyping "connect
@@ -1197,6 +1228,7 @@ ws.onopen <-
         mainTabsEl.classList.add ("visible")
         PaneResizer.init PaneResizer.LeftRight "moodev-sidebar-width-pct" layoutEl sidebarResizerEl sidebarEl
         PaneResizer.init PaneResizer.UpDown "moodev-objects-verbs-split-pct" sidebarEl sidebarSplitResizerEl objectsPaneEl
+        Sidebar.init ()
         Login.init (fun cmd -> ws.send cmd)
 
 ws.onclose <- fun _ -> appendOutput "\n[disconnected]\n"
