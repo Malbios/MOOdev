@@ -587,6 +587,32 @@ let private parseErrorLine (line: string) : (int * string) option =
 let private matchesFilter (filterText: string) (label: string) : bool =
     filterText = "" || label.ToLowerInvariant().Contains(filterText.ToLowerInvariant())
 
+/// The tree filter box's search scope - unrestricted by default, or
+/// narrowed to just object names/numbers or just verb names via an
+/// "obj:"/"verb:" prefix (see `parseFilter`). Lets a search like "look"
+/// find only the verb, not also every object whose description happens to
+/// contain "look".
+type private FilterKind =
+    | AnyKind
+    | ObjectOnly
+    | VerbOnly
+
+type private ParsedFilter = { Kind: FilterKind; Text: string }
+
+/// Splits the raw filter box text into a scope + the actual search text -
+/// "obj:foo"/"verb:foo" (prefix case-insensitive, whitespace around the
+/// colon tolerated) restrict the scope; anything else searches both.
+let private parseFilter (rawText: string) : ParsedFilter =
+    let trimmed = rawText.Trim()
+    let lower = trimmed.ToLowerInvariant()
+
+    if lower.StartsWith("obj:") then
+        { Kind = ObjectOnly; Text = trimmed.Substring(4).Trim() }
+    elif lower.StartsWith("verb:") then
+        { Kind = VerbOnly; Text = trimmed.Substring(5).Trim() }
+    else
+        { Kind = AnyKind; Text = trimmed }
+
 /// One in-memory node per object, built once from `LspClient.getObjectTreeAsync`'s
 /// flat response at login - keyed by objRef (`treeNodes`) so parent/child
 /// lookups don't re-scan the array. `Verbs` is this object's own verbs
@@ -1078,26 +1104,25 @@ and private renderTabs () : unit =
     else
         tabGameBtn.classList.remove "active"
 
-/// True if `node` itself is a filter match - its display name, or any of
-/// its own verb names.
-and private nodeMatches (filterText: string) (node: TreeNode) : bool =
-    matchesFilter filterText node.Name || node.Verbs |> Array.exists (matchesFilter filterText)
+/// True if `node` itself is a filter match, respecting the filter's scope -
+/// its display name (unless scoped to verbs only), or any of its own verb
+/// names (unless scoped to objects only).
+and private nodeMatches (filter: ParsedFilter) (node: TreeNode) : bool =
+    (filter.Kind <> VerbOnly && matchesFilter filter.Text node.Name)
+    || (filter.Kind <> ObjectOnly && node.Verbs |> Array.exists (matchesFilter filter.Text))
 
 /// Every objRef that needs to be expanded for at least one filter match to
 /// be reachable - a match's *every* parent, recursively (via `ancestorsOf`),
 /// since a DAG node can have more than one parent path to a root and each
 /// occurrence needs its own ancestor chain expanded for the match to be
 /// visible wherever it appears.
-and private ancestorExpansionSet (filterText: string) : Set<int64> =
-    if filterText = "" then
-        Set.empty
-    else
-        treeNodes
-        |> Map.toSeq
-        |> Seq.map snd
-        |> Seq.filter (nodeMatches filterText)
-        |> Seq.map (fun n -> n.ObjRef)
-        |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
+and private ancestorExpansionSet (filter: ParsedFilter) : Set<int64> =
+    treeNodes
+    |> Map.toSeq
+    |> Seq.map snd
+    |> Seq.filter (nodeMatches filter)
+    |> Seq.map (fun n -> n.ObjRef)
+    |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
 
 /// One row of the flattened, currently-*visible* tree - either an object
 /// (with its depth and whether it has anything to expand into), the
@@ -1165,7 +1190,7 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
     if List.isEmpty rows then
         let li = document.createElement ("li")
-        li.textContent <- (if treeFilterText <> "" then "no matches" else "no objects yet")
+        li.textContent <- (if treeFilterText.Trim() <> "" then "no matches" else "no objects yet")
         li.classList.add "placeholder"
         treeListEl.appendChild li |> ignore
     else
@@ -1265,22 +1290,27 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 and private renderTree () : unit =
     let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
 
-    if treeFilterText = "" then
+    if treeFilterText.Trim() = "" then
         renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs expandedVerbGroups rootRefs)
     else
-        let ancestorRefs = ancestorExpansionSet treeFilterText
+        let filter = parseFilter treeFilterText
+        let ancestorRefs = ancestorExpansionSet filter
         let expanded = Set.union expandedRefs ancestorRefs
 
         // Objects whose own verbs (not just their name) are what matched -
         // their "Verbs" group needs auto-expanding too, or a matching verb
-        // would stay hidden behind it.
+        // would stay hidden behind it. Never any, under "obj:" - verbs are
+        // out of scope for that search entirely.
         let verbMatchOwners =
-            treeNodes
-            |> Map.toSeq
-            |> Seq.map snd
-            |> Seq.filter (fun n -> n.Verbs |> Array.exists (matchesFilter treeFilterText))
-            |> Seq.map (fun n -> n.ObjRef)
-            |> Set.ofSeq
+            if filter.Kind = ObjectOnly then
+                Set.empty
+            else
+                treeNodes
+                |> Map.toSeq
+                |> Seq.map snd
+                |> Seq.filter (fun n -> n.Verbs |> Array.exists (matchesFilter filter.Text))
+                |> Seq.map (fun n -> n.ObjRef)
+                |> Set.ofSeq
 
         let expandedGroups = Set.union expandedVerbGroups verbMatchOwners
         let allRows = flattenVisibleRows hideEmptyLeaves expanded expandedGroups rootRefs
@@ -1294,9 +1324,9 @@ and private renderTree () : unit =
             match row with
             | ObjectRow(objRef, _, _) ->
                 Set.contains objRef ancestorRefs
-                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false)
+                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches filter) |> Option.defaultValue false)
             | VerbGroupRow(objRef, _, _) -> Set.contains objRef verbMatchOwners
-            | VerbRow(_, verbName, _) -> matchesFilter treeFilterText verbName)
+            | VerbRow(_, verbName, _) -> filter.Kind <> ObjectOnly && matchesFilter filter.Text verbName)
         |> renderTreeRows
 
 /// Reveals `objRef` in the tree (expanding every ancestor path to it, and
