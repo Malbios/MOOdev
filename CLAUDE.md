@@ -1,8 +1,8 @@
 # MOOdev
 
 This repo is the `tools/` half of the project plan documented at
-`C:\dev\moo\toaststunt-dev-environment-plan.md` — read that file first, it is the source of truth
-for architecture, milestones, and settled decisions. `C:\dev\moo\moocode-reference.md` is the
+`C:\dev\moo-code\toaststunt-dev-environment-plan.md` — read that file first, it is the source of truth
+for architecture, milestones, and settled decisions. `C:\dev\moo-code\moocode-reference.md` is the
 companion MOOcode language reference, with a section of facts verified live against this project's
 ToastStunt fork during M0.
 
@@ -12,14 +12,14 @@ parser, and `moo-eval` — the tooling that lets you develop against the MOO wit
 telnet or the in-world editor.
 
 **MOOcode reference material should be verified against the live server or the C source in
-`C:\dev\moo\toaststunt\src\` rather than trusted from training data** — the reference doc explains
+`C:\dev\moo-code\ToastStunt\src\` rather than trusted from training data** — the reference doc explains
 why (MOO documentation is sparse and much of what's findable describes LambdaMOO 1.8.1, not
 ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
 
 ## Milestone status
 
 - **M0 (substrate)** — done. ToastStunt fork builds under WSL2 Ubuntu
-  (`C:\dev\moo\toaststunt\build\moo`), ToastCore loads and runs, verified against a live
+  (`C:\dev\moo-code\ToastStunt\build\moo`), ToastCore loads and runs, verified against a live
   connection.
 - **M1 (the spine)** — done. F# sidecar bridging browser WebSocket ↔ MOO telnet TCP, plus a
   minimal Fable browser terminal. See `src/Sidecar` and `src/Client`.
@@ -57,12 +57,12 @@ There are two separate database files, both descended from the same `survive.db`
 (toastcore + `$vcs`), so they never collide:
 
 - **Dev/play world** — `toastcore/run/survive.db` / `survive.db.new`, FileIO rooted at the real
-  `C:\dev\moo\Survive` repo. Launched by `test.ps1` in a visible window. On clean shutdown (in-game
+  `C:\dev\moo-code\Survive` repo. Launched by `test.ps1` in a visible window. On clean shutdown (in-game
   `;shutdown();` or Ctrl+C in the window — the wrapping script runs once the `wsl` command returns,
   however it exited), `survive.db.new` is promoted over `survive.db`, so the next launch continues
   from where you left off. This is the only path that ever writes to the real `Survive` repo.
 - **Automated test instance** — `survive.test.db` (a fresh copy of `survive.db` taken at start),
-  FileIO rooted at a throwaway scratch repo (`C:\dev\moo\SurviveTestScratch`, `git init`'d once and
+  FileIO rooted at a throwaway scratch repo (`C:\dev\moo-code\SurviveTestScratch`, `git init`'d once and
   reused — its history is never inspected). Started/stopped headlessly (no visible window) via
   `test-instance-start.ps1` / `test-instance-stop.ps1` in this repo group's root, on port 7778 by
   default so it can run alongside the dev world's 7777. `$vcs.repo_root` is set to the scratch path
@@ -78,11 +78,11 @@ possible without duplicating the script.
 ## Running the MOO server for local testing
 
 The `moo` binary is a Linux ELF built under WSL2 — it does not run directly from Windows.
-`C:\dev\moo\test.ps1` starts everything (MOO server, Sidecar, client dev server) in one go; to
+`C:\dev\moo-code\test.ps1` starts everything (MOO server, Sidecar, client dev server) in one go; to
 start just the server by hand from PowerShell:
 
 ```powershell
-wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/toaststunt/run && /mnt/c/dev/moo/toaststunt/build/moo survive.db survive.db.new 7777 -i /mnt/c/dev/moo/Survive"
+wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo-code/ToastStunt/run && /mnt/c/dev/moo-code/ToastStunt/build/moo survive.db survive.db.new 7777 -i /mnt/c/dev/moo-code/Survive"
 ```
 
 For automated/headless testing, use `test-instance-start.ps1` / `test-instance-stop.ps1` instead
@@ -90,7 +90,7 @@ For automated/headless testing, use `test-instance-start.ps1` / `test-instance-s
 handles the `survive.test.db` copy and scratch FileIO root for you.
 
 The `-i` flag points FileIO at the `Survive` repo (required since M2 — `$vcs` writes verb files
-there). `exec()`'s working directory (`executables/`) is `C:\dev\moo\toaststunt\run\executables\`
+there). `exec()`'s working directory (`executables/`) is `C:\dev\moo-code\ToastStunt\run\executables\`
 — both resolve relative to the server's CWD at launch (`run/`), not the repo root.
 
 It listens on `127.0.0.1:7777`. Connecting from localhost suppresses the MOO's own welcome banner
@@ -100,13 +100,13 @@ straight to `connect wizard` on a fresh ToastCore db.
 ## Running the sidecar + client for local dev
 
 ```powershell
-cd C:\dev\moo\MOOdev
+cd C:\dev\moo-code\moo-dev
 dotnet tool restore
 dotnet run --project src\Sidecar\Sidecar.fsproj
 ```
 
 ```powershell
-cd C:\dev\moo\MOOdev\src\Client
+cd C:\dev\moo-code\moo-dev\src\Client
 npm install
 npm run dev
 ```

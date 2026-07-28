@@ -33,8 +33,8 @@ let private monaco: obj = importAll "monaco-editor"
 /// a complete language spec.
 ///
 /// Comments are `/* ... */` only (non-nesting - the first `*/` closes),
-/// confirmed against `toaststunt/src/parser.y:889-908` and documented in
-/// `C:\dev\moo\moocode-reference.md`. An earlier version of this comment
+/// confirmed against `ToastStunt/src/parser.y:889-908` and documented in
+/// `C:\dev\moo-code\moocode-reference.md`. An earlier version of this comment
 /// claimed MOOcode has no comment syntax at all - that was wrong, corrected
 /// this session after reading the parser source directly. There is no `//`
 /// line-comment form; a bare `/` not followed by `*` is just division.
