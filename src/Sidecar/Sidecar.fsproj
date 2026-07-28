@@ -8,6 +8,8 @@
     <Compile Include="TelnetFilter.fs" />
     <Compile Include="McpFilter.fs" />
     <Compile Include="BridgeHandler.fs" />
+    <Compile Include="MooEval.fs" />
+    <Compile Include="Exporter.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

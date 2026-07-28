@@ -82,10 +82,11 @@ string_utils #4
 ```
 @object <corponym-or-#objnum>
 parents: <corponym-or-#objnum> <corponym-or-#objnum> ...
-owner: <corponym-or-#objnum>
+owner: #<objnum>
 flags: <subset of "r w f a" in that order>
+verbs: <verb-file-1.moo> <verb-file-2.moo> ...
 
-@property "<name>" owner=<corponym-or-#objnum> perms=<subset of "r w c" in that order>
+@property "<name>" owner=#<objnum> perms=<subset of "r w c" in that order>
 <toliteral()-rendered value>
 .
 
@@ -98,9 +99,20 @@ flags: <subset of "r w f a" in that order>
   re-sorted.** ToastStunt supports multiple inheritance (`parents()` returns a list; `parent()` is
   deprecated and lossy — confirmed in `objects.cc`). Parent order is the ancestor search order for
   verb/property resolution, so it is semantically load-bearing, not cosmetic — see §6 for why this
-  overrides the "sort everything" instinct from invariant I4.
+  overrides the "sort everything" instinct from invariant I4. Rendered in corponym form when the
+  parent itself has one (parents are versioned classes by construction, per I2) — falls back to raw
+  `#objnum` only for an uncorified parent.
+- **`owner:`** (object-level) and every `owner=` on a `@property`/`@verb` line — **always raw
+  `#objnum`, never corponym-resolved**, unlike `parents:`. Owners are players, not code objects;
+  I2's corponym system has no opinion about them, and per §7's hazards, ownership is not translated
+  across instances on import anyway.
 - **`flags:`** — `is_player`/`programmer`/`wizard`/`r`/`w`/`f`/`a`, only the ones set, in a fixed
   literal order (pick one, e.g. the order listed above) so the line doesn't wobble between exports.
+- **`verbs:`** — filenames under `verbs/`, listed **in the exact order `verbs(obj)` returns them,
+  never re-sorted.** Each verb still gets its own file (for per-verb history/blame/`--follow`, main
+  plan §5), so this line is purely a manifest: the on-disk *filenames* don't need to encode order
+  (see §6), but the *importer* needs this order recorded somewhere to replay `add_verb` faithfully,
+  since dispatch is first-match-wins across the declared list. `object.moo` is that "somewhere."
 - **Property order**: sorted by name, ordinal case-insensitive. Unlike verbs, property lookup is
   purely by name — sibling order has no runtime effect — so this sort is safe and exists purely for
   stable, readable diffs.
@@ -193,8 +205,8 @@ same, then filters to objects with a `$0` corponym (I3) before deciding what get
 | `corponyms.moo` entries | **Yes** — imposed | name, ordinal case-insensitive | Cosmetic only; corponym-to-object mapping has no server-side "order" to preserve. |
 | Properties within `object.moo` | **Yes** — imposed | name, ordinal case-insensitive | Property lookup is by name; sibling order has zero runtime effect. Sort exists purely for stable diffs. |
 | **Parents** in `object.moo` | **No — preserve exactly** | `parents(obj)`'s own return order | Ancestor search order for multiple-inheritance verb/property resolution. Re-sorting and replaying in sorted order would silently change resolution behavior versus the source DB. |
-| **Verb declaration order** (as replayed by the importer's `add_verb` calls) | **No — preserve exactly** | `verbs(obj)`'s own return order | Verb dispatch is first-match-wins across the object's ordered verb list (confirmed both in `toaststunt-dev-environment-plan.md`'s gotchas and the C source's linked-list walk). Sorting verbs alphabetically and replaying them in that order can change which verb wins an ambiguous/overlapping match. |
-| Verb *files on disk* (`verbs/*.moo`) | N/A (one file per verb) | — | Filenames don't need to encode order at all; only the importer's replay order matters, and that's driven by the recorded declaration order, not the filesystem. |
+| **Verb declaration order** (as replayed by the importer's `add_verb` calls) | **No — preserve exactly** | `verbs(obj)`'s own return order, recorded in `object.moo`'s `verbs:` manifest line | Verb dispatch is first-match-wins across the object's ordered verb list (confirmed both in `toaststunt-dev-environment-plan.md`'s gotchas and the C source's linked-list walk). Sorting verbs alphabetically and replaying them in that order can change which verb wins an ambiguous/overlapping match. |
+| Verb *files on disk* (`verbs/*.moo`) | N/A (one file per verb) | — | Filenames don't need to encode order at all; the `verbs:` manifest line in `object.moo` is the recorded order, not the filesystem. |
 
 This table is a direct refinement of the main plan's invariant I4 ("sorted key order everywhere").
 That phrasing holds for unordered-by-name data (properties, the corponym map) but does **not**
