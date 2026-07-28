@@ -1,0 +1,11 @@
+{
+  "types": {
+    "aliases": "aliases",
+    "cssclasses": "multitext",
+    "tags": "tags",
+    "year": "number",
+    "origin": "checkbox",
+    "historical": "checkbox",
+    "type": "text"
+  }
+}

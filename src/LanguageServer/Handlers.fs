@@ -28,12 +28,30 @@ open Metadata.Schema
 /// under more than one parent; the client rebuilds parent-to-children
 /// adjacency itself from these edges rather than this server picking one
 /// parent arbitrarily.
+/// Structural summary of one verb for the tree's compact perms/args
+/// suffix - a bulk/cheap flat-export shape, deliberately kept separate
+/// from `ObjectInfoVerb` even though the fields currently overlap exactly
+/// (`GetObjectTree` and `GetObjectInfo` are different contracts that
+/// shouldn't become coupled just because they happen to agree today).
+type ObjectTreeVerb =
+    { Name: string
+      Perms: string
+      Dobj: string
+      Prep: string
+      Iobj: string }
+
+/// Same idea as `ObjectTreeVerb`, for properties - no `Owner`, unlike
+/// `ObjectInfoProperty`, since the tree's compact suffix only ever shows
+/// perms.
+type ObjectTreeProperty = { Name: string; Perms: string }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
       Parents: ObjRef[]
       Children: ObjRef[]
-      Verbs: string[] }
+      Verbs: ObjectTreeVerb[]
+      Properties: ObjectTreeProperty[] }
 
 type GetObjectInfoParams = { ObjRef: ObjRef }
 
@@ -777,10 +795,11 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
     /// Custom method (`moodev/getObjectTree`, no params) - every object in
     /// the graph (not just ones with verbs of their own - the client's tree
     /// needs the full structural chain to reach them), with parent/child
-    /// edges and own-verb names (declaration order, not inherited - matches
-    /// `$vcs:ide_fetch`/`ide_save`'s own scope, which only ever operates on
-    /// a verb literally defined on the object you name), for the editor's
-    /// object tree. `Name` is a fully-formatted display label - the
+    /// edges and own-verb/own-property names (declaration order, not
+    /// inherited - matches `$vcs:ide_fetch`/`ide_save`'s own scope, which
+    /// only ever operates on a verb literally defined on the object you
+    /// name), for the editor's object tree. `Name` is a fully-formatted
+    /// display label - the
     /// object's real (unsanitized) live name, its object number, and its
     /// corified `$name` if it's registered as one of `#0`'s properties, e.g.
     /// "Generic Room (#3) [$room]" - not `lookups.toml`'s sanitized
@@ -797,7 +816,22 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                       Name = displayNameFor graph o.Num
                       Parents = o.Parents |> Array.ofList
                       Children = o.Children |> Array.ofList
-                      Verbs = o.Verbs |> List.choose (fun v -> v.Meta.Names |> List.tryHead) |> Array.ofList }
+                      Verbs =
+                        o.Verbs
+                        |> List.choose (fun v ->
+                            v.Meta.Names
+                            |> List.tryHead
+                            |> Option.map (fun name ->
+                                { Name = name
+                                  Perms = v.Meta.Perms
+                                  Dobj = v.Meta.Dobj
+                                  Prep = v.Meta.Prep
+                                  Iobj = v.Meta.Iobj }: ObjectTreeVerb))
+                        |> Array.ofList
+                      Properties =
+                        o.Properties
+                        |> List.map (fun pr -> { Name = pr.Name; Perms = pr.Perms }: ObjectTreeProperty)
+                        |> Array.ofList }
                     : ObjectTreeNode)
                 |> Seq.sortBy (fun n -> n.Name)
                 |> Array.ofSeq
@@ -833,7 +867,7 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                           Perms = v.Meta.Perms
                           Dobj = v.Meta.Dobj
                           Prep = v.Meta.Prep
-                          Iobj = v.Meta.Iobj })
+                          Iobj = v.Meta.Iobj }: ObjectInfoVerb)
                     |> Array.ofList
 
                 let properties =

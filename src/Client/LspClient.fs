@@ -118,11 +118,24 @@ let private monacoCompletionKind (lspKind: int) : int =
     | 6 -> 4 // Variable
     | _ -> 18 // Text
 
+/// Structural summary of one verb for the tree's compact perms/args
+/// suffix (matches `Handlers.ObjectTreeVerb`).
+type TreeVerb =
+    { Name: string
+      Perms: string
+      Dobj: string
+      Prep: string
+      Iobj: string }
+
+/// Same idea as `TreeVerb`, for properties (matches `Handlers.ObjectTreeProperty`).
+type TreeProperty = { Name: string; Perms: string }
+
 /// Custom method (not part of the LSP spec) - one shot at login: the whole
 /// object universe (not just verb-owners), with parent/child edges and
-/// each object's own verb names folded in (matches
+/// each object's own verb/property summaries folded in (matches
 /// `Handlers.MooLspServer.GetObjectTree`), so the sidebar tree never needs
-/// a per-click round trip to fetch a newly-expanded object's verbs.
+/// a per-click round trip to fetch a newly-expanded object's verbs or
+/// properties.
 ///
 /// Every ref here is read as `float` and explicitly converted via
 /// `int64 (...)`, never a bare `?field: int64` cast - a JSON-RPC ref is a
@@ -133,7 +146,7 @@ let private monacoCompletionKind (lspKind: int) : int =
 /// hit and fixed for the inspector's parent/child refs - confirmed live
 /// there as a real "duplicate tab instead of switching to the open one"
 /// symptom, not a hypothetical).
-let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * string[])[]> =
+let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * TreeVerb[] * TreeProperty[])[]> =
     async {
         let! result = requestAsync "moodev/getObjectTree" (createObj [])
 
@@ -149,7 +162,17 @@ let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * string[]
                     (o?name: string),
                     ((o?parents: float[]) |> Array.map int64),
                     ((o?children: float[]) |> Array.map int64),
-                    (o?verbs: string[]))
+                    ((o?verbs: obj[])
+                     |> Array.map (fun v ->
+                         { Name = v?name; Perms = v?perms; Dobj = v?dobj; Prep = v?prep; Iobj = v?iobj }: TreeVerb)),
+                    // `properties` is missing entirely from an old, not-yet-rebuilt
+                    // LSP server's response (server/client skew during dev) - degrade
+                    // to an empty array rather than letting `undefined` flow into
+                    // `TreeNode.Properties` and crash the first `Array.isEmpty` on it.
+                    (if isNullOrUndefined o?properties then
+                         [||]
+                     else
+                         (o?properties: obj[]) |> Array.map (fun p -> { Name = p?name; Perms = p?perms }: TreeProperty)))
     }
 
 /// Custom method - the object inspector's structural data (owner, flags,

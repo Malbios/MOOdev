@@ -136,6 +136,10 @@ html, body {
   cursor: col-resize;
 }
 
+#sidebar-resizer {
+  position: relative;
+}
+
 .resizer-updown {
   height: 6px;
   cursor: row-resize;
@@ -162,15 +166,15 @@ html, body {
   border-right: none;
 }
 
-#sidebar-resizer.collapsed {
-  display: none;
+.sidebar-filter-wrap {
+  position: relative;
 }
 
 .sidebar-filter {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 0.3em 0.6em;
+  padding: 0.3em 3.4em 0.3em 0.6em;
   background: #222;
   color: #ddd;
   border: none;
@@ -182,6 +186,51 @@ html, body {
 .sidebar-filter:focus {
   outline: none;
   border-bottom-color: #6cf;
+}
+
+.sidebar-filter-clear,
+.sidebar-filter-settings-btn {
+  position: absolute;
+  top: 0;
+  bottom: 1px; /* stop above the filter box's own border-bottom */
+  width: 1.8em;
+  background: none;
+  border: none;
+  color: #777;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 1.1em;
+  line-height: 1;
+}
+
+.sidebar-filter-clear {
+  right: 1.8em;
+}
+
+.sidebar-filter-settings-btn {
+  right: 0;
+}
+
+.sidebar-filter-clear:hover,
+.sidebar-filter-settings-btn:hover {
+  color: #6cf;
+}
+
+.tree-filter-settings-popover {
+  display: none;
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 10;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 4px;
+  padding: 0.3em 0.6em;
+  white-space: nowrap;
+}
+
+.tree-filter-settings-popover.visible {
+  display: block;
 }
 
 .picker-list {
@@ -248,12 +297,26 @@ html, body {
   gap: 0.3em;
 }
 
+/* Only verb/property rows carry a `.tree-row-meta` second line - object
+   rows (and the group-header rows) stay strictly single-line so the "ⓘ"
+   button's `margin-left: auto` keeps landing at the true far right rather
+   than wrapping onto its own line for a long object name. */
+.tree-row-wrap {
+  flex-wrap: wrap;
+}
+
 .tree-chevron {
   display: inline-block;
   width: 1em;
   text-align: center;
   color: #777;
   flex: none;
+}
+
+.tree-row-meta {
+  color: #777;
+  flex-basis: 100%;
+  margin-left: 1.4em;
 }
 
 .tree-icon {
@@ -271,13 +334,22 @@ html, body {
   color: #c9a0ff;
 }
 
-.tree-verb-group {
+.tree-icon-prop {
+  color: #9fd08a;
+}
+
+.tree-verb-group,
+.tree-prop-group,
+.tree-child-group {
   color: #888;
   font-style: italic;
 }
 
 .sidebar-toggle-btn {
-  flex: none;
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
   background: none;
   border: none;
   color: #999;
@@ -504,6 +576,34 @@ html, body {
   border-color: #6cf;
 }
 
+.inspector-property-ansi-preview {
+  margin-top: 0.3em;
+  padding: 0.2em 0.4em;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.9em;
+}
+
+.inspector-property-ansi-preview:empty {
+  display: none;
+}
+
+@keyframes inspector-prop-flash {
+  from {
+    background: #6cf5;
+  }
+  to {
+    background: transparent;
+  }
+}
+
+.inspector-prop-highlight {
+  animation: inspector-prop-flash 1.5s ease-out;
+}
+
 #editor-monaco {
   flex: 1;
   min-height: 0;
@@ -590,6 +690,12 @@ html, body {
   white-space: pre-wrap;
   word-break: break-word;
   box-sizing: border-box;
+}
+
+@keyframes ansi-blink {
+  50% {
+    opacity: 0;
+  }
 }
 
 #input {

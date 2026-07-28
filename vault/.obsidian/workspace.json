@@ -1,0 +1,245 @@
+{
+  "main": {
+    "id": "ee5df0fbe6454802",
+    "type": "split",
+    "children": [
+      {
+        "id": "2c573da46668c3b8",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "242344b071f3c88c",
+            "type": "leaf",
+            "state": {
+              "type": "kanban",
+              "state": {
+                "file": "Development.md",
+                "kanbanViewState": {
+                  "kanban-plugin": "board",
+                  "list-collapse": [
+                    false,
+                    false,
+                    false,
+                    false
+                  ]
+                }
+              },
+              "icon": "lucide-trello",
+              "title": "Development"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "f4828fd597bc2a6e",
+    "type": "split",
+    "children": [
+      {
+        "id": "c9aea165bbf272c0",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "1bf88e3007fc89f4",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Files"
+            }
+          },
+          {
+            "id": "7d033c37408ee2ec",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Search"
+            }
+          },
+          {
+            "id": "8628bfbcdbd76df3",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Bookmarks"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 246.5
+  },
+  "right": {
+    "id": "d4b02048b6babf49",
+    "type": "split",
+    "children": [
+      {
+        "id": "05fa5607ba0ff088",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "e37980d650af60c7",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "Welcome.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Backlinks for Welcome"
+            }
+          },
+          {
+            "id": "c37150265cdb69c8",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "Welcome.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Outgoing links from Welcome"
+            }
+          },
+          {
+            "id": "4514d87a458d1292",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Tags"
+            }
+          },
+          {
+            "id": "83e519f191a4e08b",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "KI/Sora/Backlog.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Outline of Backlog"
+            }
+          },
+          {
+            "id": "a6aebf9b0766fdcd",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "All properties"
+            }
+          }
+        ],
+        "currentTab": 2
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "bases:Create new base": false,
+      "templates:Insert template": true,
+      "graph:Open graph view": false,
+      "canvas:Create new canvas": true,
+      "command-palette:Open command palette": false,
+      "workspaces:Manage workspace layouts": false,
+      "templater-obsidian:Templater": false,
+      "obsidian-shellcommands:Shell commands: Custom variables": false,
+      "obsidian-kanban:Create new board": false
+    }
+  },
+  "active": "242344b071f3c88c",
+  "lastOpenFiles": [
+    "Development.md",
+    "Models/6d16ffce-932c-4b10-8960-58d8d762dfe4.md",
+    "Models.base",
+    "Models/388543bc-62bc-4f88-affe-c7593a0a410f.md",
+    "System/Attachments/414c2541-edef-45ac-8a2f-4f4b0edcb428.png",
+    "System/Attachments/260255f9-d321-46fb-abde-08c583e897ec.png",
+    "Models/03231e55-5de9-4916-8ed4-0527ccf9b72f.md",
+    "System/Attachments/591ea469-7cdb-4906-8c4b-23e6d1c53f0c.png",
+    "Models/0ae7c76f-6ed6-41b0-90c0-f423c8114a07.md",
+    "System/Attachments/3f516547-bcee-49a2-8860-1f023a405fd1.png",
+    "Models/53e12157-580f-46ad-93f9-4bde18989ffc.md",
+    "System/Attachments/696651c4-f5eb-431a-adb6-df5c63ddff99.png",
+    "Models/6860e8e1-9353-4b3a-b87a-e7f0dbcd235c.md",
+    "System/Attachments/502b9bac-c97c-4793-8a03-22ec15b85676.png",
+    "Models/b23683a1-5ba4-4dc0-b23b-da852ace780d.md",
+    "Models/d180465b-4766-43a2-b02a-39c96ac56cf3.md",
+    "System/Attachments/f553eb10-3f5f-4b5e-aba3-096b5f1e142f.png",
+    "System/Attachments/92b28a41-aa16-40b2-8c5e-01d23b0397ab.png",
+    "Models/6d78bb4f-1aae-4ae0-b67d-170f6383dfcb.md",
+    "Models/f2f4ee0f-3670-406d-9557-b139549465e5.md",
+    "System/Attachments/0f241539-c8ea-4647-8732-0995f689917f.png",
+    "System/Attachments/d06b0630-f2f0-4c0a-a482-e81f925979a6.png",
+    "Models/30e4f431-8a8e-4783-bc88-465b17dc8543.md",
+    "Models/5125d2e0-3b07-4afc-954a-57a3a6e000ea.md",
+    "Models",
+    "Files",
+    "System/Attachments",
+    "System",
+    "Scratch Pad.md",
+    "AI/Tripo/Models.base",
+    "AI/Tripo/Database/items/deda71c9-04e4-4f4e-80ef-07a03da51481.md",
+    "AI/Tripo/Database/items/a007c85d-82d1-4eab-a4cd-b244eee4b54e.md",
+    "AI/Tripo/Database/items/ec342cd0-ef93-477a-9971-c5029234bb28.md",
+    "AI/Tripo/Database/items/71647b4c-5856-4892-8663-cc8a506b078f.md",
+    "AI/Tripo/Database/items/6f5b6a2b-a176-447f-8401-6d99aa74c671.md",
+    "System/Attachments/hinata-3.glb",
+    "System/Attachments/hinata-2.glb",
+    "System/Attachments/hinata 1.glb",
+    "System/Attachments/busty-butt.glb",
+    "AI/Tripo/Database/items/25070b84-fcba-47c5-a6c4-261e1685895b.md",
+    "AI/Tripo/Database/items/266b4ce2-e4a6-494c-9f6d-a093314cf996.md",
+    "AI/Tripo/Database/items/088fd2b6-c1d1-45db-8c16-e8603d244793.md",
+    "AI/Tripo/Database/items/b5e7f147-5ba1-490a-9aa5-04bc073177ee.md",
+    "AI/Tripo/Database/items/dfe35f84-385f-427a-99b1-f1643e48ffaf.md",
+    "AI/Tripo/Database/items/9380e5f8-ec3a-459b-a5b7-0488a3f33433.md",
+    "AI/Tripo/Database/items/11339566-449b-4345-9cfb-2de00205d834.md"
+  ]
+}

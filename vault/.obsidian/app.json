@@ -1,0 +1,17 @@
+{
+  "promptDelete": false,
+  "trashOption": "system",
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "current",
+  "attachmentFolderPath": "/System/Attachments",
+  "pdfExportSettings": {
+    "pageSize": "A4",
+    "landscape": false,
+    "margin": "0",
+    "downscalePercent": 100
+  },
+  "readableLineLength": false,
+  "showInlineTitle": false,
+  "propertiesInDocument": "hidden",
+  "showUnsupportedFiles": true
+}

@@ -1,0 +1,9 @@
+{
+  "enabledCssSnippets": [
+    "prompt-gallery",
+    "gallery",
+    "gallery-config",
+    "gallery-tile",
+    "global"
+  ]
+}
