@@ -6,6 +6,7 @@
 
   <ItemGroup>
     <Compile Include="Schema.fs" />
+    <Compile Include="TreeFormat.fs" />
     <Compile Include="Loader.fs" />
     <Compile Include="Resolver.fs" />
   </ItemGroup>

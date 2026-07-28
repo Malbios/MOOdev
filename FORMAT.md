@@ -43,6 +43,19 @@ Directory name under `objects/` is the corponym with the `$` stripped. One verb 
 objects with a `$0` corponym get a directory — no-corponym-no-versioning (I3) — which is a
 deliberate change from the current system (see §7).
 
+**Exception: `#0` (System Object) always gets a directory, at `objects/0/`, regardless of whether
+it has a corponym.** By construction it can't easily have one pointing at itself (corponyms are
+properties *on* `#0` pointing elsewhere), yet it's exactly where sidecar/live-IDE bootstrap verbs
+live (`#0:user_connected`, `#0:do_command` — see `moo-dev/CLAUDE.md`'s "Bootstrap verbs" section)
+and needs to be visible/editable through the same tooling as everything else. `object.moo` renders
+`@object #0` (a raw objnum, per §3's own grammar) instead of `@object $name`, and its verb files
+render `@verb #0:"..." ...`/`@program #0:...` the same way — a fabricated `$0` would look like a
+real corponym that doesn't exist. `"0"` is safe as a directory/map key precisely because it can
+never collide with a real one: MOO property names can't start with a digit. This exception is
+**export/read-model only** — the importer/promotion pipeline stays corponym-driven and does not
+pick `#0` up (it has its own separate bootstrap path, the `-e`/emergency console, documented
+alongside the verbs above).
+
 ---
 
 ## 2. `corponyms.moo` grammar

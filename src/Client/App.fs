@@ -75,6 +75,16 @@ let private terminalPaneEl = document.getElementById ("terminal-pane")
 let private inspectorPaneEl = document.getElementById ("inspector-pane")
 let private inspectorContentEl = document.getElementById ("inspector-content")
 let private inspectorDiagnosticsEl = document.getElementById ("inspector-diagnostics")
+let private editorHistoryBtn = document.getElementById ("editor-history-btn")
+let private verbHistoryPaneEl = document.getElementById ("verb-history-pane")
+let private verbHistoryListEl = document.getElementById ("verb-history-list")
+let private verbHistoryDiffEditorEl = document.getElementById ("verb-history-diff-editor")
+let private verbHistoryRestoreBtn = document.getElementById ("verb-history-restore-btn")
+let private tabHistoryBtn = document.getElementById ("tab-history")
+let private historyPaneEl = document.getElementById ("history-pane")
+let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
+let private historySearchResultsEl = document.getElementById ("history-search-results")
+let private corponymHistoryListEl = document.getElementById ("corponym-history-list")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -428,6 +438,7 @@ type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
     | InspectorTab of objRef: int64
+    | HistoryTab
 
 let mutable private activeTab: OpenTab = GameTab
 
@@ -451,6 +462,19 @@ let mutable private activeInspectorProp: (int64 * string) option = None
 /// enough to highlight an object row, so an object can stay visibly
 /// "selected" even after the main pane has moved on to a different tab.
 let mutable private selectedObjRef: int64 option = None
+
+/// Whether the currently-active `VerbTab`'s editor pane is showing its
+/// history/diff view instead of the normal Monaco editor - orthogonal to
+/// `activeTab` itself (it's a sub-mode of a `VerbTab`, not a distinct tab),
+/// reset to `false` on every tab switch so opening/reactivating a verb tab
+/// always starts back in the normal editor view.
+let mutable private showingVerbHistory = false
+
+/// Whether a real MOO login has succeeded this session - set by the
+/// `moodev-login-result` handler. Nothing client-side previously needed this
+/// as a standing boolean; the History tab uses it to skip firing
+/// `corponym-history` before there's a logged-in player to ask about.
+let mutable private isLoggedIn = false
 
 /// Open verb tabs, in the order they were opened. Game isn't stored here -
 /// it's permanent and rendered separately.
@@ -518,27 +542,32 @@ let private currentVerbDoc () : (int64 * string) option =
     match activeTab with
     | VerbTab(o, v) -> Some(o, v)
     | GameTab
-    | InspectorTab _ -> None
+    | InspectorTab _
+    | HistoryTab -> None
 
-/// Quotes and escapes a raw string for splicing into MOO source as a string
-/// literal - backslash and double-quote are the only two characters classic
-/// MOO string literals escape (see moocode-reference.md).
-let private mooStringLiteral (s: string) : string =
-    let escaped = s.Replace("\\", "\\\\").Replace("\"", "\\\"")
-    "\"" + escaped + "\""
+/// Sends a Phase 4 structured IDE-action envelope (`{"action": ..., ...}`)
+/// over the main WebSocket - the sidecar's `Program.buildTryDispatch` parses
+/// this JSON and dispatches to `Sidecar.IdeActions` instead of forwarding it
+/// as raw MOO text (ordinary terminal input isn't valid JSON, so the two
+/// never collide on the wire). Replaces the retired `$vcs:ide_*` verb calls
+/// this client used to send as literal MOO source - the receiving side
+/// (`ws.onmessage`'s `moodev-edit-*`/`moodev-prop-*`/`moodev-location-*`
+/// handlers below) is unchanged, since the sidecar responds in the exact
+/// same wire shape either way.
+let private sendAction (fields: (string * obj) list) : unit =
+    ws.send (JS.JSON.stringify (createObj fields))
 
-/// Turns the editor's current content into a MOO list-of-strings literal
-/// suitable for set_verb_code()'s (via $vcs:ide_save's) third argument.
-let private mooCodeListLiteral (source: string) : string =
-    let lines = source.Replace("\r\n", "\n").Split('\n')
-    "{" + (lines |> Array.map mooStringLiteral |> String.concat ", ") + "}"
+/// Turns the editor's current content into the line array `IdeActions.saveVerb`
+/// expects for its JSON `code` field.
+let private codeLines (source: string) : string[] =
+    source.Replace("\r\n", "\n").Split('\n')
 
 /// Asks the server to load a verb - unconditionally, no "is this already
 /// open" check (that's `openOrSwitchToVerb`'s job). The `moodev-edit-content`
 /// handler is what actually adds the resulting tab and shows it once the
 /// content arrives.
-let private fetchVerb (objExpr: string) (verb: string) : unit =
-    ws.send (sprintf "; $vcs:ide_fetch(%s, %s)" objExpr (mooStringLiteral verb))
+let private fetchVerb (objRef: int64) (verb: string) : unit =
+    sendAction [ "action" ==> "fetch-verb"; "obj" ==> int objRef; "verb" ==> verb ]
 
 /// Whether the editor holds unsaved changes - set on every real content
 /// change, cleared right after a save is sent and right after a fresh verb
@@ -582,8 +611,8 @@ let private saveIfDirty () : unit =
     if isDirty then
         match currentVerbDoc () with
         | Some(objRef, verb) ->
-            let codeLiteral = mooCodeListLiteral (editor.getValue ())
-            ws.send (sprintf "; $vcs:ide_save(#%d, %s, %s)" objRef (mooStringLiteral verb) codeLiteral)
+            let code = codeLines (editor.getValue ())
+            sendAction [ "action" ==> "save-verb"; "obj" ==> int objRef; "verb" ==> verb; "code" ==> code ]
             setDirty false
         | None -> ()
 
@@ -599,27 +628,110 @@ editor.onDidChangeCursorPosition (fun ev ->
 setDirty false
 statusPositionEl.textContent <- "Ln 1, Col 1"
 
-/// Shows whichever pane `tab` needs and hides the other; focuses that
-/// pane's primary input.
+/// All six mutually-exclusive panes under `#main-pane` - `showPaneFor`
+/// activates exactly one (or, for a `VerbTab` in history mode, two: the
+/// verb-history pane replaces the plain editor pane, everything else stays
+/// hidden the same way).
+let private allPanes =
+    [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl; historyPaneEl ]
+
+let private activateOnly (paneEl: HTMLElement) : unit =
+    for p in allPanes do
+        if p = paneEl then p.classList.add "active" else p.classList.remove "active"
+
+/// Shows whichever pane `tab` needs and hides the rest; focuses that pane's
+/// primary input.
 let private showPaneFor (tab: OpenTab) : unit =
     match tab with
     | GameTab ->
-        terminalPaneEl.classList.add "active"
-        editorPaneEl.classList.remove "active"
-        inspectorPaneEl.classList.remove "active"
+        activateOnly terminalPaneEl
         inputEl.focus ()
+    | VerbTab _ when showingVerbHistory -> activateOnly verbHistoryPaneEl
     | VerbTab _ ->
-        terminalPaneEl.classList.remove "active"
-        editorPaneEl.classList.add "active"
-        inspectorPaneEl.classList.remove "active"
+        activateOnly editorPaneEl
         // The container was `display:none` a moment ago - force Monaco to
         // re-measure rather than rely on ResizeObserver picking this up.
         editor.layout ()
         editor.focus ()
-    | InspectorTab _ ->
-        terminalPaneEl.classList.remove "active"
-        editorPaneEl.classList.remove "active"
-        inspectorPaneEl.classList.add "active"
+    | InspectorTab _ -> activateOnly inspectorPaneEl
+    | HistoryTab -> activateOnly historyPaneEl
+
+/// The historical code currently shown in the verb-history diff view's
+/// "original" side - what "Restore this version" writes into the live
+/// editor once clicked. `None` until a commit has actually been picked.
+let mutable private currentHistoricalCode: string option = None
+
+let mutable private historyDiffEditor: Monaco.IDiffEditor option = None
+
+/// Created lazily on first use rather than up front - most verb tabs never
+/// open their history view, so there's no reason to pay for a second Monaco
+/// instance until one actually does.
+let private getOrCreateHistoryDiffEditor () : Monaco.IDiffEditor =
+    match historyDiffEditor with
+    | Some e -> e
+    | None ->
+        let e = Monaco.createDiffEditor verbHistoryDiffEditorEl
+        historyDiffEditor <- Some e
+        e
+
+/// Renders the verb-history pane's commit list - each entry, clicked,
+/// fetches that commit's code (`verb-at-commit`) and diffs it against
+/// whatever the live editor currently holds, not necessarily the last-saved
+/// version - comparing against in-progress unsaved edits is useful too.
+let private renderVerbHistoryList (objRef: int64) (verbName: string) (entries: (string * int64 * string) list) : unit =
+    verbHistoryListEl.innerHTML <- ""
+
+    if entries.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No history yet."
+        verbHistoryListEl.appendChild li |> ignore
+    else
+        for sha, whenEpochSeconds, message in entries do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            let date = System.DateTimeOffset.FromUnixTimeSeconds(whenEpochSeconds).LocalDateTime
+            li.textContent <- sprintf "%s  %s" (date.ToString("yyyy-MM-dd HH:mm")) message
+
+            li.onclick <-
+                fun _ ->
+                    verbHistoryRestoreBtn.setAttribute ("style", "display:none")
+                    currentHistoricalCode <- None
+                    sendAction [ "action" ==> "verb-at-commit"; "obj" ==> int objRef; "verb" ==> verbName; "sha" ==> sha ]
+
+            verbHistoryListEl.appendChild li |> ignore
+
+// Toggles the currently-active verb tab's editor pane into (or out of) its
+// history view - only meaningful for a `VerbTab`, so a click while any
+// other tab is active is a silent no-op (the button only exists inside
+// `#editor-status`, which is itself only ever visible for a `VerbTab`).
+editorHistoryBtn.onclick <-
+    fun _ ->
+        match activeTab with
+        | VerbTab(objRef, verbName) ->
+            showingVerbHistory <- true
+            verbHistoryListEl.innerHTML <- "Loading..."
+            verbHistoryRestoreBtn.setAttribute ("style", "display:none")
+            currentHistoricalCode <- None
+            showPaneFor activeTab
+            sendAction [ "action" ==> "verb-history"; "obj" ==> int objRef; "verb" ==> verbName ]
+        | GameTab
+        | InspectorTab _
+        | HistoryTab -> ()
+
+// Loads the picked historical version straight into the live editor - not
+// a new server action, just `editor.setValue()` - the existing
+// `onDidChangeModelContent`/`setDirty true` and blur-triggered
+// `saveIfDirty` autosave machinery takes it from there exactly like a
+// manual edit, so "restore" is really "load old content, then save
+// normally".
+verbHistoryRestoreBtn.onclick <-
+    fun _ ->
+        match currentHistoricalCode with
+        | Some code ->
+            editor.setValue code
+            showingVerbHistory <- false
+            showPaneFor activeTab
+        | None -> ()
 
 /// Snapshots whatever's currently in the editor into `tabContent`, if the
 /// active tab is a verb - called right before navigating away from it.
@@ -627,7 +739,8 @@ let private cacheCurrentEditorContent () : unit =
     match activeTab with
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
     | GameTab
-    | InspectorTab _ -> ()
+    | InspectorTab _
+    | HistoryTab -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -862,10 +975,12 @@ let rec private switchToTab (tab: OpenTab) : unit =
     if tab <> activeTab then
         cacheCurrentEditorContent ()
         activeTab <- tab
+        showingVerbHistory <- false
 
         match tab with
         | GameTab
-        | InspectorTab _ -> ()
+        | InspectorTab _
+        | HistoryTab -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -887,7 +1002,7 @@ and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
     if Map.containsKey (objRef, verbName) tabContent then
         switchToTab (VerbTab(objRef, verbName))
     else
-        fetchVerb (sprintf "#%d" objRef) verbName
+        fetchVerb objRef verbName
 
 /// Closes an open verb tab. If it was the active one, falls back to the
 /// tab that was to its left (or the new first tab, or Game if none remain).
@@ -906,12 +1021,15 @@ and private closeTab (objRef: int64, verbName: string) : unit =
             | [] -> GameTab
             | tabs -> VerbTab tabs.[max 0 (min (idx - 1) (tabs.Length - 1))]
 
+        showingVerbHistory <- false
+
         match activeTab with
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             setDirty false
         | GameTab
-        | InspectorTab _ -> ()
+        | InspectorTab _
+        | HistoryTab -> ()
 
         showPaneFor activeTab
 
@@ -947,7 +1065,8 @@ and private closeInspectorTab (objRef: int64) : unit =
         match activeTab with
         | InspectorTab o -> loadInspector o None
         | GameTab
-        | VerbTab _ -> ()
+        | VerbTab _
+        | HistoryTab -> ()
 
     renderTabs ()
     renderTree ()
@@ -1026,7 +1145,7 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
     }
     |> Async.StartImmediate
 
-    ws.send (sprintf "; $vcs:ide_get_properties(#%d)" objRef)
+    sendAction [ "action" ==> "get-properties"; "obj" ==> int objRef ]
 
 /// Renders a titled list of clickable object links into `container` - shared
 /// by the inspector pane's Parents/Children sections. Each entry opens that
@@ -1169,12 +1288,11 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         // changed since it was last loaded/saved (see
         // `inspectorPropertyLastValues`'s own comment for why a direct
         // comparison is enough here, unlike Monaco's `isDirty` flag).
-        // `mooStringLiteral` here is doing the same "quote this raw text for
-        // safe embedding as MOO source" job it already does for `ide_save`'s
-        // verb name/code arguments - the resulting quoted string is what
-        // `$vcs:ide_set_property` receives as `literal_text` and itself
-        // `eval()`s, so what the user types (`5`, `"hello"`, `{1, 2}`, ...)
-        // is evaluated as a real MOO expression, not taken as a raw string.
+        // `input.value` is sent raw (not MOO-quoted client-side) - the
+        // sidecar's `IdeActions.setProperty` does the quoting and `eval()`s
+        // it server-side, so what the user types (`5`, `"hello"`, `{1, 2}`,
+        // ...) is evaluated as a real MOO expression, the same UX
+        // `$vcs:ide_set_property` used to provide.
         input.onblur <-
             fun _ ->
                 let lastValue = inspectorPropertyLastValues |> Map.tryFind pname |> Option.defaultValue ""
@@ -1182,13 +1300,11 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 if input.value <> lastValue then
                     inspectorPropertyLastValues <- Map.add pname input.value inspectorPropertyLastValues
 
-                    ws.send (
-                        sprintf
-                            "; $vcs:ide_set_property(#%d, %s, %s)"
-                            objRef
-                            (mooStringLiteral pname)
-                            (mooStringLiteral input.value)
-                    )
+                    sendAction
+                        [ "action" ==> "set-property"
+                          "obj" ==> int objRef
+                          "name" ==> pname
+                          "valueExpr" ==> input.value ]
 
         // Read-only ANSI-code preview, filled in (only when the value
         // actually contains escape bytes) by the `moodev-prop-content`
@@ -1208,6 +1324,52 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             highlightRow <- Some tr
 
     propsSection.appendChild propsTable |> ignore
+
+    // Nothing before this could create a *new* property at all - `set-property`
+    // (the autosave-on-blur inputs above) only ever assigns to one that
+    // already exists (`E_PROPNF` otherwise). This is a separate action
+    // (`add-property`), reported back on its own wire header
+    // (`moodev-prop-add-result`, handled below) so a successful add can
+    // trigger a full inspector refresh (a new row now needs to exist),
+    // unlike a plain value change.
+    let addPropRow = document.createElement ("div")
+    addPropRow.classList.add "inspector-add-property"
+
+    let addNameInput = document.createElement ("input") :?> HTMLInputElement
+    addNameInput.classList.add "inspector-property-value"
+    addNameInput.placeholder <- "name"
+
+    let addValueInput = document.createElement ("input") :?> HTMLInputElement
+    addValueInput.classList.add "inspector-property-value"
+    addValueInput.placeholder <- "value (MOO expr)"
+
+    let addPermsInput = document.createElement ("input") :?> HTMLInputElement
+    addPermsInput.classList.add "inspector-property-value"
+    addPermsInput.placeholder <- "perms"
+    addPermsInput.value <- "rc"
+
+    let addBtn = document.createElement ("button")
+    addBtn.classList.add "pane-action-btn"
+    addBtn.textContent <- "Add property"
+
+    addBtn.onclick <-
+        fun _ ->
+            let name = addNameInput.value.Trim()
+
+            if name <> "" then
+                sendAction
+                    [ "action" ==> "add-property"
+                      "obj" ==> int objRef
+                      "name" ==> name
+                      "valueExpr" ==> addValueInput.value
+                      "perms" ==> addPermsInput.value ]
+
+    addPropRow.appendChild addNameInput |> ignore
+    addPropRow.appendChild addValueInput |> ignore
+    addPropRow.appendChild addPermsInput |> ignore
+    addPropRow.appendChild addBtn |> ignore
+    propsSection.appendChild addPropRow |> ignore
+
     inspectorContentEl.appendChild propsSection |> ignore
 
     let verbsSection = document.createElement ("div")
@@ -1252,6 +1414,72 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         scrollIntoViewCentered tr
         tr.classList.add "inspector-prop-highlight"
     | None -> ()
+
+/// Refreshes the History tab's corponym-history section - always, same
+/// "always fresh" convention `loadInspector` uses, since this is server-side
+/// git history that could have changed since last shown.
+and private loadCorponymHistory () : unit =
+    corponymHistoryListEl.innerHTML <- "Loading..."
+    sendAction [ "action" ==> "corponym-history" ]
+
+/// Switches to the History tab and refreshes its corponym-history section
+/// (the search section stays whatever it last showed - search is explicit,
+/// user-triggered via Enter, not something to unconditionally re-run).
+and private openOrSwitchToHistory () : unit =
+    switchToTab HistoryTab
+
+    if isLoggedIn then
+        loadCorponymHistory ()
+    else
+        corponymHistoryListEl.innerHTML <- ""
+        historySearchResultsEl.innerHTML <- ""
+
+/// Renders `search-history`'s results - each clickable (when it resolved to
+/// a live objnum; see `IdeActions.searchHistory`'s own comment on why an
+/// unresolvable corponym is shown but not clickable) straight through to
+/// that verb via the existing `openOrSwitchToVerb`, same as every other
+/// verb-opening entry point in this file.
+and private renderSearchResults (results: (string * int64 * int64 option * string * string * string) list) : unit =
+    historySearchResultsEl.innerHTML <- ""
+
+    if results.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No matches."
+        historySearchResultsEl.appendChild li |> ignore
+    else
+        for _sha, whenEpochSeconds, objRefOpt, corponym, label, message in results do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            let date = System.DateTimeOffset.FromUnixTimeSeconds(whenEpochSeconds).LocalDateTime
+
+            li.textContent <- sprintf "%s  $%s / %s - %s" (date.ToString("yyyy-MM-dd HH:mm")) corponym label message
+
+            match objRefOpt with
+            | Some objRef ->
+                li.classList.add "inspector-link"
+                li.onclick <- fun _ -> openOrSwitchToVerb objRef label
+            | None -> ()
+
+            historySearchResultsEl.appendChild li |> ignore
+
+/// Renders `corponym-history`'s entries - each `repointed` entry's old/new
+/// objnum is clickable through to that object's inspector via the existing
+/// `openOrSwitchToInspector`, same link style the inspector pane's own
+/// parent/child lists use.
+and private renderCorponymHistoryList (entries: (string * int64 * string * string * string) list) : unit =
+    corponymHistoryListEl.innerHTML <- ""
+
+    if entries.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No corponym changes yet."
+        corponymHistoryListEl.appendChild li |> ignore
+    else
+        for _sha, whenEpochSeconds, kind, name, detail in entries do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            let date = System.DateTimeOffset.FromUnixTimeSeconds(whenEpochSeconds).LocalDateTime
+            li.textContent <- sprintf "%s  %s $%s: %s" (date.ToString("yyyy-MM-dd HH:mm")) kind name detail
+            corponymHistoryListEl.appendChild li |> ignore
 
 /// Rebuilds `#verb-tabs` (the dynamic, closable tabs) and the static
 /// `#tab-game` button's `.active` state. `#tab-game` itself is never
@@ -1323,6 +1551,11 @@ and private renderTabs () : unit =
         tabGameBtn.classList.add "active"
     else
         tabGameBtn.classList.remove "active"
+
+    if activeTab = HistoryTab then
+        tabHistoryBtn.classList.add "active"
+    else
+        tabHistoryBtn.classList.remove "active"
 
 /// True if `node` itself is a filter match, respecting the filter's scope.
 /// "prop:" is exclusive - a property match never falls through to also
@@ -1771,6 +2004,13 @@ outputEl.onclick <-
             inputEl.focus ()
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
+tabHistoryBtn.onclick <- fun _ -> openOrSwitchToHistory ()
+
+historySearchInputEl.onkeydown <-
+    fun ev ->
+        if ev.key = "Enter" && historySearchInputEl.value.Trim() <> "" then
+            historySearchResultsEl.innerHTML <- "Searching..."
+            sendAction [ "action" ==> "search-history"; "query" ==> historySearchInputEl.value ]
 // `switchToTab` no-ops when its argument already equals `activeTab` (to
 // avoid redundant work re-clicking the tab you're already on) - but
 // `activeTab` *starts* as `GameTab`, so that guard also skipped the very
@@ -2013,6 +2253,106 @@ ws.onmessage <-
                         inspectorDiagnosticsEl.textContent <- (if ok then "" else String.concat "\n" lines)
                     | _ -> ()
                 | None -> ()
+            elif header.StartsWith("moodev-prop-add-result") then
+                // A successful add needs a full inspector refresh (a new
+                // row now exists) rather than just clearing diagnostics -
+                // `loadInspector`'s own "always fresh" round-trip already
+                // covers that, same as every other inspector action.
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            loadInspector objRef None
+                        else
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            // "-result" (the ok:0 / error variants) checked before their
+            // plain "-content"-shaped counterparts, since e.g.
+            // "moodev-verb-history" is itself a string-prefix of
+            // "moodev-verb-history-result" - checking the shorter one first
+            // would swallow every error response too.
+            elif header.StartsWith("moodev-verb-history-result") then
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = VerbTab(objRef, verb) && showingVerbHistory -> renderVerbHistoryList objRef verb []
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-verb-history") then
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = VerbTab(objRef, verb) && showingVerbHistory ->
+                        let entries =
+                            lines
+                            |> Array.choose (fun line ->
+                                let parts = line.Split('\t')
+
+                                if parts.Length = 3 then
+                                    match System.Int64.TryParse parts.[1] with
+                                    | true, whenEpoch -> Some(parts.[0], whenEpoch, parts.[2])
+                                    | false, _ -> None
+                                else
+                                    None)
+                            |> List.ofArray
+
+                        renderVerbHistoryList objRef verb entries
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-verb-at-commit-result") then
+                () // verb not found at that commit - restore stays hidden, nothing more to show
+            elif header.StartsWith("moodev-verb-at-commit") then
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = VerbTab(objRef, verb) && showingVerbHistory ->
+                        let historicalCode = String.concat "\n" lines
+                        currentHistoricalCode <- Some historicalCode
+                        let diffEditor = getOrCreateHistoryDiffEditor ()
+                        Monaco.setDiffModel diffEditor historicalCode (editor.getValue ())
+                        verbHistoryRestoreBtn.setAttribute ("style", "")
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-search-result") then
+                if activeTab = HistoryTab then
+                    let results =
+                        lines
+                        |> Array.choose (fun line ->
+                            let parts = line.Split('\t')
+
+                            if parts.Length = 6 then
+                                match System.Int64.TryParse parts.[1] with
+                                | true, whenEpoch ->
+                                    let objRefOpt =
+                                        match System.Int64.TryParse parts.[2] with
+                                        | true, n -> Some n
+                                        | false, _ -> None
+
+                                    Some(parts.[0], whenEpoch, objRefOpt, parts.[3], parts.[4], parts.[5])
+                                | false, _ -> None
+                            else
+                                None)
+                        |> List.ofArray
+
+                    renderSearchResults results
+            elif header.StartsWith("moodev-corponym-history") then
+                if activeTab = HistoryTab then
+                    let entries =
+                        lines
+                        |> Array.choose (fun line ->
+                            let parts = line.Split('\t')
+
+                            if parts.Length = 5 then
+                                match System.Int64.TryParse parts.[1] with
+                                | true, whenEpoch -> Some(parts.[0], whenEpoch, parts.[2], parts.[3], parts.[4])
+                                | false, _ -> None
+                            else
+                                None)
+                        |> List.ofArray
+
+                    renderCorponymHistoryList entries
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text

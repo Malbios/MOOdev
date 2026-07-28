@@ -1,132 +1,254 @@
-/// Round-trips `Metadata.Loader.load` against the real `Survive` tree (same
-/// corpus `Language.Tests` reads) - the proof point per the M4 plan's 4.3b
-/// verify step: "load the real exporter's output... confirm every
-/// object/verb appears in the graph correctly."
+/// Exercises `Metadata.Loader.load` against synthetic, hand-built FORMAT.md
+/// trees rather than the real `Survive` checkout - the old suite asserted
+/// specific facts about the now-retired toastcore+`$vcs` tree (VCS object
+/// #127, Wizard #2, Generic Room #3...), all gone now that `Survive` is
+/// cleared and re-exported in the new sidecar-owned format. Fixtures are
+/// built with `Sidecar.Exporter`'s own renderers, mirroring
+/// `Sidecar.Tests/TreeParserTests.fs`'s existing convention, rather than
+/// hand-writing text that could silently drift from the real render format.
 module Metadata.Tests.LoaderTests
 
 open System.IO
-open System.Text.Json
 open Xunit
 open Metadata.Schema
 open Metadata.Loader
+open Sidecar.Exporter
 
-let private surviveRoot =
-    Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "..", "Survive"))
+let private tempDir () =
+    let dir = Path.Combine(Path.GetTempPath(), "moovcs-loader-test-" + System.Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(dir) |> ignore
+    dir
 
-// `load` reparses every captured verb in the corpus - shared across facts
-// via `lazy` so a full `dotnet test` run pays that cost once, not once per
-// fact.
-let private graph = lazy (load surviveRoot)
+/// A small, synthetic tree: two corponym-bearing objects (`room` #3,
+/// parented on `$string_utils` and raw `#1`; `string_utils` #4, no parents)
+/// plus a third corponym (`ghost` #99) with no `object.moo` at all -
+/// exercising the "corponym without a captured directory yet" tolerance
+/// this loader and `Sidecar.TreeParser` both share.
+let private writeFixtureTree (dir: string) =
+    File.WriteAllText(Path.Combine(dir, "FORMAT_VERSION"), "1\n")
 
-[<Fact>]
-let ``Survive metadata.json is present`` () =
-    Assert.True(File.Exists(Path.Combine(surviveRoot, "metadata.json")))
+    let corponyms = [ "room", 3L; "string_utils", 4L; "ghost", 99L ]
+    File.WriteAllText(Path.Combine(dir, "corponyms.moo"), renderCorponymsMoo corponyms)
 
-[<Fact>]
-let ``loads every object metadata.json contains`` () =
-    use doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(surviveRoot, "metadata.json")))
-    let expectedCount = doc.RootElement.GetProperty("objects").GetArrayLength()
+    let corponymsByObjnum = Map.ofList [ 4L, "string_utils" ]
 
-    Assert.Equal(expectedCount, graph.Value.Objects.Count)
+    let lookSelf: VerbExport =
+        { Names = "look_self"
+          Owner = 3L
+          Perms = "rxd"
+          Dobj = "this"
+          Prep = "none"
+          Iobj = "this"
+          Code = [ "\"Describe this room.\";"; "player:tell(this.description);" ] }
 
-[<Fact>]
-let ``drops no verbs - every object's verb count matches metadata.json`` () =
-    use doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(surviveRoot, "metadata.json")))
+    let roomData: ObjectExport =
+        { Parents = [ 4L; 1L ] // $string_utils, then raw #1 (uncorponymed)
+          Owner = 3L
+          Flags = [ "r"; "f" ]
+          Properties = [ { Name = "description"; Owner = 3L; Perms = "rc"; ValueLiteral = "\"A small room.\"" } ]
+          Verbs = [ lookSelf ] }
 
-    for objEl in doc.RootElement.GetProperty("objects").EnumerateArray() do
-        let num = parseObjRef (objEl.GetProperty("num").GetString())
-        let expectedVerbCount = objEl.GetProperty("verbs").GetArrayLength()
-        let node = Map.find num graph.Value.Objects
-        Assert.Equal(expectedVerbCount, node.Verbs.Length)
+    let roomDir = Path.Combine(dir, "objects", "room")
+    let roomVerbsDir = Path.Combine(roomDir, "verbs")
+    Directory.CreateDirectory(roomVerbsDir) |> ignore
 
-[<Fact>]
-let ``known object names resolve from lookups.toml`` () =
-    let systemObject = Map.find 0L graph.Value.Objects
-    Assert.Equal(Some "The_System_Object", systemObject.Name)
+    let roomVerbFileNames = assignVerbFileNames roomData.Verbs
 
-[<Fact>]
-let ``an object's real (unsanitized) live name loads from metadata.json`` () =
-    // #3 (Generic Room) is a stable, long-captured ToastCore object -
-    // `Name` (lookups.toml) is the sanitized "Generic_Room" used for the
-    // git directory; `LiveName` should be the real, space-containing name
-    // as `metadata.json`'s `"name"` field (from `i.name`) actually has it.
-    let genericRoom = Map.find 3L graph.Value.Objects
-    Assert.Equal(Some "Generic Room", genericRoom.LiveName)
+    File.WriteAllText(
+        Path.Combine(roomDir, "object.moo"),
+        renderObjectMoo corponymsByObjnum "$room" roomData roomVerbFileNames
+    )
 
-[<Fact>]
-let ``a known captured verb parses cleanly with an attached AST`` () =
-    let vcsObj =
-        graph.Value.Objects |> Map.toSeq |> Seq.map snd |> Seq.find (fun o -> o.Name = Some "VCS")
+    for verb, fileName in roomVerbFileNames do
+        File.WriteAllText(Path.Combine(roomVerbsDir, fileName), renderVerbFile "$room" verb)
 
-    let exportVerb =
-        vcsObj.Verbs |> List.find (fun v -> v.Meta.Names |> List.contains "export_metadata")
+    let stringUtilsData: ObjectExport =
+        { Parents = []
+          Owner = 3L
+          Flags = []
+          Properties = []
+          Verbs = [] }
 
-    Assert.True(exportVerb.SourcePath.IsSome)
-    Assert.True(exportVerb.Ast.IsSome)
-    Assert.Equal(0, exportVerb.DiagnosticCount)
+    let suDir = Path.Combine(dir, "objects", "string_utils")
+    Directory.CreateDirectory(Path.Combine(suDir, "verbs")) |> ignore
 
-[<Fact>]
-let ``Survive builtins.json is present`` () =
-    Assert.True(File.Exists(Path.Combine(surviveRoot, "builtins.json")))
+    File.WriteAllText(
+        Path.Combine(suDir, "object.moo"),
+        renderObjectMoo corponymsByObjnum "$string_utils" stringUtilsData []
+    )
+    // "ghost" #99 deliberately has no objects/ghost directory at all.
 
-[<Fact>]
-let ``loads every builtin builtins.json contains, keyed by name`` () =
-    use doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(surviveRoot, "builtins.json")))
-    let expectedCount = doc.RootElement.GetProperty("functions").GetArrayLength()
-    Assert.Equal(expectedCount, graph.Value.Builtins.Count)
+    // FORMAT.md §1's `#0` exception: no corponym at all (not listed in
+    // corponyms.moo above), yet still gets a directory - "0", the raw
+    // `@object #0` self-reference.
+    let systemObjectData: ObjectExport =
+        { Parents = []
+          Owner = 0L
+          Flags = [ "wizard"; "programmer" ]
+          Properties = []
+          Verbs = [] }
 
-[<Fact>]
-let ``a known builtin's arity and arg types load correctly`` () =
-    let f = Map.find "function_info" graph.Value.Builtins
-    Assert.Equal(0, f.MinArgs)
-    Assert.Equal(1, f.MaxArgs)
-    Assert.Equal<int list>([ 2 ], f.ArgTypes) // TYPE_STR
+    let systemObjectDir = Path.Combine(dir, "objects", "0")
+    Directory.CreateDirectory(Path.Combine(systemObjectDir, "verbs")) |> ignore
 
-[<Fact>]
-let ``a builtin with a documented C-source signature loads its real parameter names`` () =
-    let f = Map.find "strsub" graph.Value.Builtins
-    Assert.Equal(Some [ "source"; "what"; "with"; "case-matters" ], f.ParamNames)
-
-[<Fact>]
-let ``a builtin with no documented signature has ParamNames = None, not a crash`` () =
-    let f = Map.find "length" graph.Value.Builtins
-    Assert.True(f.ParamNames.IsNone)
-
-// --- Owner/Flags/Properties (added for the object inspector) ------------
-
-[<Fact>]
-let ``VCS's owner, flags, and properties load correctly from real exported data`` () =
-    let vcs = Map.find 127L graph.Value.Objects
-    Assert.Equal(Some 2L, vcs.Owner)
-
-    match vcs.Flags with
-    | Some flags ->
-        Assert.False(flags.Player)
-        Assert.False(flags.Programmer)
-        Assert.False(flags.Wizard)
-        Assert.False(flags.Fertile)
-    | None -> Assert.Fail "expected Some flags"
-
-    Assert.Contains(vcs.Properties, fun (p: PropertyMeta) -> p.Name = "repo_root" && p.Owner = 2L && p.Perms = "rw")
+    File.WriteAllText(
+        Path.Combine(systemObjectDir, "object.moo"),
+        renderObjectMoo corponymsByObjnum "#0" systemObjectData []
+    )
 
 [<Fact>]
-let ``the Wizard player object's flags reflect real player/programmer/wizard bits`` () =
-    let wizard = Map.find 2L graph.Value.Objects
+let ``loads every corponym-bearing object that has a captured directory`` () =
+    let dir = tempDir ()
 
-    match wizard.Flags with
-    | Some flags ->
-        Assert.True(flags.Player)
-        Assert.True(flags.Programmer)
-        Assert.True(flags.Wizard)
-    | None -> Assert.Fail "expected Some flags"
+    try
+        writeFixtureTree dir
+        let graph = load dir
+
+        Assert.Equal(3, graph.Objects.Count) // room + string_utils + #0, not ghost
+        Assert.True(Map.containsKey 3L graph.Objects)
+        Assert.True(Map.containsKey 4L graph.Objects)
+        Assert.False(Map.containsKey 99L graph.Objects)
+    finally
+        Directory.Delete(dir, true)
 
 [<Fact>]
-let ``Generic Room's real fertile/read flags load correctly`` () =
-    let genericRoom = Map.find 3L graph.Value.Objects
+let ``#0 loads even though it has no corponym at all - FORMAT.md's one exception`` () =
+    let dir = tempDir ()
 
-    match genericRoom.Flags with
-    | Some flags ->
-        Assert.True(flags.Read)
-        Assert.True(flags.Fertile)
-        Assert.False(flags.Wizard)
-    | None -> Assert.Fail "expected Some flags"
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let systemObject = Map.find 0L graph.Objects
+
+        Assert.Equal(None, systemObject.Name) // no real corponym - honest, not a fabricated label
+        Assert.Equal(Some { Player = false; Programmer = true; Wizard = true; Read = false; Write = false; Fertile = false; Anonymous = false }, systemObject.Flags)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``SystemObjectProperties matches corponyms.moo exactly, including uncaptured entries`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+
+        Assert.Equal<Map<string, int64>>(
+            Map.ofList [ "room", 3L; "string_utils", 4L; "ghost", 99L ],
+            graph.SystemObjectProperties
+        )
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``resolves both $name and raw #N parent references`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let room = Map.find 3L graph.Objects
+
+        Assert.Equal<int64 list>([ 4L; 1L ], room.Parents)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``computes Children by inverting Parents`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let stringUtils = Map.find 4L graph.Objects
+
+        Assert.Equal<int64 list>([ 3L ], stringUtils.Children)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``LiveName is always None, Owner and Flags are always Some`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let room = Map.find 3L graph.Objects
+
+        Assert.Equal(None, room.LiveName)
+        Assert.Equal(Some 3L, room.Owner)
+
+        match room.Flags with
+        | Some flags ->
+            Assert.True(flags.Read)
+            Assert.True(flags.Fertile)
+            Assert.False(flags.Wizard)
+        | None -> Assert.Fail "expected Some flags"
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``a verb's captured source parses into an AST with SourcePath populated`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let room = Map.find 3L graph.Objects
+        let verb = room.Verbs |> List.find (fun v -> v.Meta.Names |> List.contains "look_self")
+
+        Assert.Equal(1, verb.Meta.Index)
+        Assert.True(verb.SourcePath.IsSome)
+        Assert.True(verb.Ast.IsSome)
+        Assert.Equal(0, verb.DiagnosticCount)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``a property's structural fields load, without its value`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let room = Map.find 3L graph.Objects
+
+        Assert.Contains(room.Properties, fun (p: PropertyMeta) -> p.Name = "description" && p.Owner = 3L && p.Perms = "rc")
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``builtins.json absence degrades to an empty map, not a crash`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+
+        Assert.Equal(0, graph.Builtins.Count)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``a dangling $name parent reference fails loudly rather than silently dropping`` () =
+    let dir = tempDir ()
+
+    try
+        File.WriteAllText(Path.Combine(dir, "FORMAT_VERSION"), "1\n")
+        File.WriteAllText(Path.Combine(dir, "corponyms.moo"), renderCorponymsMoo [ "room", 3L ])
+
+        // A genuinely dangling $name reference can only occur via a
+        // corrupted or hand-edited tree - renderObjectMoo only ever emits
+        // $name for entries actually present in its corponymsByObjnum map,
+        // so this is hand-written rather than rendered.
+        let roomDir = Path.Combine(dir, "objects", "room")
+        Directory.CreateDirectory(Path.Combine(roomDir, "verbs")) |> ignore
+
+        File.WriteAllText(
+            Path.Combine(roomDir, "object.moo"),
+            "@object $room\nparents: $nonexistent\nowner: #3\nflags: \nverbs: \n"
+        )
+
+        Assert.Throws<System.Exception>(fun () -> load dir |> ignore) |> ignore
+    finally
+        Directory.Delete(dir, true)

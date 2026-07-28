@@ -11,10 +11,14 @@
     <Compile Include="TreeParserTests.fs" />
     <Compile Include="ImporterTests.fs" />
     <Compile Include="RoundTripTests.fs" />
+    <Compile Include="GitStoreTests.fs" />
+    <Compile Include="PromotionTests.fs" />
+    <Compile Include="HistoryTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <PackageReference Include="LibGit2Sharp" Version="0.30.0" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
     <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />

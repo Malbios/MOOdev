@@ -62,19 +62,41 @@
     <div id="main-pane">
       <div id="main-tabs">
         <button id="tab-game" class="main-tab pinned">Game</button>
+        <button id="tab-history" class="main-tab pinned">History</button>
         <div id="verb-tabs"></div>
       </div>
       <div id="editor-pane">
         <div id="editor-monaco"></div>
         <pre id="editor-diagnostics"></pre>
         <div id="editor-status">
+          <button id="editor-history-btn" class="pane-action-btn">History</button>
           <span id="status-dirty"></span>
           <span id="status-position"></span>
+        </div>
+      </div>
+      <div id="verb-history-pane">
+        <div id="verb-history-list-pane">
+          <div class="sidebar-header">History</div>
+          <ul id="verb-history-list" class="picker-list"></ul>
+        </div>
+        <div id="verb-history-diff-pane">
+          <div id="verb-history-diff-editor"></div>
+          <button id="verb-history-restore-btn" class="pane-action-btn" style="display:none">Restore this version</button>
         </div>
       </div>
       <div id="inspector-pane">
         <pre id="inspector-diagnostics"></pre>
         <div id="inspector-content"></div>
+      </div>
+      <div id="history-pane">
+        <div id="history-search-section">
+          <input id="history-search-input" type="text" class="sidebar-filter" placeholder="search history..." autocomplete="off" spellcheck="false" />
+          <ul id="history-search-results" class="picker-list"></ul>
+        </div>
+        <div id="corponym-history-section">
+          <div class="sidebar-header">Corponym history</div>
+          <ul id="corponym-history-list" class="picker-list"></ul>
+        </div>
       </div>
       <div id="terminal-pane">
         <div id="login-pane">

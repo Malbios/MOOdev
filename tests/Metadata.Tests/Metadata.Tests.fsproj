@@ -19,6 +19,13 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\Metadata\Metadata.fsproj" />
+    <!-- Test-only: reuses Sidecar.Exporter's renderers to build synthetic
+         FORMAT.md-conformant fixture trees (mirrors
+         Sidecar.Tests/TreeParserTests.fs's own convention) rather than
+         duplicating that rendering logic here. Does not affect the shipped
+         Metadata.dll/LanguageServer.dll dependency graph - Metadata.fsproj
+         itself has no reference to Sidecar.fsproj. -->
+    <ProjectReference Include="..\..\src\Sidecar\Sidecar.fsproj" />
   </ItemGroup>
 
 </Project>

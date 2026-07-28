@@ -99,9 +99,13 @@ let private classifyHashLine (active: ActiveMessage option) (lineBytes: byte[]) 
         | Some a when a.Tag = tag -> [ Emit { Header = a.Header; Lines = List.ofSeq a.Lines } ], None
         | _ -> [ PassThrough(Array.append lineBytes [| byte '\n' |]) ], active
     else
-        // A fresh "#$#<msgname> ..." header line.
+        // A fresh "#$#<msgname> ..." header line. "bridge-eval" is Phase 4's
+        // own sidecar-issued eval channel (BridgeHandler.evalOnSession) -
+        // recognized the same way as "moodev-", just routed to a waiting
+        // caller instead of the browser once complete (BridgeHandler's own
+        // job, not this module's).
         match after "ref: " rest with
-        | Some afterRef when rest.StartsWith("moodev-") ->
+        | Some afterRef when rest.StartsWith("moodev-") || rest.StartsWith("bridge-eval") ->
             let tag = firstToken afterRef
             [], Some { Header = rest; Tag = tag; Lines = ResizeArray() }
         | _ ->

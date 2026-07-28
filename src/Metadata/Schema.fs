@@ -1,7 +1,12 @@
-/// In-memory shape of the metadata graph Phase 4.3b loads: `lookups.toml`
-/// (obj# -> friendly name) + `metadata.json` (structure - parents,
-/// children, per-verb dispatch metadata, from `$vcs:export_metadata()`) +
-/// the git tree's captured verb source (parsed through `Language.Parser`).
+/// In-memory shape of the metadata graph `Metadata.Loader.load` builds from
+/// a `Survive`-shaped export tree per `C:\dev\moo-code\moo-dev\FORMAT.md`
+/// (`corponyms.moo` + one `objects/<name>/object.moo` + one file per verb,
+/// parsed via `Metadata.TreeFormat`) plus the captured verb source (parsed
+/// through `Language.Parser`). Previously loaded from `lookups.toml` +
+/// `metadata.json`, both written by the now-retired `$vcs`'s own MOOcode -
+/// several fields below still carry comments describing that old source for
+/// context on why they're shaped the way they are (e.g. `LiveName`, always
+/// `None` now - see `Loader.fs`).
 module Metadata.Schema
 
 open Language.Ast

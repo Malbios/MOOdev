@@ -1,10 +1,17 @@
-/// End-to-end handler tests against the real `Survive` graph - calling
-/// `MooLspServer`'s overridden methods directly (bypassing the JSON-RPC/
-/// websocket transport, which `WsTransport.fs` owns and isn't the concern
-/// here) against a known real call site, per the M4 plan's 4.4a verify
-/// step: "handler unit tests against in-memory graph fixtures."
+/// End-to-end handler tests against a small, synthetic FORMAT.md tree -
+/// calling `MooLspServer`'s overridden methods directly (bypassing the
+/// JSON-RPC/websocket transport, which `WsTransport.fs` owns and isn't the
+/// concern here). Built with `Sidecar.Exporter`'s own renderers rather than
+/// depending on the real `Survive` checkout: the old version of this file
+/// anchored to specific real content (VCS object #127's verbs,
+/// `@paranoid_Database/7_gc.moo`'s exact line numbers, etc.) from the now-
+/// retired toastcore+`$vcs` tree, which stopped existing once `Survive` was
+/// cleared and re-exported in the new sidecar-owned format. A synthetic
+/// fixture is more robust: it can't drift out from under these tests the
+/// way real, evolving world content can.
 module LanguageServer.Tests.HandlerTests
 
+open System
 open System.IO
 open Xunit
 open Ionide.LanguageServerProtocol.Types
@@ -13,44 +20,205 @@ open Metadata.Schema
 open Metadata.Loader
 open LanguageServer.Handlers
 open LanguageServer.AstQuery
+open Sidecar.Exporter
 
-let private surviveRoot =
-    Path.GetFullPath(Path.Combine(__SOURCE_DIRECTORY__, "..", "..", "..", "Survive"))
+// ---------------------------------------------------------------------------
+// Fixture tree - built once for the whole module.
+// ---------------------------------------------------------------------------
 
-let private graph = lazy (load surviveRoot)
+let private verb (names: string) (code: string list) : VerbExport =
+    { Names = names
+      Owner = 2L
+      Perms = "rxd"
+      Dobj = "this"
+      Prep = "none"
+      Iobj = "this"
+      Code = code }
+
+/// A small, synthetic FORMAT.md tree - see `moo-dev/FORMAT.md` for the
+/// on-disk grammar `Sidecar.Exporter`'s renderers produce. The temp
+/// directory is deliberately never deleted: a per-fact `tempDir()`
+/// `finally Directory.Delete` (as `Sidecar.Tests`/`Metadata.Tests` use)
+/// doesn't fit a module-level shared fixture - a handful of small text
+/// files left in the OS temp folder is a harmless, common tradeoff.
+let private fixtureDir =
+    let dir = Path.Combine(Path.GetTempPath(), "moovcs-handlertests-" + Guid.NewGuid().ToString("N"))
+    Directory.CreateDirectory(dir) |> ignore
+
+    let corponyms =
+        [ "wizard", 2L
+          "room", 3L
+          "room_child", 10L
+          "command_utils", 20L
+          "gc_util", 30L
+          "vcs_util", 40L
+          "hacker_util", 50L
+          "bigresident_util", 60L ]
+
+    File.WriteAllText(Path.Combine(dir, "FORMAT_VERSION"), "1\n")
+    File.WriteAllText(Path.Combine(dir, "corponyms.moo"), renderCorponymsMoo corponyms)
+
+    // Real arity/type data for the few builtins these tests touch, confirmed
+    // against ToastStunt's own `register_function` calls (`list.cc:1765,1794`,
+    // `objects.cc:1340`) - `graph.Builtins` is otherwise always empty in the
+    // new format (`builtins.json` was a retired `$vcs`-only capture, not
+    // reproduced by anything else).
+    File.WriteAllText(
+        Path.Combine(dir, "builtins.json"),
+        """{"functions": [
+  {"name": "length", "minargs": 1, "maxargs": 1, "types": [-1]},
+  {"name": "typeof", "minargs": 1, "maxargs": 1, "types": [-1]},
+  {"name": "strsub", "minargs": 3, "maxargs": 4, "types": [2, 2, 2, -1]}
+]}"""
+    )
+
+    let corponymsByObjnum = corponyms |> List.map (fun (n, o) -> o, n) |> Map.ofList
+
+    let writeObject (name: string) (data: ObjectExport) =
+        let objDir = Path.Combine(dir, "objects", name)
+        let verbsDir = Path.Combine(objDir, "verbs")
+        Directory.CreateDirectory(verbsDir) |> ignore
+        let verbFileNames = assignVerbFileNames data.Verbs
+
+        File.WriteAllText(
+            Path.Combine(objDir, "object.moo"),
+            renderObjectMoo corponymsByObjnum ("$" + name) data verbFileNames
+        )
+
+        for v, fileName in verbFileNames do
+            File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) v)
+
+    writeObject
+        "wizard"
+        { Parents = []
+          Owner = 2L
+          Flags = [ "player"; "programmer"; "wizard" ]
+          Properties = []
+          Verbs = [] }
+
+    writeObject
+        "room"
+        { Parents = [ 1L ] // raw, uncorponymed - like README.Minimal's "Root Class #1"
+          Owner = 2L
+          Flags = [ "r"; "f" ]
+          Properties = []
+          Verbs = [ verb "say" [ "\"Say something.\";"; "player:tell(\"You say, \\\"\", argstr, \"\\\"\");" ] ] }
+
+    writeObject
+        "room_child"
+        { Parents = [ 3L ] // exists purely so `room` has a non-empty Children
+          Owner = 2L
+          Flags = []
+          Properties = []
+          Verbs = [] }
+
+    writeObject
+        "command_utils"
+        { Parents = []
+          Owner = 2L
+          Flags = []
+          Properties = []
+          Verbs = [ verb "suspend_if_needed" [ "\"Suspend if needed.\";"; "return 1;" ] ] }
+
+    writeObject
+        "gc_util"
+        { Parents = []
+          Owner = 2L
+          Flags = []
+          Properties = []
+          Verbs =
+            [ verb
+                  "gc"
+                  [ "\"Garbage collect old data.\";"
+                    "if (1)"
+                    "endif"
+                    "threshold = 60 * 60 * 24 * 3;"
+                    "for x in (properties(this))"
+                    "  if (length(x) > 0)"
+                    "    $command_utils:suspend_if_needed(0);"
+                    "  endif"
+                    "endfor"
+                    "return threshold;" ] ] }
+
+    writeObject
+        "vcs_util"
+        { Parents = []
+          Owner = 2L
+          Flags = []
+          Properties = [ { Name = "repo_root"; Owner = 2L; Perms = "rw"; ValueLiteral = "\"/tmp/repo\"" } ]
+          Verbs =
+            [ verb "capture_verb" [ "\"Capture a verb to disk.\";"; "return 1;" ]
+              verb
+                  "handle_verb_programmed"
+                  [ "\"Called after a verb is programmed.\";"; "path = this:capture_verb(0, \"x\");"; "return path;" ]
+              verb "import_all" [ "\"Import everything.\";"; "this:capture_verb(0, \"y\");" ]
+              verb
+                  "sanitize_name"
+                  [ "\"Sanitize a name.\";"
+                    "name = args[1];"
+                    "name = strsub(name, \" \", \"_\", 0);"
+                    "return name;" ]
+              verb "export_metadata" [ "\"Export metadata.\";"; "return 1;" ]
+              verb "export_builtins" [ "\"Export builtins.\";"; "return 1;" ] ] }
+
+    writeObject
+        "hacker_util"
+        { Parents = []
+          Owner = 2L
+          Flags = []
+          Properties = []
+          Verbs = [] }
+
+    writeObject
+        "bigresident_util"
+        { Parents = []
+          Owner = 2L
+          Flags = []
+          Properties = []
+          Verbs = [ verb "init_for_core" [ "\"Init for core.\";"; "this.target = $hacker_util;" ] ] }
+
+    dir
+
+let private graph = lazy (load fixtureDir)
 let private server = lazy (new MooLspServer(new MooLspClient(), graph.Value))
 
-/// Finds `(objRef, VerbNode)` by the real captured file's path suffix -
-/// keeps these tests independent of exact object numbering (which the
-/// `moodev-verb://` scheme itself hides from clients too) while still
-/// anchoring to a real, known corpus file.
-let private findByPathSuffix (suffix: string) : ObjRef * VerbNode =
-    graph.Value.Objects
-    |> Map.toSeq
-    |> Seq.collect (fun (num, o) -> o.Verbs |> Seq.map (fun v -> num, v))
-    |> Seq.find (fun (_, v) ->
-        match v.SourcePath with
-        | Some p -> p.Replace('\\', '/').EndsWith(suffix)
-        | None -> false)
+/// Finds `(objRef, VerbNode)` by object number + verb name - simpler than
+/// the old file's path-suffix matching (a workaround for not knowing real
+/// object numbers in advance; this fixture's numbering is fully known).
+let private findVerb (objRef: ObjRef) (verbName: string) : ObjRef * VerbNode =
+    let node = Map.find objRef graph.Value.Objects
+    let v = node.Verbs |> List.find (fun v -> v.Meta.Names |> List.contains verbName)
+    objRef, v
 
-// `@paranoid_Database/7_gc.moo` line 26: `  $command_utils:suspend_if_needed(0);`
-// 1-based cols: '$'=3, "command_utils"=4..16, ':'=17, "suspend_if_needed"=18..35.
-// LSP position is 0-based: line 25, character 20 lands inside the verb name.
-let private positionOnSuspendIfNeeded: Position = { Line = 25u; Character = 20u }
+let private uriFor (objRef: ObjRef) (verbName: string) : string = moodevVerbUri objRef verbName
+
+/// The (0-based) LSP `Position` of the reference matching `predicate` -
+/// robust against real source content instead of hand-counted line/column
+/// comments, the same pattern several of the old file's own tests already
+/// used for this exact reason.
+let private positionOf (predicate: Reference -> bool) (stmts: Stmt list) : Position =
+    let r = collectReferences stmts |> List.pick (fun r -> if predicate r.Ref then Some r else None)
+    { Line = uint32 (r.Line - 1); Character = uint32 (r.Col - 1) }
+
+// ---------------------------------------------------------------------------
+// Hover / definition
+// ---------------------------------------------------------------------------
 
 [<Fact>]
 let ``fixture verb exists where the test expects it`` () =
-    let _, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    Assert.True(verb.Meta.Names |> List.contains "gc")
+    let _, v = findVerb 30L "gc"
+    Assert.True(v.Meta.Names |> List.contains "gc")
 
 [<Fact>]
 let ``hover on a real $obj:verb(...) call site resolves and describes the verb`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(_, StrLit "suspend_if_needed", _) -> true | _ -> false)
 
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = positionOnSuspendIfNeeded
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -58,21 +226,23 @@ let ``hover on a real $obj:verb(...) call site resolves and describes the verb``
         match hover.Contents with
         | U3.C1 markup ->
             Assert.Contains("suspend_if_needed", markup.Value)
-            // Owner is shown as a real display name ("Wizard (#2)"), not a
-            // bare object number - same `displayNameFor` formatting the
+            // Owner is shown as a real display label ("wizard (#2) [$wizard]"),
+            // not a bare object number - same `displayNameFor` formatting the
             // object picker and inspector already use.
-            Assert.Contains("owner: `Wizard (#2)`", markup.Value)
+            Assert.Contains("owner: `wizard (#2)", markup.Value)
         | other -> Assert.Fail(sprintf "expected MarkupContent, got %A" other)
     | other -> Assert.Fail(sprintf "expected a hover result, got %A" other)
 
 [<Fact>]
 let ``definition on the same call site points at a real verb via the moodev-verb URI scheme`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(_, StrLit "suspend_if_needed", _) -> true | _ -> false)
 
     let p: DefinitionParams =
         { TextDocument = { Uri = uri }
-          Position = positionOnSuspendIfNeeded
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None }
 
@@ -82,76 +252,81 @@ let ``definition on the same call site points at a real verb via the moodev-verb
 
 [<Fact>]
 let ``definition on a this:verb() call resolves to the enclosing object's own verb (regression: this used to be treated as unresolvable)`` () =
-    let objRef, verb = findByPathSuffix "VCS/4_handle_verb_programmed.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 5: `path = this:capture_verb(OBJ, vname);` - "capture_verb" spans
-    // 1-based cols 13-24; 0-based line 4, character 15 lands inside it.
+    let objRef, v = findVerb 40L "handle_verb_programmed"
+    let uri = uriFor objRef "handle_verb_programmed"
+    let stmts = v.Ast |> Option.get
+
+    let position =
+        stmts |> positionOf (function RefVerbCall(Ident("this", _, _), StrLit "capture_verb", _) -> true | _ -> false)
+
     let p: DefinitionParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 4u; Character = 15u }
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None }
 
     match server.Value.TextDocumentDefinition(p) |> Async.RunSynchronously with
-    | Ok(Some(U2.C1(U2.C1 location))) -> Assert.Equal(moodevVerbUri 127L "capture_verb", location.Uri)
-    | other -> Assert.Fail(sprintf "expected a single Location result pointing at VCS:capture_verb, got %A" other)
-
-// --- Go to definition on a local variable --------------------------------
+    | Ok(Some(U2.C1(U2.C1 location))) -> Assert.Equal(moodevVerbUri 40L "capture_verb", location.Uri)
+    | other -> Assert.Fail(sprintf "expected a single Location result pointing at vcs_util:capture_verb, got %A" other)
 
 [<Fact>]
 let ``definition on a read of a for-loop variable jumps to the for statement that introduces it`` () =
-    // @paranoid_Database/7_gc.moo: `for x in (properties(this))` on line 5
-    // introduces `x`; `length(x)` on line 7 reads it. 1-based: line 5 col 5
-    // is the "x" right after "for "; line 7 col 16 is the "x" inside
-    // `length(...)`. LSP positions are 0-based.
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+
+    let readPos = stmts |> positionOf (function RefIdent "x" -> true | _ -> false)
+    let defLine, defCol = firstBindingSite stmts "x" |> Option.get
 
     let p: DefinitionParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 6u; Character = 15u }
+          Position = readPos
           WorkDoneToken = None
           PartialResultToken = None }
 
     match server.Value.TextDocumentDefinition(p) |> Async.RunSynchronously with
     | Ok(Some(U2.C1(U2.C1 location))) ->
         Assert.Equal(uri, location.Uri) // same document - no dispatch, just a jump within it
-        Assert.Equal({ Line = 4u; Character = 4u }, location.Range.Start)
-        Assert.Equal({ Line = 4u; Character = 5u }, location.Range.End)
+        Assert.Equal({ Line = uint32 (defLine - 1); Character = uint32 (defCol - 1) }, location.Range.Start)
     | other -> Assert.Fail(sprintf "expected a Location pointing at the for statement, got %A" other)
 
 [<Fact>]
 let ``definition on a read of a plain-assignment local variable jumps to its first assignment`` () =
-    // @paranoid_Database/7_gc.moo: `threshold = 60 * 60 * 24 * 3;` on line 4
-    // (1-based col 1) is the only assignment; line 17 reads it twice, first
-    // at 1-based col 82. LSP positions are 0-based.
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let defLine, defCol = firstBindingSite stmts "threshold" |> Option.get
+
+    // `threshold` appears twice: the assignment itself, and the later
+    // `return threshold;` read - pick the one that isn't the definition site.
+    let readRef =
+        collectReferences stmts
+        |> List.filter (function { Ref = RefIdent "threshold" } -> true | _ -> false)
+        |> List.find (fun r -> (r.Line, r.Col) <> (defLine, defCol))
 
     let p: DefinitionParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 16u; Character = 81u }
+          Position = { Line = uint32 (readRef.Line - 1); Character = uint32 (readRef.Col - 1) }
           WorkDoneToken = None
           PartialResultToken = None }
 
     match server.Value.TextDocumentDefinition(p) |> Async.RunSynchronously with
     | Ok(Some(U2.C1(U2.C1 location))) ->
         Assert.Equal(uri, location.Uri)
-        Assert.Equal({ Line = 3u; Character = 0u }, location.Range.Start)
-        Assert.Equal({ Line = 3u; Character = 9u }, location.Range.End) // "threshold".Length = 9
+        Assert.Equal({ Line = uint32 (defLine - 1); Character = uint32 (defCol - 1) }, location.Range.Start)
+        Assert.Equal({ Line = uint32 (defLine - 1); Character = uint32 (defCol - 1 + "threshold".Length) }, location.Range.End)
     | other -> Assert.Fail(sprintf "expected a Location pointing at the assignment, got %A" other)
 
 [<Fact>]
 let ``definition on a built-in verb-call variable (args) returns no result - it has no single introduction site`` () =
-    // VCS/1_sanitize_name.moo line 1: `name = args[1];` - "args" spans
-    // 1-based cols 8-11; 0-based line 0, character 8 lands inside it. Same
-    // position the existing hover test for this variable uses.
-    let objRef, verb = findByPathSuffix "VCS/1_sanitize_name.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 40L "sanitize_name"
+    let uri = uriFor objRef "sanitize_name"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefIdent "args" -> true | _ -> false)
 
     let p: DefinitionParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 0u; Character = 8u }
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None }
 
@@ -161,8 +336,8 @@ let ``definition on a built-in verb-call variable (args) returns no result - it 
 
 [<Fact>]
 let ``hover on a position with no resolvable reference returns no result, not an error`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
 
     let p: HoverParams =
         { TextDocument = { Uri = uri }
@@ -175,13 +350,14 @@ let ``hover on a position with no resolvable reference returns no result, not an
 
 [<Fact>]
 let ``hover on a local variable shows "local variable", not nothing`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 4: `threshold = 60 * 60 * 24 * 3;` - "threshold" spans 1-based
-    // cols 1-9; 0-based line 3, character 2 lands inside it.
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let defLine, defCol = firstBindingSite stmts "threshold" |> Option.get
+
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 3u; Character = 2u }
+          Position = { Line = uint32 (defLine - 1); Character = uint32 (defCol - 1) }
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -193,20 +369,16 @@ let ``hover on a local variable shows "local variable", not nothing`` () =
 
 [<Fact>]
 let ``hover on this:verb() resolves via the enclosing object, not just "receiver unknown"`` () =
-    // `capture_verb` is called via `this:` inside a verb defined on VCS
-    // (#127) itself, and `capture_verb` is also defined directly on #127 -
-    // `this` resolves to the enclosing object (see
-    // `Resolver.resolveReceiverInContext`), so this should describe the
-    // real, specific verb it dispatches to, not the old "receiver isn't
-    // statically known" fallback (which remains correct for genuinely
-    // unresolvable receivers like `player:` - see the next test).
-    let objRef, verb = findByPathSuffix "VCS/4_handle_verb_programmed.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 5: `path = this:capture_verb(OBJ, vname);` - "capture_verb" spans
-    // 1-based cols 13-24; 0-based line 4, character 15 lands inside it.
+    let objRef, v = findVerb 40L "handle_verb_programmed"
+    let uri = uriFor objRef "handle_verb_programmed"
+    let stmts = v.Ast |> Option.get
+
+    let position =
+        stmts |> positionOf (function RefVerbCall(Ident("this", _, _), StrLit "capture_verb", _) -> true | _ -> false)
+
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 4u; Character = 15u }
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -214,23 +386,21 @@ let ``hover on this:verb() resolves via the enclosing object, not just "receiver
         match hover.Contents with
         | U3.C1 markup ->
             Assert.Contains("capture_verb", markup.Value)
-            Assert.Contains("#127 (VCS)", markup.Value)
+            Assert.Contains("#40 (vcs_util)", markup.Value)
             Assert.DoesNotContain("receiver isn't statically known", markup.Value)
         | other -> Assert.Fail(sprintf "expected MarkupContent, got %A" other)
     | other -> Assert.Fail(sprintf "expected a hover result, got %A" other)
 
 [<Fact>]
 let ``hover on an unresolvable receiver (player:verb()) still lists candidate defining objects`` () =
-    // `player` has no static default the way `this` now does (see
-    // `resolveReceiverInContext`'s own comment) - genuinely unresolvable,
-    // so this must still fall back to the ambiguous-candidates list.
-    let objRef, verb = findByPathSuffix "Generic_Room/3_say.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 2: `  player:tell("You say, \"", argstr, "\"");` - "tell" spans
-    // 1-based cols 10-13; 0-based line 1, character 10 lands inside it.
+    let objRef, v = findVerb 3L "say"
+    let uri = uriFor objRef "say"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(Ident("player", _, _), StrLit "tell", _) -> true | _ -> false)
+
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 1u; Character = 10u }
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -244,9 +414,9 @@ let ``hover on an unresolvable receiver (player:verb()) still lists candidate de
 
 [<Fact>]
 let ``hover on a keyword shows its help text`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 3 is exactly `endif` - 1-based cols 1-5; 0-based line 2, character 2.
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    // Line 2 (1-based) is exactly "endif" - cols 1-5; 0-based line 2, char 2.
     let p: HoverParams =
         { TextDocument = { Uri = uri }
           Position = { Line = 2u; Character = 2u }
@@ -257,9 +427,6 @@ let ``hover on a keyword shows its help text`` () =
         match hover.Contents with
         | U3.C1 markup ->
             Assert.Contains("endif", markup.Value)
-            // Hovering any one keyword of a multi-part construct (here,
-            // `endif`) shows the *whole* if/elseif/else/endif explanation,
-            // not just a one-liner about `endif` alone.
             Assert.Contains("elseif", markup.Value)
             Assert.Contains("Runs the first branch whose condition is true", markup.Value)
         | other -> Assert.Fail(sprintf "expected MarkupContent, got %A" other)
@@ -267,20 +434,14 @@ let ``hover on a keyword shows its help text`` () =
 
 [<Fact>]
 let ``hover on a builtin call shows the same signature info as signature help`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    let stmts = verb.Ast |> Option.get
-
-    let callRef =
-        collectReferences stmts
-        |> List.pick (fun r ->
-            match r.Ref with
-            | RefCall(name, _) when name = "length" -> Some r
-            | _ -> None)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefCall("length", _) -> true | _ -> false)
 
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = uint32 (callRef.Line - 1); Character = uint32 (callRef.Col - 1) }
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -292,13 +453,14 @@ let ``hover on a builtin call shows the same signature info as signature help`` 
 
 [<Fact>]
 let ``hover on an implicit built-in variable (args) shows its real description`` () =
-    let objRef, verb = findByPathSuffix "VCS/1_sanitize_name.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 1: `name = args[1];` - "args" spans 1-based cols 8-11; 0-based
-    // line 0, character 8 lands inside it.
+    let objRef, v = findVerb 40L "sanitize_name"
+    let uri = uriFor objRef "sanitize_name"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefIdent "args" -> true | _ -> false)
+
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 0u; Character = 8u }
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
@@ -312,30 +474,22 @@ let ``hover on an implicit built-in variable (args) shows its real description``
 
 [<Fact>]
 let ``hover on a bare $name property (not a call) resolves via the #0 registry`` () =
-    let objRef, verb = findByPathSuffix "Generic_BigList_Resident/7_init_for_core.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    let stmts = verb.Ast |> Option.get
-
-    // line 5: `this.mowner = $hacker;` - a bare property reference, not a
-    // verb call.
-    let propRef =
-        collectReferences stmts
-        |> List.pick (fun r ->
-            match r.Ref with
-            | RefProp(_, StrLit "hacker") -> Some r
-            | _ -> None)
+    let objRef, v = findVerb 60L "init_for_core"
+    let uri = uriFor objRef "init_for_core"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefProp(_, StrLit "hacker_util") -> true | _ -> false)
 
     let p: HoverParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = uint32 (propRef.Line - 1); Character = uint32 (propRef.Col - 1) }
+          Position = position
           WorkDoneToken = None }
 
     match server.Value.TextDocumentHover(p) |> Async.RunSynchronously with
     | Ok(Some hover) ->
         match hover.Contents with
         | U3.C1 markup ->
-            Assert.Contains("$hacker", markup.Value)
-            Assert.Contains("#36", markup.Value)
+            Assert.Contains("$hacker_util", markup.Value)
+            Assert.Contains("#50", markup.Value)
         | other -> Assert.Fail(sprintf "expected MarkupContent, got %A" other)
     | other -> Assert.Fail(sprintf "expected a hover result, got %A" other)
 
@@ -350,18 +504,20 @@ let ``an unparseable URI returns no result, not a crash`` () =
     | Ok None -> ()
     | other -> Assert.Fail(sprintf "expected Ok None, got %A" other)
 
-// --- Completions ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Completions
+// ---------------------------------------------------------------------------
 
 [<Fact>]
-let ``completion at the real $command_utils:suspend_if_needed(0) call site offers local vars, builtins, and reachable verb names``
-    ()
-    =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+let ``completion at the $command_utils:suspend_if_needed(0) call site offers local vars, builtins, and reachable verb names`` () =
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(_, StrLit "suspend_if_needed", _) -> true | _ -> false)
 
     let p: CompletionParams =
         { TextDocument = { Uri = uri }
-          Position = positionOnSuspendIfNeeded
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None
           Context = None }
@@ -369,20 +525,23 @@ let ``completion at the real $command_utils:suspend_if_needed(0) call site offer
     match server.Value.TextDocumentCompletion(p) |> Async.RunSynchronously with
     | Ok(Some(U2.C1 items)) ->
         let labels = items |> Array.map (fun i -> i.Label) |> Set.ofArray
-        Assert.Contains("threshold", labels) // a real local var declared in gc.moo
+        Assert.Contains("threshold", labels) // a real local var declared in gc
         Assert.Contains("typeof", labels) // a real builtin
         Assert.Contains("suspend_if_needed", labels) // reachable via $command_utils
     | other -> Assert.Fail(sprintf "expected a flat CompletionItem[] result, got %A" other)
 
 [<Fact>]
 let ``completion near a this:verb() call offers the enclosing object's own callable verbs (regression: this used to be treated as unresolvable)`` () =
-    let objRef, verb = findByPathSuffix "VCS/4_handle_verb_programmed.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    // line 5: `path = this:capture_verb(OBJ, vname);` - "capture_verb" spans
-    // 1-based cols 13-24; 0-based line 4, character 15 lands inside it.
+    let objRef, v = findVerb 40L "handle_verb_programmed"
+    let uri = uriFor objRef "handle_verb_programmed"
+    let stmts = v.Ast |> Option.get
+
+    let position =
+        stmts |> positionOf (function RefVerbCall(Ident("this", _, _), StrLit "capture_verb", _) -> true | _ -> false)
+
     let p: CompletionParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 4u; Character = 15u }
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None
           Context = None }
@@ -390,14 +549,14 @@ let ``completion near a this:verb() call offers the enclosing object's own calla
     match server.Value.TextDocumentCompletion(p) |> Async.RunSynchronously with
     | Ok(Some(U2.C1 items)) ->
         let labels = items |> Array.map (fun i -> i.Label) |> Set.ofArray
-        Assert.Contains("capture_verb", labels) // reachable via `this` == #127 (VCS)
+        Assert.Contains("capture_verb", labels) // reachable via `this` == #40 (vcs_util)
         Assert.Contains("export_metadata", labels) // another verb on the same object
     | other -> Assert.Fail(sprintf "expected a flat CompletionItem[] result, got %A" other)
 
 [<Fact>]
 let ``completion at an unresolvable position still returns local vars and builtins, not an error`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
 
     let p: CompletionParams =
         { TextDocument = { Uri = uri }
@@ -410,27 +569,20 @@ let ``completion at an unresolvable position still returns local vars and builti
     | Ok(Some(U2.C1 items)) -> Assert.True(items.Length > 0)
     | other -> Assert.Fail(sprintf "expected a non-empty CompletionItem[] result, got %A" other)
 
-// --- Signature help -----------------------------------------------------
+// ---------------------------------------------------------------------------
+// Signature help
+// ---------------------------------------------------------------------------
 
 [<Fact>]
 let ``signature help on a real builtin call site describes its arity and arg types`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-
-    // Find a real `Call` reference in this verb's own AST rather than
-    // hand-counting columns - `length(x)` is used at least once in gc.moo.
-    let stmts = verb.Ast |> Option.get
-
-    let callRef =
-        collectReferences stmts
-        |> List.pick (fun r ->
-            match r.Ref with
-            | RefCall(name, _) when name = "length" -> Some r
-            | _ -> None)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefCall("length", _) -> true | _ -> false)
 
     let p: SignatureHelpParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = uint32 (callRef.Line - 1); Character = uint32 (callRef.Col - 1) }
+          Position = position
           WorkDoneToken = None
           Context = None }
 
@@ -442,24 +594,14 @@ let ``signature help on a real builtin call site describes its arity and arg typ
 
 [<Fact>]
 let ``signature help on a builtin with a documented C-source signature uses its real parameter names`` () =
-    // VCS/1_sanitize_name.moo calls strsub(name, "...", "...") repeatedly -
-    // strsub is one of the ~55 builtins with a real extracted signature
-    // ("source, what, with, case-matters"), not the generic arg1/arg2
-    // fallback.
-    let objRef, verb = findByPathSuffix "VCS/1_sanitize_name.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
-    let stmts = verb.Ast |> Option.get
-
-    let callRef =
-        collectReferences stmts
-        |> List.pick (fun r ->
-            match r.Ref with
-            | RefCall(name, _) when name = "strsub" -> Some r
-            | _ -> None)
+    let objRef, v = findVerb 40L "sanitize_name"
+    let uri = uriFor objRef "sanitize_name"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefCall("strsub", _) -> true | _ -> false)
 
     let p: SignatureHelpParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = uint32 (callRef.Line - 1); Character = uint32 (callRef.Col - 1) }
+          Position = position
           WorkDoneToken = None
           Context = None }
 
@@ -469,12 +611,14 @@ let ``signature help on a builtin with a documented C-source signature uses its 
 
 [<Fact>]
 let ``signature help on a VerbCall (not a builtin) returns no result`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(_, StrLit "suspend_if_needed", _) -> true | _ -> false)
 
     let p: SignatureHelpParams =
         { TextDocument = { Uri = uri }
-          Position = positionOnSuspendIfNeeded
+          Position = position
           WorkDoneToken = None
           Context = None }
 
@@ -482,16 +626,20 @@ let ``signature help on a VerbCall (not a builtin) returns no result`` () =
     | Ok None -> ()
     | other -> Assert.Fail(sprintf "expected Ok None (verb calls have no function_info signature), got %A" other)
 
-// --- Find references ------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Find references
+// ---------------------------------------------------------------------------
 
 [<Fact>]
-let ``references to $command_utils:suspend_if_needed includes the real gc.moo call site`` () =
-    let objRef, verb = findByPathSuffix "@paranoid_Database/7_gc.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+let ``references to $command_utils:suspend_if_needed includes the gc.moo call site`` () =
+    let objRef, v = findVerb 30L "gc"
+    let uri = uriFor objRef "gc"
+    let stmts = v.Ast |> Option.get
+    let position = stmts |> positionOf (function RefVerbCall(_, StrLit "suspend_if_needed", _) -> true | _ -> false)
 
     let p: ReferenceParams =
         { TextDocument = { Uri = uri }
-          Position = positionOnSuspendIfNeeded
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None
           Context = { IncludeDeclaration = true } }
@@ -504,52 +652,47 @@ let ``references to $command_utils:suspend_if_needed includes the real gc.moo ca
 
 [<Fact>]
 let ``references from a this:verb() call site resolves and finds the other this: caller too (regression: these used to only count as unresolved)`` () =
-    // Both real call sites of capture_verb in the corpus are `this:`-based
-    // (VCS/4_handle_verb_programmed.moo and VCS/5_import_all.moo, both on
-    // VCS itself) - before the fix, `resolvableVerbCallAt` would refuse to
-    // even start from a `this:` call site, so this whole request used to
-    // return `Ok None`.
-    let objRef, verb = findByPathSuffix "VCS/4_handle_verb_programmed.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+    let objRef, v = findVerb 40L "handle_verb_programmed"
+    let uri = uriFor objRef "handle_verb_programmed"
+    let stmts = v.Ast |> Option.get
+
+    let position =
+        stmts |> positionOf (function RefVerbCall(Ident("this", _, _), StrLit "capture_verb", _) -> true | _ -> false)
 
     let p: ReferenceParams =
         { TextDocument = { Uri = uri }
-          Position = { Line = 4u; Character = 15u }
+          Position = position
           WorkDoneToken = None
           PartialResultToken = None
           Context = { IncludeDeclaration = true } }
 
     match server.Value.TextDocumentReferences(p) |> Async.RunSynchronously with
     | Ok(Some locations) ->
-        let importAllObjRef, importAllVerb = findByPathSuffix "VCS/5_import_all.moo"
-        let importAllUri = moodevVerbUri importAllObjRef (List.head importAllVerb.Meta.Names)
+        let importAllUri = uriFor 40L "import_all"
         Assert.Contains(locations, (fun (l: Location) -> l.Uri = importAllUri))
     | other -> Assert.Fail(sprintf "expected at least one Location, got %A" other)
 
 [<Fact>]
-let ``references to a verb with no callers anywhere returns an empty (not null) result`` () =
-    // export_builtins is brand new this session - vanishingly unlikely to
-    // be called from anywhere else in the corpus yet.
-    let objRef, verb = findByPathSuffix "VCS/9_export_builtins.moo"
-    let uri = moodevVerbUri objRef (List.head verb.Meta.Names)
+let ``references at a position with no VerbCall under it returns Ok None, not an error`` () =
+    let objRef, v = findVerb 40L "export_builtins"
+    let uri = uriFor objRef "export_builtins"
 
-    // No call site to put the cursor on within this verb itself - confirm
-    // references at a position with no VerbCall under it behaves (a clean
-    // "no result", not an exception) rather than trying to synthesize a
-    // guaranteed-zero-callers scenario, which would need corpus-wide
-    // knowledge this test shouldn't have to assume.
-    let refParams: ReferenceParams =
+    let p: ReferenceParams =
         { TextDocument = { Uri = uri }
           Position = { Line = 0u; Character = 0u }
           WorkDoneToken = None
           PartialResultToken = None
           Context = { IncludeDeclaration = true } }
 
-    match server.Value.TextDocumentReferences(refParams) |> Async.RunSynchronously with
+    match server.Value.TextDocumentReferences(p) |> Async.RunSynchronously with
     | Ok None -> ()
     | other -> Assert.Fail(sprintf "expected Ok None (no VerbCall under cursor), got %A" other)
 
-// --- GetObjectTree (custom, non-LSP-spec method) -------------------------
+// ---------------------------------------------------------------------------
+// GetObjectTree (custom, non-LSP-spec method) - replaces the retired
+// ListObjects/ListVerbs (Handlers.fs no longer defines either; the unified
+// object tree view reads everything from this one call instead).
+// ---------------------------------------------------------------------------
 
 [<Fact>]
 let ``GetObjectTree includes every object in the graph, not just verb-owners`` () =
@@ -558,13 +701,13 @@ let ``GetObjectTree includes every object in the graph, not just verb-owners`` (
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``GetObjectTree shows an object's real live name plus its corified $-name`` () =
-    // #3 is "Generic Room" (real, space-containing live name) and is
-    // registered as $room - the label should read from the real name, not
-    // lookups.toml's sanitized "Generic_Room", and should surface the
-    // corified alias too.
+let ``GetObjectTree shows a corponym-registered object's display name including its $-name`` () =
+    // `LiveName` is always `None` in the new format (see Metadata.Loader.fs),
+    // so a corponym-bearing object's base name and its corified suffix are
+    // always the same string - "room (#3) [$room]", not a separately
+    // captured "real" MOO name.
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
-    | Ok nodes -> Assert.Contains(nodes, (fun (n: ObjectTreeNode) -> n.Name = "Generic Room (#3) [$room]" && n.ObjRef = 3L))
+    | Ok nodes -> Assert.Contains(nodes, (fun (n: ObjectTreeNode) -> n.Name = "room (#3) [$room]" && n.ObjRef = 3L))
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
@@ -576,61 +719,54 @@ let ``GetObjectTree sorts by name`` () =
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``GetObjectTree's root class has no parents`` () =
+let ``GetObjectTree gives an object with no parents an empty Parents array`` () =
+    // vcs_util (#40) is deliberately parentless in this fixture.
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
     | Ok nodes ->
-        let root = nodes |> Array.find (fun n -> n.ObjRef = 1L)
-        Assert.Empty(root.Parents)
+        let vcsUtil = nodes |> Array.find (fun n -> n.ObjRef = 40L)
+        Assert.Empty(vcsUtil.Parents)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
 let ``GetObjectTree's parent/child edges agree with each other`` () =
-    // #3 (Generic Room) is a direct child of #1 (Root Class) in the real
-    // corpus - the tree's edges should be consistent in both directions,
-    // not just individually plausible.
+    // room_child (#10) is a direct child of room (#3) in this fixture - the
+    // tree's edges should be consistent in both directions, not just
+    // individually plausible.
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
     | Ok nodes ->
         let byRef = nodes |> Array.map (fun n -> n.ObjRef, n) |> Map.ofArray
-        Assert.Contains(1L, byRef.[3L].Parents)
-        Assert.Contains(3L, byRef.[1L].Children)
+        Assert.Contains(3L, byRef.[10L].Parents)
+        Assert.Contains(10L, byRef.[3L].Children)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``GetObjectTree reports VCS's own verbs by primary name`` () =
+let ``GetObjectTree reports vcs_util's own verbs by primary name`` () =
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
     | Ok nodes ->
-        let vcs = nodes |> Array.find (fun n -> n.ObjRef = 127L)
-        Assert.Contains("sanitize_name", vcs.Verbs)
-        Assert.Contains("export_builtins", vcs.Verbs)
-        Assert.Contains("export_metadata", vcs.Verbs)
+        let vcsUtil = nodes |> Array.find (fun n -> n.ObjRef = 40L)
+        let verbNames = vcsUtil.Verbs |> Array.map (fun v -> v.Name)
+        Assert.Contains("sanitize_name", verbNames)
+        Assert.Contains("export_builtins", verbNames)
+        Assert.Contains("export_metadata", verbNames)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
 let ``GetObjectTree gives an object with no verbs of its own an empty Verbs array, not an error`` () =
-    let noVerbsObj =
-        graph.Value.Objects
-        |> Map.toSeq
-        |> Seq.map snd
-        |> Seq.tryFind (fun o -> List.isEmpty o.Verbs)
+    // wizard (#2) is deliberately verb-less in this fixture.
+    match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
+    | Ok nodes -> Assert.Empty((nodes |> Array.find (fun n -> n.ObjRef = 2L)).Verbs)
+    | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
-    match noVerbsObj with
-    | None -> () // every object in this corpus happens to have a verb - nothing to assert
-    | Some o ->
-        match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
-        | Ok nodes -> Assert.Empty((nodes |> Array.find (fun n -> n.ObjRef = o.Num)).Verbs)
-        | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
-
-// --- GetObjectInfo (custom, non-LSP-spec method) -------------------------
+// ---------------------------------------------------------------------------
+// GetObjectInfo (custom, non-LSP-spec method)
+// ---------------------------------------------------------------------------
 
 [<Fact>]
-let ``GetObjectInfo on VCS reports owner, all-false flags, verbs, and properties from real data`` () =
-    match server.Value.GetObjectInfo({ ObjRef = 127L }) |> Async.RunSynchronously with
+let ``GetObjectInfo on vcs_util reports owner, all-false flags, verbs, and properties`` () =
+    match server.Value.GetObjectInfo({ ObjRef = 40L }) |> Async.RunSynchronously with
     | Ok(Some info) ->
-        Assert.Equal("VCS (#127) [$vcs]", info.Name)
-        Assert.Equal(Some { ObjRef = 2L; Name = "Wizard (#2)" }, info.Owner)
-        // #127 (VCS) is a standalone utility object - no player/programmer/
-        // wizard/read/write/fertile/anonymous flags set, real data confirmed
-        // directly against metadata.json.
+        Assert.Equal("vcs_util (#40) [$vcs_util]", info.Name)
+        Assert.Equal(Some { ObjRef = 2L; Name = "wizard (#2) [$wizard]" }, info.Owner)
         Assert.False(info.Player)
         Assert.False(info.Programmer)
         Assert.False(info.Wizard)
@@ -643,17 +779,20 @@ let ``GetObjectInfo on VCS reports owner, all-false flags, verbs, and properties
 
         Assert.Contains(
             info.Verbs,
-            fun (v: ObjectInfoVerb) -> v.Name = "sanitize_name" && v.Perms = "rxd" && v.Dobj = "this" && v.Prep = "none" && v.Iobj = "this"
+            fun (v: ObjectInfoVerb) -> v.Name = "capture_verb" && v.Perms = "rxd" && v.Dobj = "this" && v.Prep = "none" && v.Iobj = "this"
         )
 
-        Assert.Contains(info.Properties, fun (p: ObjectInfoProperty) -> p.Name = "repo_root" && p.Owner = "Wizard (#2)" && p.Perms = "rw")
+        Assert.Contains(
+            info.Properties,
+            fun (p: ObjectInfoProperty) -> p.Name = "repo_root" && p.Owner = "wizard (#2) [$wizard]" && p.Perms = "rw"
+        )
     | other -> Assert.Fail(sprintf "expected Ok(Some info), got %A" other)
 
 [<Fact>]
-let ``GetObjectInfo on Generic Room reports a real parent and real fertile/read flags`` () =
+let ``GetObjectInfo on room reports its parent and fertile/read flags`` () =
     match server.Value.GetObjectInfo({ ObjRef = 3L }) |> Async.RunSynchronously with
     | Ok(Some info) ->
-        Assert.Equal("Generic Room (#3) [$room]", info.Name)
+        Assert.Equal("room (#3) [$room]", info.Name)
         Assert.True(info.Read)
         Assert.True(info.Fertile)
         Assert.False(info.Wizard)
@@ -662,7 +801,7 @@ let ``GetObjectInfo on Generic Room reports a real parent and real fertile/read 
     | other -> Assert.Fail(sprintf "expected Ok(Some info), got %A" other)
 
 [<Fact>]
-let ``GetObjectInfo on the Wizard player object reports player/programmer/wizard all true`` () =
+let ``GetObjectInfo on wizard reports player/programmer/wizard all true`` () =
     match server.Value.GetObjectInfo({ ObjRef = 2L }) |> Async.RunSynchronously with
     | Ok(Some info) ->
         Assert.True(info.Player)

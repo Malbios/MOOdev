@@ -5,5 +5,5 @@ export default defineConfig({
   // (even "localhost") to a single address and binds only that one, so
   // "localhost" here still came back IPv6-only on this machine - use the
   // literal IPv4 address to force it, verified below.
-  server: { port: 5173, host: '127.0.0.1' }
+  server: { port: Number(process.env.MOODEV_CLIENT_PORT) || 5173, host: '127.0.0.1' }
 })

@@ -42,7 +42,7 @@ let ``parseVerbFile round-trips renderVerbFile, including multi-alias headers`` 
               Code = [ "\"a comment-like string;\";"; "player:tell(\"hi\");" ] }
 
         let path = Path.Combine(dir, "look.moo")
-        File.WriteAllText(path, renderVerbFile "room" original)
+        File.WriteAllText(path, renderVerbFile "$room" original)
 
         let parsed = parseVerbFile path
 
@@ -65,7 +65,7 @@ let ``parseVerbFile handles a verb with empty code (never programmed)`` () =
               Code = [] }
 
         let path = Path.Combine(dir, "eval.moo")
-        File.WriteAllText(path, renderVerbFile "room" original)
+        File.WriteAllText(path, renderVerbFile "$room" original)
 
         let parsed = parseVerbFile path
 
@@ -112,10 +112,10 @@ let ``parseObjectMoo round-trips renderObjectMoo - parents, flags, properties, v
 
         let verbFileNames = assignVerbFileNames data.Verbs
 
-        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "room" data verbFileNames)
+        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "$room" data verbFileNames)
 
         for verb, fileName in verbFileNames do
-            File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "room" verb)
+            File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "$room" verb)
 
         let parsed = parseObjectMoo (Path.Combine(objDir, "object.moo")) verbsDir
 
@@ -157,10 +157,34 @@ let ``parseObjectMoo handles a property value containing embedded newlines`` () 
                     ValueLiteral = "\"line one\nline two\"" } ]
               Verbs = [] }
 
-        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "room" data [])
+        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "$room" data [])
 
         let parsed = parseObjectMoo (Path.Combine(objDir, "object.moo")) verbsDir
 
         Assert.Equal("\"line one\nline two\"", parsed.Properties.[0].ValueLiteral)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``parseObjectMoo reads the raw "object #0" header form (FORMAT.md's system-object exception) as SelfCorponym "0"`` () =
+    let dir = tempDir ()
+    let objDir = Path.Combine(dir, "objects", "0")
+    let verbsDir = Path.Combine(objDir, "verbs")
+    Directory.CreateDirectory(verbsDir) |> ignore
+
+    try
+        let data: ObjectExport =
+            { Parents = []
+              Owner = 0L
+              Flags = [ "wizard"; "programmer" ]
+              Properties = []
+              Verbs = [] }
+
+        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo Map.empty "#0" data [])
+
+        let parsed = parseObjectMoo (Path.Combine(objDir, "object.moo")) verbsDir
+
+        Assert.Equal("0", parsed.SelfCorponym)
+        Assert.Equal<string list>([ "wizard"; "programmer" ], parsed.Flags)
     finally
         Directory.Delete(dir, true)

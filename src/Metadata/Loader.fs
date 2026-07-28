@@ -1,103 +1,24 @@
-/// Loads a `Schema.Graph` from a `Survive`-shaped tree: `lookups.toml` +
-/// `metadata.json` (both written by MOOcode - `VCS/2_write_lookups_toml.moo`
-/// and `VCS/8_export_metadata.moo`) plus the captured verb source files,
-/// parsed via `Language.Parser`. Live MOO export, not a raw `.db` parser -
-/// see the M4 plan's "Decision: metadata graph via live-server export" for
-/// why (version-proof against the checkpoint format, reuses builtins like
-/// `parents()` that already do the multi-inheritance-aware work).
+/// Loads a `Schema.Graph` from a `Survive`-shaped export tree per
+/// `C:\dev\moo-code\moo-dev\FORMAT.md` (`corponyms.moo` + one
+/// `objects/<name>/object.moo` + one file per verb, parsed via
+/// `Metadata.TreeFormat`), plus `builtins.json` (a separate, static,
+/// server-version-specific capture unrelated to the tree format itself),
+/// and the captured verb source, parsed through `Language.Parser`. Live MOO
+/// export, not a raw `.db` parser - see the M4 plan's "Decision: metadata
+/// graph via live-server export" for why (version-proof against the
+/// checkpoint format, reuses builtins like `parents()` that already do the
+/// multi-inheritance-aware work).
 module Metadata.Loader
 
 open System
 open System.IO
 open System.Text.Json
-open System.Text.RegularExpressions
 open Language.Lexer
 open Language.Parser
 open Metadata.Schema
+open Metadata.TreeFormat
 
 let parseObjRef (s: string) : ObjRef = Int64.Parse(s.TrimStart('#'))
-
-/// Reads a flag field that could come back from `generate_json()` as either
-/// a real JSON boolean or a 0/1 number, depending on whether the MOO value
-/// behind it (`is_player(obj)`, `obj.wizard`, etc.) is a real ToastStunt
-/// bool or a legacy int - robust to either without needing to pin down
-/// which one this fork's `generate_json()` actually produces.
-let private getBoolField (el: JsonElement) (propName: string) : bool =
-    let v = el.GetProperty(propName)
-
-    match v.ValueKind with
-    | JsonValueKind.True -> true
-    | JsonValueKind.False -> false
-    | JsonValueKind.Number -> v.GetInt32() <> 0
-    | _ -> false
-
-/// `lookups.toml` is written exclusively by `2_write_lookups_toml.moo`,
-/// which only ever emits one shape per line - `"#N" = "Name"`, no nesting,
-/// no escaping (names are pre-sanitized to identifier-safe characters). A
-/// hand-rolled line parser matching that exact, fully-controlled format is
-/// simpler and has one less dependency than pulling in a general TOML
-/// library for a file we're also the sole writer of.
-let private lookupLineRegex = Regex(@"^""(#-?\d+)""\s*=\s*""(.*)""$")
-
-let private loadLookups (path: string) : Map<ObjRef, string> =
-    if not (File.Exists path) then
-        Map.empty
-    else
-        File.ReadAllLines path
-        |> Array.choose (fun line ->
-            let m = lookupLineRegex.Match(line.Trim())
-            if m.Success then
-                Some(parseObjRef m.Groups.[1].Value, m.Groups.[2].Value)
-            else
-                None)
-        |> Map.ofArray
-
-let private parseVerbMeta (el: JsonElement) : VerbMeta =
-    { Index = el.GetProperty("index").GetInt32()
-      Names =
-        el.GetProperty("names").GetString().Split(' ')
-        |> Array.filter (fun s -> s <> "")
-        |> List.ofArray
-      Owner = parseObjRef (el.GetProperty("owner").GetString())
-      Perms = el.GetProperty("perms").GetString()
-      Dobj = el.GetProperty("dobj").GetString()
-      Prep = el.GetProperty("prep").GetString()
-      Iobj = el.GetProperty("iobj").GetString() }
-
-/// `$vcs:capture_verb` names files `<index>_<sanitized-first-name>.moo`
-/// inside the defining object's directory. The sanitized-name half isn't
-/// worth reconstructing here (it'd mean porting `sanitize_name` too) since
-/// `<index>` alone is already a unique key within one object's directory -
-/// glob on the prefix instead.
-let private findVerbSource (objDir: string) (index: int) : string option =
-    if not (Directory.Exists objDir) then
-        None
-    else
-        Directory.EnumerateFiles(objDir, sprintf "%d_*.moo" index) |> Seq.tryHead
-
-let private loadVerb (surviveRoot: string) (objDirName: string option) (definedOn: ObjRef) (meta: VerbMeta) : VerbNode =
-    let sourcePath =
-        objDirName
-        |> Option.bind (fun dirName -> findVerbSource (Path.Combine(surviveRoot, dirName)) meta.Index)
-
-    let ast, diagCount, tokens =
-        match sourcePath with
-        | None -> None, 0, None
-        | Some path ->
-            let lexResult = tokenize (File.ReadAllText path)
-
-            match lexResult.Error with
-            | Some _ -> None, 0, None
-            | None ->
-                let stmts = parse lexResult.Tokens
-                Some stmts, Language.Ast.countErrors stmts, Some lexResult.Tokens
-
-    { Meta = meta
-      DefinedOn = definedOn
-      SourcePath = sourcePath
-      Ast = ast
-      DiagnosticCount = diagCount
-      Tokens = tokens }
 
 /// `builtin-param-names.json` is embedded in this assembly (see
 /// `Metadata.fsproj`) - a static, build-time extraction from ToastStunt's
@@ -152,6 +73,14 @@ let private parseBuiltinFunc
       ParamNames = Map.tryFind name paramNames
       Description = Map.tryFind name descriptions }
 
+/// `builtins.json` is a static, server-version-specific capture (which
+/// builtins this ToastStunt fork registers, and their arity/arg types) -
+/// unrelated to `FORMAT.md`'s tree format and not written by any part of
+/// the current sidecar-owned export pipeline (it was a `$vcs`-only capture,
+/// `export_builtins.moo`, now retired along with the rest of `$vcs`). Its
+/// absence degrades gracefully to an empty map rather than failing the
+/// whole load - unlike the tree files below, which are mandatory per
+/// `FORMAT.md` and fail loudly if missing/malformed.
 let private loadBuiltins (path: string) : Map<string, BuiltinFunc> =
     if not (File.Exists path) then
         Map.empty
@@ -166,89 +95,132 @@ let private loadBuiltins (path: string) : Map<string, BuiltinFunc> =
             b.Name, b)
         |> Map.ofSeq
 
-/// Reads `<surviveRoot>/lookups.toml`, `<surviveRoot>/metadata.json`, and
-/// `<surviveRoot>/builtins.json`, parsing every captured verb's source
-/// along the way, into one `Graph`.
-let load (surviveRoot: string) : Graph =
-    let lookups = loadLookups (Path.Combine(surviveRoot, "lookups.toml"))
-    let builtins = loadBuiltins (Path.Combine(surviveRoot, "builtins.json"))
-    use doc = JsonDocument.Parse(File.ReadAllText(Path.Combine(surviveRoot, "metadata.json")))
+/// Parses one verb's already-read source lines into an AST/token stream.
+/// Unlike the old format (where `metadata.json` could know about a verb
+/// never captured to disk, so `SourcePath` was sometimes `None`), a verb
+/// only exists in the tree at all if it has a file - this always produces a
+/// populated `SourcePath`/`Ast`/`Tokens`, barring a genuine lex error in the
+/// captured source itself.
+let private loadVerb (definedOn: ObjRef) (index: int) (pv: ParsedVerb, sourcePath: string) : VerbNode =
+    let names = pv.Names.Split(' ') |> Array.filter (fun s -> s <> "") |> List.ofArray
+    let sourceText = String.concat "\n" pv.Code
+    let lexResult = tokenize sourceText
 
-    let objRefList (el: JsonElement) =
-        el.EnumerateArray() |> Seq.map (fun e -> parseObjRef (e.GetString())) |> List.ofSeq
+    let ast, diagCount, tokens =
+        match lexResult.Error with
+        | Some _ -> None, 0, None
+        | None ->
+            let stmts = parse lexResult.Tokens
+            Some stmts, Language.Ast.countErrors stmts, Some lexResult.Tokens
+
+    { Meta =
+        { Index = index
+          Names = names
+          Owner = pv.Owner
+          Perms = pv.Perms
+          Dobj = pv.Dobj
+          Prep = pv.Prep
+          Iobj = pv.Iobj }
+      DefinedOn = definedOn
+      SourcePath = Some sourcePath
+      Ast = ast
+      DiagnosticCount = diagCount
+      Tokens = tokens }
+
+let private loadObjectFlags (flags: string list) : ObjectFlags =
+    { Player = List.contains "player" flags
+      Programmer = List.contains "programmer" flags
+      Wizard = List.contains "wizard" flags
+      Read = List.contains "r" flags
+      Write = List.contains "w" flags
+      Fertile = List.contains "f" flags
+      Anonymous = List.contains "a" flags }
+
+/// Resolves a `parents:` token against the corponym map. `$name` must
+/// resolve to a real entry - per `FORMAT.md` §7's "fail loudly on a missing
+/// corponym; do not guess", a dangling reference is a real bug in the tree,
+/// not a normal condition to route around silently.
+let private resolveParentRef (corponymToObjnum: Map<string, int64>) (p: ParentRef) : int64 =
+    match p with
+    | ByObjnum n -> n
+    | ByCorponym name ->
+        match Map.tryFind name corponymToObjnum with
+        | Some n -> n
+        | None -> failwithf "Dangling parent reference: $%s has no entry in corponyms.moo" name
+
+/// Shared between every corponym-bearing object and FORMAT.md §1's `#0`
+/// exception (which has no corponym, hence the separate `nameOpt` rather
+/// than looking it up here).
+let private buildObjectNode
+    (corponymToObjnum: Map<string, int64>)
+    (num: ObjRef)
+    (nameOpt: string option)
+    (po: ParsedObject)
+    : ObjectNode =
+    let parents = po.Parents |> List.map (resolveParentRef corponymToObjnum)
+    let verbs = po.Verbs |> List.mapi (fun i verbAndPath -> loadVerb num (i + 1) verbAndPath)
+
+    let properties =
+        po.Properties
+        |> List.map (fun p -> { Name = p.Name; Owner = p.Owner; Perms = p.Perms })
+
+    { Num = num
+      Name = nameOpt
+      // The new format has no home for the real, unsanitized live `.name`
+      // display string (`object.moo` never captures a bare `.name` unless
+      // an object happens to define that property itself) - `Handlers.fs`
+      // already falls back to `Name` gracefully when this is `None`.
+      LiveName = None
+      Parents = parents
+      Children = [] // filled by the post-pass below
+      Verbs = verbs
+      Owner = Some po.Owner
+      Flags = Some(loadObjectFlags po.Flags)
+      Properties = properties }
+
+/// Reads `<surviveRoot>`'s export tree (`corponyms.moo` + `objects/*/`, per
+/// `FORMAT.md`) and `<surviveRoot>/builtins.json`, parsing every verb's
+/// captured source along the way, into one `Graph`.
+let load (surviveRoot: string) : Graph =
+    let builtins = loadBuiltins (Path.Combine(surviveRoot, "builtins.json"))
+    let corponyms, parsedObjects = parseTree surviveRoot
+    let corponymToObjnum = corponyms |> Map.ofList
+
+    let fromCorponyms =
+        corponyms
+        |> List.choose (fun (name, num) ->
+            match Map.tryFind name parsedObjects with
+            | None -> None
+            | Some po -> Some(num, buildObjectNode corponymToObjnum num (Some name) po))
+        |> Map.ofList
+
+    // FORMAT.md §1's `#0` exception: folded in whenever present, regardless
+    // of having a corponym (it never does - corponyms are properties ON #0
+    // pointing elsewhere, not at itself).
+    let objectsWithoutChildren =
+        match Map.tryFind "0" parsedObjects with
+        | None -> fromCorponyms
+        | Some po -> Map.add 0L (buildObjectNode corponymToObjnum 0L None po) fromCorponyms
+
+    // `Children` isn't recorded anywhere in the new format (`FORMAT.md` §3
+    // only has `parents:`) - compute it by inverting every loaded object's
+    // Parents. Only meaningful among objects that are themselves loaded
+    // (corponym-bearing), matching the old system's own scope - nothing
+    // dispatch-critical reads this (`Resolver.fs` only ever reads Parents),
+    // only `Handlers.fs`'s object inspector display.
+    let childrenByParent =
+        objectsWithoutChildren
+        |> Map.toList
+        |> List.collect (fun (num, node) -> node.Parents |> List.map (fun p -> p, num))
+        |> List.groupBy fst
+        |> List.map (fun (parent, children) -> parent, children |> List.map snd)
+        |> Map.ofList
 
     let objects =
-        doc.RootElement.GetProperty("objects").EnumerateArray()
-        |> Seq.map (fun objEl ->
-            let num = parseObjRef (objEl.GetProperty("num").GetString())
-            let name = Map.tryFind num lookups
-
-            let liveName =
-                match objEl.TryGetProperty("name") with
-                | true, nameEl ->
-                    match nameEl.GetString() with
-                    | "" -> None
-                    | s -> Some s
-                | false, _ -> None
-
-            let verbs =
-                objEl.GetProperty("verbs").EnumerateArray()
-                |> Seq.map (parseVerbMeta >> loadVerb surviveRoot name num)
-                |> List.ofSeq
-
-            let owner =
-                match objEl.TryGetProperty("owner") with
-                | true, ownerEl ->
-                    match ownerEl.GetString() with
-                    | null
-                    | "" -> None
-                    | s -> Some(parseObjRef s)
-                | false, _ -> None
-
-            let flags =
-                match objEl.TryGetProperty("flags") with
-                | true, flagsEl ->
-                    Some
-                        { Player = getBoolField flagsEl "player"
-                          Programmer = getBoolField flagsEl "programmer"
-                          Wizard = getBoolField flagsEl "wizard"
-                          Read = getBoolField flagsEl "r"
-                          Write = getBoolField flagsEl "w"
-                          Fertile = getBoolField flagsEl "f"
-                          Anonymous = getBoolField flagsEl "a" }
-                | false, _ -> None
-
-            let properties =
-                match objEl.TryGetProperty("properties") with
-                | true, propsEl ->
-                    propsEl.EnumerateArray()
-                    |> Seq.map (fun p ->
-                        { Name = p.GetProperty("name").GetString()
-                          Owner = parseObjRef (p.GetProperty("owner").GetString())
-                          Perms = p.GetProperty("perms").GetString() })
-                    |> List.ofSeq
-                | false, _ -> []
-
-            num,
-            { Num = num
-              Name = name
-              LiveName = liveName
-              Parents = objRefList (objEl.GetProperty("parents"))
-              Children = objRefList (objEl.GetProperty("children"))
-              Verbs = verbs
-              Owner = owner
-              Flags = flags
-              Properties = properties })
-        |> Map.ofSeq
-
-    let sysobjProps =
-        match doc.RootElement.TryGetProperty("sysobj_props") with
-        | true, propsEl ->
-            propsEl.EnumerateObject()
-            |> Seq.map (fun p -> p.Name, parseObjRef (p.Value.GetString()))
-            |> Map.ofSeq
-        | false, _ -> Map.empty
+        objectsWithoutChildren
+        |> Map.map (fun num node ->
+            { node with Children = Map.tryFind num childrenByParent |> Option.defaultValue [] })
 
     { Objects = objects
-      SystemObjectProperties = sysobjProps
+      SystemObjectProperties = corponymToObjnum
       Builtins = builtins }

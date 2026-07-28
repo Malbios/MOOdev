@@ -66,7 +66,7 @@ let ``renderVerbFile emits the verb-header/program/terminator grammar with pinne
           Iobj = "this"
           Code = [ "\"Describe this room to the caller.\";"; "player:tell(this:title());" ] }
 
-    let result = renderVerbFile "room" verb
+    let result = renderVerbFile "$room" verb
 
     let expected =
         "@verb $room:\"look_self\" this none this rxd #2\n"
@@ -88,10 +88,26 @@ let ``renderVerbFile strips * from the program line but keeps it in the verb hea
           Iobj = "none"
           Code = [ "return;" ] }
 
-    let result = renderVerbFile "room" verb
+    let result = renderVerbFile "$room" verb
 
     Assert.Contains("@verb $room:\"l*ook get take\"", result)
     Assert.Contains("@program $room:look", result)
+
+[<Fact>]
+let ``renderVerbFile renders the raw #0 self-reference, not a fabricated $0 corponym`` () =
+    let verb: VerbExport =
+        { Names = "do_command"
+          Owner = 2L
+          Perms = "rxd"
+          Dobj = "none"
+          Prep = "none"
+          Iobj = "none"
+          Code = [ "return 0;" ] }
+
+    let result = renderVerbFile "#0" verb
+
+    Assert.Contains("@verb #0:\"do_command\"", result)
+    Assert.Contains("@program #0:do_command", result)
 
 [<Fact>]
 let ``renderObjectMoo preserves parent order, sorts properties by name, resolves corponym parents`` () =
@@ -106,7 +122,7 @@ let ``renderObjectMoo preserves parent order, sorts properties by name, resolves
 
     let corponymsByObjnum = Map.ofList [ 4L, "string_utils" ] // 1L deliberately uncorified
 
-    let result = renderObjectMoo corponymsByObjnum "room" data []
+    let result = renderObjectMoo corponymsByObjnum "$room" data []
 
     let expected =
         "@object $room\n"
@@ -124,3 +140,16 @@ let ``renderObjectMoo preserves parent order, sorts properties by name, resolves
         + ".\n"
 
     Assert.Equal(expected, result)
+
+[<Fact>]
+let ``renderObjectMoo renders the raw #0 self-reference for FORMAT.md's system-object exception`` () =
+    let data: ObjectExport =
+        { Parents = []
+          Owner = 2L
+          Flags = [ "wizard"; "programmer" ]
+          Properties = []
+          Verbs = [] }
+
+    let result = renderObjectMoo Map.empty "#0" data []
+
+    Assert.StartsWith("@object #0\n", result)

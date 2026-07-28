@@ -57,27 +57,38 @@ type ObjectExport =
 // verb/property) - see the Phase 1 plan's decision #2.
 // ---------------------------------------------------------------------------
 
+/// Runs `statements` then reports `resultExpr` back as JSON - the shared
+/// two-part shape both `MooEval.runAndAwaitJson` (a dedicated wizard
+/// connection, used by the batch CLI tools) and `BridgeHandler.evalOnSession`
+/// (the browser's own live connection, used by `IdeActions`) already
+/// implement. Exporter's queries take this instead of a concrete
+/// `MooEval.Connection` so `IdeActions.saveVerb` can reuse the browser
+/// session's own connection for its read-back-and-render step rather than
+/// opening a second wizard connection - opening a second `connect wizard`
+/// while the browser session is *also* logged in as the wizard (the normal
+/// case for this single-developer tool) makes ToastStunt treat the second
+/// login as a reconnect of the same player and drop the first connection,
+/// silently killing the browser's own session out from under it (found live
+/// during Phase 4 verification).
+type EvalRunner = string -> string -> CancellationToken -> Task<JsonDocument>
+
 /// `for pname in (properties(#0)) if (typeof(#0.(pname)) == OBJ) ...` -
 /// exactly what the retired `export_metadata.moo` already computed as
 /// `sysobj_props`. Returns objnum -> corponym name (note: inverse of the
 /// on-disk map's own key order) so the exporter can look up "does this
 /// referenced object have a corponym" while building `object.moo`/`@verb`
 /// lines.
-let getCorponyms (conn: MooEval.Connection) (ct: CancellationToken) : Task<Map<int64, string>> =
+let getCorponyms (evalRunner: EvalRunner) (ct: CancellationToken) : Task<Map<int64, string>> =
     task {
-        let tag = MooEval.nextTag conn
-        let prefix = MooEval.sentinelPrefix tag
-
-        let body =
-            $"""corps = [];
+        let statements =
+            """corps = [];
 for pname in (properties(#0))
   if (typeof(#0.(pname)) == OBJ)
     corps[pname] = tostr(#0.(pname));
   endif
-endfor
-notify(player, "{prefix}" + (`generate_json(corps) ! ANY => generate_json(["error" -> tostr(error_code)])'));"""
+endfor"""
 
-        let! json = MooEval.sendAndAwaitJson conn tag body ct
+        let! json = evalRunner statements "corps" ct
         let root = json.RootElement
 
         return
@@ -114,18 +125,16 @@ let private parseProperty (el: JsonElement) : PropertyExport =
 /// read) - the caller skips it with a warning rather than crashing, since
 /// invariant I2 explicitly anticipates objnum/identity drift.
 let getObjectExport
-    (conn: MooEval.Connection)
+    (evalRunner: EvalRunner)
     (objRef: int64)
     (ct: CancellationToken)
     : Task<ObjectExport option> =
     task {
-        let tag = MooEval.nextTag conn
-        let prefix = MooEval.sentinelPrefix tag
         let o = sprintf "#%d" objRef
 
-        let body =
+        let statements =
             $"""if (!valid({o}))
-  notify(player, "{prefix}" + generate_json(["error" -> "invalid"]));
+  result = ["error" -> "invalid"];
 else
   parents_list = {{}};
   for p in (parents({o})) parents_list = {{@parents_list, tostr(p)}}; endfor
@@ -151,10 +160,9 @@ else
     vout = {{@vout, ["names" -> vi[3], "owner" -> tostr(vi[1]), "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "code" -> code]}};
   endfor
   result = ["parents" -> parents_list, "owner" -> tostr({o}.owner), "flags" -> flags, "properties" -> props, "verbs" -> vout];
-  notify(player, "{prefix}" + (`generate_json(result) ! ANY => generate_json(["error" -> tostr(error_code)])'));
 endif"""
 
-        let! json = MooEval.sendAndAwaitJson conn tag body ct
+        let! json = evalRunner statements "result" ct
         let root = json.RootElement
         let hasError, _ = root.TryGetProperty("error")
 
@@ -174,6 +182,20 @@ endif"""
                       Properties = properties
                       Verbs = verbs }
     }
+
+/// Resolves a FORMAT.md tree-relative path to `(corponym, label)` - shared by
+/// `IdeActions.searchHistory` (labeling a pickaxe-search hit) and
+/// `Promotion.diffSummary` (labeling a production/main tree diff), so the
+/// path-shape knowledge lives in exactly one place. `"(properties)"` is a
+/// stand-in label for `object.moo` itself, not the exact property name
+/// (which needs parsing the blob at a specific commit - not worth it for
+/// either caller). `None` for paths outside `objects/<corponym>/...`
+/// entirely (`corponyms.moo`, `FORMAT_VERSION`).
+let describePath (path: string) : (string * string) option =
+    match path.Split('/') with
+    | [| "objects"; corponym; "object.moo" |] -> Some(corponym, "(properties)")
+    | [| "objects"; corponym; "verbs"; fileName |] -> Some(corponym, Path.GetFileNameWithoutExtension(fileName: string))
+    | _ -> None
 
 // ---------------------------------------------------------------------------
 // Filename derivation - ports Survive/VCS/1_sanitize_name.moo verbatim.
@@ -230,9 +252,12 @@ let renderCorponymsMoo (corponyms: (string * int64) list) : string =
     |> String.concat "\n"
     |> fun s -> s + "\n"
 
+/// `selfRefText` is the already-formatted self-reference for the `@object`
+/// line - `"$" + corponym` for a normal object, or the raw `"#0"` for the
+/// one FORMAT.md §1 exception (`#0` has no corponym of its own to render).
 let renderObjectMoo
     (corponymsByObjnum: Map<int64, string>)
-    (selfCorponym: string)
+    (selfRefText: string)
     (data: ObjectExport)
     (verbFileNames: (VerbExport * string) list)
     : string =
@@ -241,7 +266,7 @@ let renderObjectMoo
     // out by name as the thing most likely to quietly wreck this project,
     // so output must not depend on which OS the exporter happens to run on.
     let lines = ResizeArray<string>()
-    lines.Add(sprintf "@object $%s" selfCorponym)
+    lines.Add(sprintf "@object %s" selfRefText)
 
     let parentsText =
         data.Parents |> List.map (refText corponymsByObjnum) |> String.concat " "
@@ -265,12 +290,13 @@ let renderObjectMoo
 
     String.concat "\n" lines + "\n"
 
-let renderVerbFile (selfCorponym: string) (v: VerbExport) : string =
+/// `selfRefText` - see `renderObjectMoo`'s own comment; same convention.
+let renderVerbFile (selfRefText: string) (v: VerbExport) : string =
     let firstAliasNoStar = v.Names.Split(' ').[0].Replace("*", "")
     let lines = ResizeArray<string>()
 
-    lines.Add(sprintf "@verb $%s:\"%s\" %s %s %s %s #%d" selfCorponym v.Names v.Dobj v.Prep v.Iobj v.Perms v.Owner)
-    lines.Add(sprintf "@program $%s:%s" selfCorponym firstAliasNoStar)
+    lines.Add(sprintf "@verb %s:\"%s\" %s %s %s %s #%d" selfRefText v.Names v.Dobj v.Prep v.Iobj v.Perms v.Owner)
+    lines.Add(sprintf "@program %s:%s" selfRefText firstAliasNoStar)
 
     for line in v.Code do
         lines.Add(line)
@@ -291,7 +317,8 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         Directory.CreateDirectory(outputDir) |> ignore
         File.WriteAllText(Path.Combine(outputDir, "FORMAT_VERSION"), "1\n")
 
-        let! corponymsByObjnum = getCorponyms conn ct
+        let evalRunner = MooEval.runAndAwaitJson conn
+        let! corponymsByObjnum = getCorponyms evalRunner ct
         let corponymList = corponymsByObjnum |> Map.toList |> List.map (fun (n, name) -> name, n)
 
         File.WriteAllText(Path.Combine(outputDir, "corponyms.moo"), renderCorponymsMoo corponymList)
@@ -300,7 +327,7 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
             corponymList |> List.sortWith (fun (a, _) (b, _) -> String.Compare(a, b, StringComparison.OrdinalIgnoreCase))
 
         for name, objRef in sortedByName do
-            let! dataOpt = getObjectExport conn objRef ct
+            let! dataOpt = getObjectExport evalRunner objRef ct
 
             match dataOpt with
             | None ->
@@ -314,9 +341,30 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
 
                 File.WriteAllText(
                     Path.Combine(objDir, "object.moo"),
-                    renderObjectMoo corponymsByObjnum name data verbFileNames
+                    renderObjectMoo corponymsByObjnum ("$" + name) data verbFileNames
                 )
 
                 for verb, fileName in verbFileNames do
-                    File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile name verb)
+                    File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
+
+        // FORMAT.md §1's one exception: #0 (System Object) always gets a
+        // directory, corponym or not - it's where the sidecar's own
+        // bootstrap verbs live (user_connected/do_command) and has no
+        // corponym of its own to be discovered by, since corponyms are
+        // properties ON #0 pointing elsewhere, not at itself.
+        let! systemObjectData = getObjectExport evalRunner 0L ct
+
+        match systemObjectData with
+        | None -> eprintfn "Skipping #0: object.moo export query failed"
+        | Some data ->
+            let objDir = Path.Combine(outputDir, "objects", "0")
+            let verbsDir = Path.Combine(objDir, "verbs")
+            Directory.CreateDirectory(verbsDir) |> ignore
+
+            let verbFileNames = assignVerbFileNames data.Verbs
+
+            File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "#0" data verbFileNames)
+
+            for verb, fileName in verbFileNames do
+                File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
     }

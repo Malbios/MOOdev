@@ -223,6 +223,44 @@ let setErrorMarkers (editor: IStandaloneCodeEditor) (lineErrors: (int * string) 
 
     monaco?editor?setModelMarkers (model, "moocode-compile", markers)
 
+/// Just enough of Monaco's diff editor for Phase 5's per-verb history view:
+/// a historical version (read-only "original" side) against the live editor's
+/// current content ("modified" side). One instance is created lazily and
+/// reused across every commit the user picks (`setDiffModel` swaps the
+/// models in place) rather than recreated per selection - a diff editor owns
+/// real DOM/canvas state, so churning instances would leak them.
+type IDiffEditor =
+    abstract setModel: models: obj -> unit
+    abstract layout: unit -> unit
+    abstract dispose: unit -> unit
+
+/// Creates a read-only, side-by-side diff editor in `container` - "read-only"
+/// because this view is for comparison, not editing; restoring an old version
+/// is a separate explicit action (`App.fs` calls the *regular* editor's
+/// `setValue` for that, not anything here).
+let createDiffEditor (container: Browser.Types.HTMLElement) : IDiffEditor =
+    let options =
+        createObj
+            [ "theme" ==> "vs-dark"
+              "automaticLayout" ==> true
+              "readOnly" ==> true
+              "renderSideBySide" ==> true ]
+
+    monaco?editor?createDiffEditor (container, options)
+
+let private createModel (content: string) : ITextModel =
+    monaco?editor?createModel (content, "moocode")
+
+/// Swaps a diff editor's two sides to `originalText` (the historical
+/// version) vs `modifiedText` (today's, usually the live editor's current
+/// content) - each call creates fresh models, matching Monaco's own
+/// "a model is disposable, an editor's models can be replaced wholesale"
+/// convention rather than trying to mutate an existing model's text.
+let setDiffModel (diffEditor: IDiffEditor) (originalText: string) (modifiedText: string) : unit =
+    let original = createModel originalText
+    let modified = createModel modifiedText
+    diffEditor.setModel (createObj [ "original" ==> original; "modified" ==> modified ])
+
 /// Wires the Phase 4.4 LSP server's hover/definition/completion/signature
 /// help/find-references into this Monaco instance for "moocode" - see
 /// `LspClient.wire` for what the callbacks are for. Call once, after

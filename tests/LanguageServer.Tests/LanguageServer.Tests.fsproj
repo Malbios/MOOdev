@@ -19,6 +19,11 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\LanguageServer\LanguageServer.fsproj" />
+    <!-- Test-only: reuses Sidecar.Exporter's renderers to build a synthetic
+         FORMAT.md-conformant fixture tree for HandlerTests.fs, mirroring
+         Metadata.Tests.fsproj's own identical addition. Does not affect the
+         shipped LanguageServer.dll dependency graph. -->
+    <ProjectReference Include="..\..\src\Sidecar\Sidecar.fsproj" />
   </ItemGroup>
 
 </Project>
