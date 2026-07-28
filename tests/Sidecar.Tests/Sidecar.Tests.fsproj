@@ -10,6 +10,7 @@
     <Compile Include="ExporterTests.fs" />
     <Compile Include="TreeParserTests.fs" />
     <Compile Include="ImporterTests.fs" />
+    <Compile Include="RoundTripTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

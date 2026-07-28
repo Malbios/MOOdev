@@ -324,11 +324,23 @@ let applyPlan (conn: MooEval.Connection) (plan: Plan) (ct: CancellationToken) : 
                 let statements =
                     match propOp with
                     | AddProperty p ->
-                        $"""add_property({o}, "{p.Name}", 0, {{player, "{p.Perms}"}}); {{ok, val}} = eval("return " + {mooLiteralString p.ValueLiteral} + ";"); if (ok) {o}.{p.Name} = val[1]; endif"""
+                        // eval()'s second return element IS the value
+                        // directly on success, not a singleton list -
+                        // confirmed live (`{ok, val} = eval("return 10+5;")`
+                        // gives val=15, not val={15}). Indexing val[1] here
+                        // was a real bug: for any non-indexable value
+                        // (an int, a string...) it raises E_TYPE, which
+                        // fails the *entire* submitted command silently
+                        // (ToastCore's `;` eval-command convention reports
+                        // the failure via notify() of error lines, never
+                        // reaching this command's own sentinel notify()),
+                        // hanging the client forever waiting for a response
+                        // that will never arrive.
+                        $"""add_property({o}, "{p.Name}", 0, {{player, "{p.Perms}"}}); {{ok, val}} = eval("return " + {mooLiteralString p.ValueLiteral} + ";"); if (ok) {o}.{p.Name} = val; endif"""
                     | DeleteProperty name -> $"""delete_property({o}, "{name}");"""
                     | UpdatePropertyInfo(name, owner, perms) -> $"""set_property_info({o}, "{name}", {{#{owner}, "{perms}"}});"""
                     | UpdatePropertyValue(name, literal) ->
-                        $"""{{ok, val}} = eval("return " + {mooLiteralString literal} + ";"); if (ok) {o}.{name} = val[1]; endif"""
+                        $"""{{ok, val}} = eval("return " + {mooLiteralString literal} + ";"); if (ok) {o}.{name} = val; endif"""
 
                 do! runIgnore conn statements ct
 

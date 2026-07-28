@@ -12,6 +12,7 @@
     <Compile Include="Exporter.fs" />
     <Compile Include="TreeParser.fs" />
     <Compile Include="Importer.fs" />
+    <Compile Include="RoundTrip.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

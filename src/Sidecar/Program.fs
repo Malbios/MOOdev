@@ -71,12 +71,31 @@ let private runImport (treeDir: string) (host: string) (port: int) (apply: bool)
     work.GetAwaiter().GetResult()
     0
 
+/// `compare-trees <treeA> <treeB>` is the Phase 3 round-trip gate's
+/// assertion step: compares two exported trees via `Sidecar.RoundTrip`,
+/// which tolerates only the specific fields the format declares
+/// non-portable across instances (objnum, ownership) rather than requiring
+/// a literal file diff. Prints every mismatch found and exits non-zero on
+/// any - the "done when it passes in CI" bar from the main plan.
+let private runCompareTrees (treeA: string) (treeB: string) : int =
+    let mismatches = RoundTrip.compareTrees treeA treeB
+
+    if mismatches.IsEmpty then
+        printfn "Trees match."
+        0
+    else
+        printfn "%d mismatch(es):" mismatches.Length
+        printfn ""
+        printfn "%s" (RoundTrip.formatMismatches mismatches)
+        1
+
 [<EntryPoint>]
 let main args =
     match args with
     | [| "export"; outputDir |] -> runExport outputDir "127.0.0.1" 7777
     | [| "export"; outputDir; host |] -> runExport outputDir host 7777
     | [| "export"; outputDir; host; port |] -> runExport outputDir host (int port)
+    | [| "compare-trees"; treeA; treeB |] -> runCompareTrees treeA treeB
     | _ when args.Length >= 2 && args.[0] = "import" ->
         let apply = args |> Array.contains "--apply"
         let positional = args.[1..] |> Array.filter (fun a -> a <> "--apply")
