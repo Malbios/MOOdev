@@ -16,6 +16,11 @@ telnet or the in-world editor.
 why (MOO documentation is sparse and much of what's findable describes LambdaMOO 1.8.1, not
 ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
 
+**VCS approach is being redesigned.** `C:\dev\moo-code\moo-vcs-plan.md` retires the in-MOO `$vcs`
+package entirely and moves version control ownership to the sidecar. The M2 status below and the
+capture-path details throughout this file describe the *current, still-running* system, not a
+settled end state — treat them as "how it works today," due to be replaced rather than extended.
+
 ## Milestone status
 
 - **M0 (substrate)** — done. ToastStunt fork builds under WSL2 Ubuntu
