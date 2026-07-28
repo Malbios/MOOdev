@@ -10,6 +10,8 @@
     <Compile Include="BridgeHandler.fs" />
     <Compile Include="MooEval.fs" />
     <Compile Include="Exporter.fs" />
+    <Compile Include="TreeParser.fs" />
+    <Compile Include="Importer.fs" />
     <Compile Include="Program.fs" />
   </ItemGroup>
 

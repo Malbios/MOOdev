@@ -149,3 +149,25 @@ let evalExpr (conn: Connection) (mooExpr: string) (ct: CancellationToken) : Task
         $"""notify(player, "{prefix}" + (`generate_json({mooExpr}) ! ANY => generate_json(["error" -> tostr(error_code)])'));"""
 
     sendAndAwaitJson conn tag body ct
+
+/// General-purpose version of `evalExpr` for a full MOO statement sequence
+/// that does not itself notify() anything: `statements` runs as-is, then
+/// `resultExpr` is evaluated and notify()'d back, all under ONE allocated
+/// tag. Exists specifically so callers never hand-roll tag/prefix
+/// bookkeeping themselves - allocating a tag once for embedding the
+/// sentinel text and again for the awaited response would silently produce
+/// two different tags and hang forever waiting for a response that never
+/// arrives under the tag actually awaited.
+let runAndAwaitJson
+    (conn: Connection)
+    (statements: string)
+    (resultExpr: string)
+    (ct: CancellationToken)
+    : Task<JsonDocument> =
+    let tag = nextTag conn
+    let prefix = sentinelPrefix tag
+
+    let body =
+        $"""{statements} notify(player, "{prefix}" + (`generate_json({resultExpr}) ! ANY => generate_json(["error" -> tostr(error_code)])'));"""
+
+    sendAndAwaitJson conn tag body ct

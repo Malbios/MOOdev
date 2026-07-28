@@ -8,6 +8,8 @@
   <ItemGroup>
     <Compile Include="TelnetFilterTests.fs" />
     <Compile Include="ExporterTests.fs" />
+    <Compile Include="TreeParserTests.fs" />
+    <Compile Include="ImporterTests.fs" />
   </ItemGroup>
 
   <ItemGroup>
