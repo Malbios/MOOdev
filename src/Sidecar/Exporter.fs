@@ -359,23 +359,29 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
                     File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
 
         // FORMAT.md §1's one exception: #0 (System Object) always gets a
-        // directory, corponym or not - it's where the sidecar's own
-        // bootstrap verbs live (user_connected/do_command) and has no
-        // corponym of its own to be discovered by, since corponyms are
-        // properties ON #0 pointing elsewhere, not at itself.
-        let! systemObjectData = getObjectExport evalRunner 0L ct
+        // directory even without a corponym of its own to be discovered by
+        // (corponyms are properties ON #0 pointing elsewhere, not at itself)
+        // - it's where the sidecar's own bootstrap verbs live
+        // (user_connected/do_command). Only when #0 has no corponym, though:
+        // real ToastCore-derived worlds already corify #0 as $sysobj (unlike
+        // Minimal.db/Survive, where #0 has none), and the corponym loop above
+        // already exported it correctly under that name - exporting it again
+        // here would just duplicate every verb/property under a second,
+        // redundant `objects/0/` directory.
+        if not (Map.containsKey 0L corponymsByObjnum) then
+            let! systemObjectData = getObjectExport evalRunner 0L ct
 
-        match systemObjectData with
-        | None -> eprintfn "Skipping #0: object.moo export query failed"
-        | Some data ->
-            let objDir = Path.Combine(outputDir, "objects", "0")
-            let verbsDir = Path.Combine(objDir, "verbs")
-            Directory.CreateDirectory(verbsDir) |> ignore
+            match systemObjectData with
+            | None -> eprintfn "Skipping #0: object.moo export query failed"
+            | Some data ->
+                let objDir = Path.Combine(outputDir, "objects", "0")
+                let verbsDir = Path.Combine(objDir, "verbs")
+                Directory.CreateDirectory(verbsDir) |> ignore
 
-            let verbFileNames = assignVerbFileNames data.Verbs
+                let verbFileNames = assignVerbFileNames data.Verbs
 
-            File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "#0" data verbFileNames)
+                File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "#0" data verbFileNames)
 
-            for verb, fileName in verbFileNames do
-                File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
+                for verb, fileName in verbFileNames do
+                    File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
     }
