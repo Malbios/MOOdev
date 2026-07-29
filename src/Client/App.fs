@@ -1230,23 +1230,19 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
     inspectorDiagnosticsEl.textContent <- ""
     inspectorContentEl.textContent <- "Loading..."
 
-    async {
-        let! infoOpt = LspClient.getObjectInfoAsync objRef
-
-        // The user may have switched away from (or closed) this inspector
-        // tab before this round-trip returned - only apply a stale result
-        // if it's still what should be showing.
-        if activeTab = InspectorTab objRef then
-            match infoOpt with
-            | Some info -> renderInspectorStructure objRef info highlightProp
-            | None ->
-                // Not in the static (corponym-only, per moo-vcs-plan.md I3)
-                // graph - fall back to a live query rather than reporting
-                // "not found" outright, since this may just be a live-only
-                // object the static export never covered.
-                sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
-    }
-    |> Async.StartImmediate
+    // Always live, never `LspClient.getObjectInfoAsync` (the LSP's static,
+    // corponym-only graph) - that graph is loaded once at LSP startup and
+    // never invalidated, so for any corponym'd object it silently keeps
+    // showing whatever the object looked like when the LSP last started,
+    // missing every live edit since (confirmed live: deleting a verb from a
+    // corponym'd object correctly updated the MOO and the sidebar tree, but
+    // this pane kept showing the deleted verb until the LSP itself was
+    // restarted - the actual bug behind "the inspector doesn't update").
+    // Matches the same "live governs, no export needed" call already made
+    // for hover/go-to-definition/builtins earlier in this project - the
+    // inspector is exactly the same kind of "show me current truth" view,
+    // just one that also has to handle mutation, not only reads.
+    sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
 
     sendAction [ "action" ==> "get-properties"; "obj" ==> int objRef ]
 
