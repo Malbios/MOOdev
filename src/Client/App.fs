@@ -28,6 +28,14 @@ let private scrollIntoViewCentered (el: HTMLElement) : unit = jsNative
 let private wsUrl: string =
     emitJsExpr () "import.meta.env.VITE_SIDECAR_WS_URL"
 
+// Per-profile server core name (test.ps1's -Database, e.g. "Survive" or
+// "ToastCore") - lets the browser tab tell multiple simultaneously-running
+// profiles apart.
+let private databaseName: string =
+    emitJsExpr () "import.meta.env.VITE_DATABASE_NAME"
+
+document.title <- sprintf "MOOcode Development: %s" databaseName
+
 let private outputEl = document.getElementById ("output")
 let private inputEl = document.getElementById ("input") :?> HTMLInputElement
 
