@@ -11,7 +11,7 @@ let main args =
     let builder = WebApplication.CreateBuilder(args)
     let app = builder.Build()
 
-    let surviveRoot = app.Configuration.GetValue<string>("Survive:Root", "C:\\dev\\moo\\Survive")
+    let surviveRoot = app.Configuration.GetValue<string>("Survive:Root", "../../../Survive")
     printfn "Loading metadata graph from %s..." surviveRoot
     let graph = Metadata.Loader.load surviveRoot
     printfn "Loaded %d objects." graph.Objects.Count
