@@ -118,7 +118,9 @@ let ``renderObjectMoo preserves parent order, sorts properties by name, resolves
           Properties =
             [ { Name = "zeta"; Owner = 2L; Perms = "rc"; ValueLiteral = "1" }
               { Name = "alpha"; Owner = 2L; Perms = "rc"; ValueLiteral = "2" } ]
-          Verbs = [] }
+          Verbs = []
+          LiveName = "Generic Room"
+          Aliases = [ "room"; "generic room" ] }
 
     let corponymsByObjnum = Map.ofList [ 4L, "string_utils" ] // 1L deliberately uncorified
 
@@ -129,6 +131,8 @@ let ``renderObjectMoo preserves parent order, sorts properties by name, resolves
         + "parents: $string_utils #1\n"
         + "owner: #2\n"
         + "flags: r f\n"
+        + "name: \"Generic Room\"\n"
+        + "aliases: \"room\" \"generic room\"\n"
         + "verbs: \n"
         + "\n"
         + "@property \"alpha\" owner=#2 perms=rc\n"
@@ -148,7 +152,9 @@ let ``renderObjectMoo renders the raw #0 self-reference for FORMAT.md's system-o
           Owner = 2L
           Flags = [ "wizard"; "programmer" ]
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let result = renderObjectMoo Map.empty "#0" data []
 

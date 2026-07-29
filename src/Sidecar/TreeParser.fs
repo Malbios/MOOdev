@@ -27,7 +27,18 @@ type ParsedObject =
       Owner: int64
       Flags: string list
       Properties: PropertyExport list
-      Verbs: VerbExport list }
+      Verbs: VerbExport list
+      /// The `name:` header line, if present - absent (`None`) for a tree
+      /// exported before this field existed, per FORMAT.md's backwards-compat
+      /// note. Not otherwise normalized here (an empty `Some ""` is left
+      /// as-is) - parsed for parity with `Metadata.TreeFormat.ParsedObject`,
+      /// but not currently read anywhere in the import/promotion path (see
+      /// `Exporter.ObjectExport.LiveName`'s own scope note).
+      Name: string option
+      /// The `aliases:` header line's tokens, `[]` if the line is present
+      /// but empty, also `[]` if the line is absent entirely (pre-feature
+      /// tree). Same not-currently-read scope note as `Name`.
+      Aliases: string list }
 
 let private parseObjRefToken (token: string) : int64 = int64 (token.TrimStart('#'))
 
@@ -56,6 +67,24 @@ let private parseQuotedField (s: string) (openQuoteIdx: int) : string * int =
             i <- i + 1
 
     sb.ToString(), closeIdx
+
+/// Reads zero or more independently-escaped quoted tokens starting at
+/// `startIdx` to the end of the line - `aliases:`'s encoding (see
+/// `Exporter.renderQuotedFieldList`'s own comment for why aliases use one
+/// quoted token per alias rather than a single space-joined field like a
+/// verb's name-spec: a MOO alias can itself contain spaces).
+let private parseQuotedFieldList (s: string) (startIdx: int) : string list =
+    let rec loop (i: int) (acc: string list) =
+        if i >= s.Length then
+            List.rev acc
+        else
+            match s.IndexOf('"', i) with
+            | -1 -> List.rev acc
+            | quoteIdx ->
+                let token, closeIdx = parseQuotedField s quoteIdx
+                loop (closeIdx + 1) (token :: acc)
+
+    loop startIdx []
 
 /// `corponyms.moo`: one `<name> #<objnum>` per line. Split from `parseCorponyms`
 /// below so `History.fs` can parse a blob's content (fetched from git, never
@@ -143,6 +172,22 @@ let parseObjectMoo (objectMooPath: string) (verbsDir: string) : ParsedObject =
 
     let verbs = verbFileNames |> List.map (fun fileName -> parseVerbFile (Path.Combine(verbsDir, fileName)))
 
+    // `name:`/`aliases:` are optional (`Array.tryFind`, not `Array.find`) -
+    // absent entirely in a tree exported before this field existed, per
+    // FORMAT.md's backwards-compat note. Both must render before `verbs:`
+    // so `headerLineCount` below (computed from `verbs:`'s own position)
+    // stays correct regardless of whether these lines are present.
+    let name =
+        lines
+        |> Array.tryFind (fun l -> l.StartsWith("name: "))
+        |> Option.map (fun l -> fst (parseQuotedField l (l.IndexOf('"'))))
+
+    let aliases =
+        lines
+        |> Array.tryFind (fun l -> l.StartsWith("aliases: "))
+        |> Option.map (fun l -> parseQuotedFieldList l "aliases: ".Length)
+        |> Option.defaultValue []
+
     // Property blocks: everything after the header, split on blank lines
     // into "@property ... <value lines> ." chunks. A value literal can
     // itself span multiple physical lines if the underlying string contains
@@ -192,7 +237,9 @@ let parseObjectMoo (objectMooPath: string) (verbsDir: string) : ParsedObject =
       Owner = owner
       Flags = flags
       Properties = properties
-      Verbs = verbs }
+      Verbs = verbs
+      Name = name
+      Aliases = aliases }
 
 /// Reads a full tree: `corponyms.moo` plus every `objects/<name>/object.moo`
 /// the corponym list references.

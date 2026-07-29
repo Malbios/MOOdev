@@ -23,7 +23,9 @@ let private parsed parents props verbs : ParsedObject =
       Owner = 2L
       Flags = []
       Properties = props
-      Verbs = verbs }
+      Verbs = verbs
+      Name = None
+      Aliases = [] }
 
 let private resolveAll: ParentRef -> int64 option =
     function
@@ -52,7 +54,9 @@ let ``identical desired and current produce no operations at all`` () =
           Owner = 2L
           Flags = []
           Properties = props
-          Verbs = verbs }
+          Verbs = verbs
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -71,7 +75,9 @@ let ``property value change is detected without touching property info`` () =
           Owner = 2L
           Flags = []
           Properties = [ prop "description" "\"old text\"" ]
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -86,7 +92,9 @@ let ``property owner/perms change is detected separately from value`` () =
           Owner = 2L
           Flags = []
           Properties = [ prop "description" "\"same\"" ]
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -101,7 +109,9 @@ let ``a property removed from the tree is deleted on the target`` () =
           Owner = 2L
           Flags = []
           Properties = [ prop "obsolete" "1" ]
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -118,7 +128,9 @@ let ``adding a verb triggers a reorder even though nothing else changed`` () =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ v1 ] }
+          Verbs = [ v1 ]
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -136,7 +148,9 @@ let ``reordering the same verb set (no other change) is a reorder, not a no-op``
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ v1; v2 ] }
+          Verbs = [ v1; v2 ]
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -153,7 +167,9 @@ let ``verb code change with unchanged set and order yields a targeted UpdateVerb
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ currentVerb ] }
+          Verbs = [ currentVerb ]
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -171,7 +187,9 @@ let ``verb args change (dobj/prep/iobj) is detected as UpdateVerbArgs`` () =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ currentVerb ] }
+          Verbs = [ currentVerb ]
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) resolveAll
 
@@ -194,7 +212,9 @@ let ``parents preview reports the resolved change when everything is resolvable`
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let plan = planObject "room" desired (Some current) (fun _ -> Some 4L)
 

@@ -50,7 +50,21 @@ type ObjectExport =
       /// Declaration order as returned by `verbs(obj)` - preserved exactly,
       /// both for the `object.moo` `verbs:` manifest and each verb file's
       /// on-disk order-of-writing (dispatch is first-match-wins).
-      Verbs: VerbExport list }
+      Verbs: VerbExport list
+      /// The object's live `.name` value, fetched directly rather than via
+      /// `properties(obj)` (see `getObjectExport`'s own comment for why) -
+      /// display-only, for the tree/inspector's benefit. `""` for a
+      /// genuinely empty `.name`; normalized to `None` only at
+      /// `Metadata/Loader.fs`'s layer, not here (this type stays a plain
+      /// mirror of live state). Fetched but not diffed by
+      /// `Importer.fs`'s `planObject` - same deliberate scope as the
+      /// existing `Owner`/`Flags` fields, which also have no corresponding
+      /// `*Op` promotion type.
+      LiveName: string
+      /// The object's live `.aliases` value, same direct-fetch reasoning
+      /// and same fetched-but-undiffed-by-import scope as `LiveName`. `[]`
+      /// for no aliases.
+      Aliases: string list }
 
 // ---------------------------------------------------------------------------
 // MOO-side queries. One eval per corponym-bearing object (not per
@@ -124,6 +138,18 @@ let private parseProperty (el: JsonElement) : PropertyExport =
 /// to point at a no-longer-valid object (recycled since the corponym map was
 /// read) - the caller skips it with a warning rather than crashing, since
 /// invariant I2 explicitly anticipates objnum/identity drift.
+///
+/// The `.aliases` fetch below is wrapped in `try`/`except (E_PROPNF)`, unlike
+/// `.name` - `.name` is a genuine C-level built-in property (`db.h`'s
+/// `BUILTIN_PROPERTIES`), always present on every object, but `.aliases` is
+/// only a MOOcode convention inherited from wherever it's declared (usually
+/// `$root_class`). An object with no parents at all - confirmed live: real
+/// ToastCore's own `$anon` prototype (`#118`) - genuinely has no `.aliases`
+/// anywhere in its (empty) ancestry, so this must be caught, not assumed
+/// present. (Note for future edits to the MOO source below: MOOcode has no
+/// comment syntax at all - a stray `//` here would silently corrupt the eval
+/// statement, not get stripped, and manifests as this entire eval hanging
+/// forever rather than a visible parse error - confirmed live, the hard way.)
 let getObjectExport
     (evalRunner: EvalRunner)
     (objRef: int64)
@@ -159,7 +185,19 @@ else
     code = verb_code({o}, i, 0, 1);
     vout = {{@vout, ["names" -> vi[3], "owner" -> tostr(vi[1]), "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "code" -> code]}};
   endfor
-  result = ["parents" -> parents_list, "owner" -> tostr({o}.owner), "flags" -> flags, "properties" -> props, "verbs" -> vout];
+  live_name = typeof({o}.name) == STR ? {o}.name | "";
+  alias_list = {{}};
+  try
+    if (typeof({o}.aliases) == LIST)
+      for a in ({o}.aliases)
+        if (typeof(a) == STR)
+          alias_list = {{@alias_list, a}};
+        endif
+      endfor
+    endif
+  except (E_PROPNF)
+  endtry
+  result = ["parents" -> parents_list, "owner" -> tostr({o}.owner), "flags" -> flags, "properties" -> props, "verbs" -> vout, "name" -> live_name, "aliases" -> alias_list];
 endif"""
 
         let! json = evalRunner statements "result" ct
@@ -173,6 +211,7 @@ endif"""
             let flags = root.GetProperty("flags").EnumerateArray() |> Seq.map (fun f -> f.GetString()) |> List.ofSeq
             let properties = root.GetProperty("properties").EnumerateArray() |> Seq.map parseProperty |> List.ofSeq
             let verbs = root.GetProperty("verbs").EnumerateArray() |> Seq.map parseVerb |> List.ofSeq
+            let aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> List.ofSeq
 
             return
                 Some
@@ -180,7 +219,9 @@ endif"""
                       Owner = int64 (root.GetProperty("owner").GetString().TrimStart('#'))
                       Flags = flags
                       Properties = properties
-                      Verbs = verbs }
+                      Verbs = verbs
+                      LiveName = getString root "name"
+                      Aliases = aliases }
     }
 
 /// Resolves a FORMAT.md tree-relative path to `(corponym, label)` - shared by
@@ -254,6 +295,17 @@ let private refText (corponymsByObjnum: Map<int64, string>) (objRef: int64) : st
 let private escapeQuotedField (s: string) : string =
     s.Replace("\\", "\\\\").Replace("\"", "\\\"")
 
+/// Renders `aliases:`'s value - one independently-escaped quoted token per
+/// alias, space-separated between tokens, NOT a single space-joined field
+/// like a verb's name-spec. Real `.aliases` entries are routinely multi-word
+/// phrases (confirmed against ToastStunt's own `parse_cmd.cc`/`match.cc`:
+/// the command parser joins multiple typed words into the dobj/iobj match
+/// target before comparing it against each alias, e.g. "brass lantern" is
+/// ordinary alias content) - joining/splitting on space the way verb
+/// name-specs do would silently corrupt any multi-word alias.
+let private renderQuotedFieldList (items: string list) : string =
+    items |> List.map (fun s -> sprintf "\"%s\"" (escapeQuotedField s)) |> String.concat " "
+
 let renderCorponymsMoo (corponyms: (string * int64) list) : string =
     corponyms
     |> List.sortWith (fun (a, _) (b, _) -> String.Compare(a, b, StringComparison.OrdinalIgnoreCase))
@@ -283,6 +335,8 @@ let renderObjectMoo
     lines.Add(sprintf "parents: %s" parentsText)
     lines.Add(sprintf "owner: #%d" data.Owner)
     lines.Add(sprintf "flags: %s" (String.concat " " data.Flags))
+    lines.Add(sprintf "name: \"%s\"" (escapeQuotedField data.LiveName))
+    lines.Add(sprintf "aliases: %s" (renderQuotedFieldList data.Aliases))
 
     let verbFilesText = verbFileNames |> List.map snd |> String.concat " "
     lines.Add(sprintf "verbs: %s" verbFilesText)

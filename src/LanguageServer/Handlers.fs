@@ -87,7 +87,10 @@ type ObjectInfo =
       Parents: ObjectInfoRef[]
       Children: ObjectInfoRef[]
       Verbs: ObjectInfoVerb[]
-      Properties: ObjectInfoProperty[] }
+      Properties: ObjectInfoProperty[]
+      /// `[]` for no aliases, or for a tree exported before this field
+      /// existed - see `Schema.ObjectNode.Aliases`.
+      Aliases: string[] }
 
 /// The browser client never has a real filesystem path - it only ever
 /// knows "object # + verb name" (the same pair `$vcs:ide_fetch`/`ide_save`
@@ -891,7 +894,8 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                       Parents = o.Parents |> List.map refFor |> Array.ofList
                       Children = o.Children |> List.map refFor |> Array.ofList
                       Verbs = verbs
-                      Properties = properties }
+                      Properties = properties
+                      Aliases = o.Aliases |> Array.ofList }
 
                 return Ok(Some info)
         }

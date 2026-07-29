@@ -36,7 +36,8 @@ let private objNode (num: ObjRef) (parents: ObjRef list) (verbs: VerbNode list) 
       Verbs = verbs |> List.map (fun v -> { v with DefinedOn = num })
       Owner = None
       Flags = None
-      Properties = [] }
+      Properties = []
+      Aliases = [] }
 
 let private graphOf (objects: ObjectNode list) : Graph =
     { Objects = objects |> List.map (fun o -> o.Num, o) |> Map.ofList

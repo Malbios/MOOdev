@@ -94,11 +94,14 @@ type ObjectNode =
       /// `$vcs` has never named (no verb of theirs has been captured/edited
       /// yet). Not what a human wants to read in a picker - see `LiveName`.
       Name: string option
-      /// The object's actual, unsanitized `.name` property value, from
-      /// `metadata.json` (`$vcs:export_metadata()` added this alongside
-      /// `Name` specifically for display purposes - e.g. "Generic Room"
-      /// rather than `Name`'s "Generic_Room"). `None` only for the rare
-      /// object with a genuinely empty `.name`.
+      /// The object's actual, unsanitized `.name` property value - from the
+      /// export tree's `object.moo` `name:` header line (`Exporter.fs`
+      /// fetches it directly, bypassing `properties(obj)` - see FORMAT.md
+      /// §3's note on why), specifically for display purposes - e.g.
+      /// "Generic Room" rather than `Name`'s "Generic_Room". `None` for a
+      /// genuinely empty `.name`, or for a tree exported before this field
+      /// existed (`TreeFormat.ParsedObject.Name`'s own backwards-compat
+      /// tolerance).
       LiveName: string option
       Parents: ObjRef list
       Children: ObjRef list
@@ -108,7 +111,11 @@ type ObjectNode =
       /// in practice always present once `export_metadata()` is re-run.
       Owner: ObjRef option
       Flags: ObjectFlags option
-      Properties: PropertyMeta list }
+      Properties: PropertyMeta list
+      /// The object's live `.aliases` values, same direct-fetch reasoning as
+      /// `LiveName`. `[]` for no aliases, or for a tree exported before this
+      /// field existed.
+      Aliases: string list }
 
 /// One entry from `function_info()` (`functions.cc:463-510`) - name,
 /// arity bounds, and per-argument type codes (`TYPE_INT`=0, `TYPE_OBJ`=1,

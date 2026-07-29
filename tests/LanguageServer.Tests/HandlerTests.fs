@@ -94,7 +94,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = [ "player"; "programmer"; "wizard" ]
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "room"
@@ -102,7 +104,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = [ "r"; "f" ]
           Properties = []
-          Verbs = [ verb "say" [ "\"Say something.\";"; "player:tell(\"You say, \\\"\", argstr, \"\\\"\");" ] ] }
+          Verbs = [ verb "say" [ "\"Say something.\";"; "player:tell(\"You say, \\\"\", argstr, \"\\\"\");" ] ]
+          LiveName = "Generic Room"
+          Aliases = [ "room"; "generic room" ] }
 
     writeObject
         "room_child"
@@ -110,7 +114,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "command_utils"
@@ -118,7 +124,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ verb "suspend_if_needed" [ "\"Suspend if needed.\";"; "return 1;" ] ] }
+          Verbs = [ verb "suspend_if_needed" [ "\"Suspend if needed.\";"; "return 1;" ] ]
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "gc_util"
@@ -138,7 +146,9 @@ let private fixtureDir =
                     "    $command_utils:suspend_if_needed(0);"
                     "  endif"
                     "endfor"
-                    "return threshold;" ] ] }
+                    "return threshold;" ] ]
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "vcs_util"
@@ -159,7 +169,9 @@ let private fixtureDir =
                     "name = strsub(name, \" \", \"_\", 0);"
                     "return name;" ]
               verb "export_metadata" [ "\"Export metadata.\";"; "return 1;" ]
-              verb "export_builtins" [ "\"Export builtins.\";"; "return 1;" ] ] }
+              verb "export_builtins" [ "\"Export builtins.\";"; "return 1;" ] ]
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "hacker_util"
@@ -167,7 +179,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     writeObject
         "bigresident_util"
@@ -175,7 +189,9 @@ let private fixtureDir =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = [ verb "init_for_core" [ "\"Init for core.\";"; "this.target = $hacker_util;" ] ] }
+          Verbs = [ verb "init_for_core" [ "\"Init for core.\";"; "this.target = $hacker_util;" ] ]
+          LiveName = ""
+          Aliases = [] }
 
     dir
 
@@ -701,13 +717,13 @@ let ``GetObjectTree includes every object in the graph, not just verb-owners`` (
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
-let ``GetObjectTree shows a corponym-registered object's display name including its $-name`` () =
-    // `LiveName` is always `None` in the new format (see Metadata.Loader.fs),
-    // so a corponym-bearing object's base name and its corified suffix are
-    // always the same string - "room (#3) [$room]", not a separately
-    // captured "real" MOO name.
+let ``GetObjectTree shows a corponym-registered object's real live name plus its $-name`` () =
+    // The fixture's "room" object has a real `name:` line ("Generic Room") -
+    // the tree should show that, not the bare corponym-derived label, with
+    // the corified `[$room]` suffix still appended.
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
-    | Ok nodes -> Assert.Contains(nodes, (fun (n: ObjectTreeNode) -> n.Name = "room (#3) [$room]" && n.ObjRef = 3L))
+    | Ok nodes ->
+        Assert.Contains(nodes, (fun (n: ObjectTreeNode) -> n.Name = "Generic Room (#3) [$room]" && n.ObjRef = 3L))
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
 
 [<Fact>]
@@ -789,15 +805,24 @@ let ``GetObjectInfo on vcs_util reports owner, all-false flags, verbs, and prope
     | other -> Assert.Fail(sprintf "expected Ok(Some info), got %A" other)
 
 [<Fact>]
-let ``GetObjectInfo on room reports its parent and fertile/read flags`` () =
+let ``GetObjectInfo on room reports its live name, aliases, parent, and fertile/read flags`` () =
     match server.Value.GetObjectInfo({ ObjRef = 3L }) |> Async.RunSynchronously with
     | Ok(Some info) ->
-        Assert.Equal("room (#3) [$room]", info.Name)
+        // Real live `.name` ("Generic Room", from the fixture's `name:` line)
+        // takes precedence over the bare corponym-derived label.
+        Assert.Equal("Generic Room (#3) [$room]", info.Name)
+        Assert.Equal<string[]>([| "room"; "generic room" |], info.Aliases)
         Assert.True(info.Read)
         Assert.True(info.Fertile)
         Assert.False(info.Wizard)
         Assert.Contains(info.Parents, fun (r: ObjectInfoRef) -> r.ObjRef = 1L)
         Assert.NotEmpty(info.Children)
+    | other -> Assert.Fail(sprintf "expected Ok(Some info), got %A" other)
+
+[<Fact>]
+let ``GetObjectInfo on an object with no aliases reports an empty array, not null`` () =
+    match server.Value.GetObjectInfo({ ObjRef = 2L }) |> Async.RunSynchronously with
+    | Ok(Some info) -> Assert.Empty(info.Aliases)
     | other -> Assert.Fail(sprintf "expected Ok(Some info), got %A" other)
 
 [<Fact>]

@@ -65,7 +65,9 @@ let private emptyObject: ObjectExport =
       Owner = 0L
       Flags = []
       Properties = []
-      Verbs = [] }
+      Verbs = []
+      LiveName = ""
+      Aliases = [] }
 
 /// Pure diff for one object - no MOO connection needed, fully unit-testable.
 /// `current = None` means the corponym has no object on the target yet.

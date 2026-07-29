@@ -46,7 +46,9 @@ let private writeFixtureTree (dir: string) =
           Owner = 3L
           Flags = [ "r"; "f" ]
           Properties = [ { Name = "description"; Owner = 3L; Perms = "rc"; ValueLiteral = "\"A small room.\"" } ]
-          Verbs = [ lookSelf ] }
+          Verbs = [ lookSelf ]
+          LiveName = "A Small Room"
+          Aliases = [ "room"; "small room" ] }
 
     let roomDir = Path.Combine(dir, "objects", "room")
     let roomVerbsDir = Path.Combine(roomDir, "verbs")
@@ -67,7 +69,9 @@ let private writeFixtureTree (dir: string) =
           Owner = 3L
           Flags = []
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let suDir = Path.Combine(dir, "objects", "string_utils")
     Directory.CreateDirectory(Path.Combine(suDir, "verbs")) |> ignore
@@ -86,7 +90,9 @@ let private writeFixtureTree (dir: string) =
           Owner = 0L
           Flags = [ "wizard"; "programmer" ]
           Properties = []
-          Verbs = [] }
+          Verbs = []
+          LiveName = ""
+          Aliases = [] }
 
     let systemObjectDir = Path.Combine(dir, "objects", "0")
     Directory.CreateDirectory(Path.Combine(systemObjectDir, "verbs")) |> ignore
@@ -167,7 +173,7 @@ let ``computes Children by inverting Parents`` () =
         Directory.Delete(dir, true)
 
 [<Fact>]
-let ``LiveName is always None, Owner and Flags are always Some`` () =
+let ``LiveName/Aliases are populated from the name:/aliases: header lines, Owner and Flags are always Some`` () =
     let dir = tempDir ()
 
     try
@@ -175,7 +181,8 @@ let ``LiveName is always None, Owner and Flags are always Some`` () =
         let graph = load dir
         let room = Map.find 3L graph.Objects
 
-        Assert.Equal(None, room.LiveName)
+        Assert.Equal(Some "A Small Room", room.LiveName)
+        Assert.Equal<string list>([ "room"; "small room" ], room.Aliases)
         Assert.Equal(Some 3L, room.Owner)
 
         match room.Flags with
@@ -184,6 +191,20 @@ let ``LiveName is always None, Owner and Flags are always Some`` () =
             Assert.True(flags.Fertile)
             Assert.False(flags.Wizard)
         | None -> Assert.Fail "expected Some flags"
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``a genuinely empty live .name normalizes to LiveName = None, not Some ""`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+        let graph = load dir
+        let stringUtils = Map.find 4L graph.Objects // fixture's stringUtilsData has LiveName = ""
+
+        Assert.Equal(None, stringUtils.LiveName)
+        Assert.Equal<string list>([], stringUtils.Aliases)
     finally
         Directory.Delete(dir, true)
 
@@ -250,5 +271,30 @@ let ``a dangling $name parent reference fails loudly rather than silently droppi
         )
 
         Assert.Throws<System.Exception>(fun () -> load dir |> ignore) |> ignore
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``a pre-name/aliases-feature object.moo (no name:/aliases: lines) loads with LiveName = None, Aliases = []`` () =
+    let dir = tempDir ()
+
+    try
+        File.WriteAllText(Path.Combine(dir, "FORMAT_VERSION"), "1\n")
+        File.WriteAllText(Path.Combine(dir, "corponyms.moo"), renderCorponymsMoo [ "room", 3L ])
+
+        // Hand-written rather than via renderObjectMoo (which always emits
+        // name:/aliases: now) - simulates a tree exported before this
+        // feature existed, e.g. the real, already-committed Survive/
+        // ToastCoreWorld corpora before their next re-export.
+        let roomDir = Path.Combine(dir, "objects", "room")
+        Directory.CreateDirectory(Path.Combine(roomDir, "verbs")) |> ignore
+
+        File.WriteAllText(Path.Combine(roomDir, "object.moo"), "@object $room\nparents: #1\nowner: #3\nflags: \nverbs: \n")
+
+        let graph = load dir
+        let room = Map.find 3L graph.Objects
+
+        Assert.Equal(None, room.LiveName)
+        Assert.Equal<string list>([], room.Aliases)
     finally
         Directory.Delete(dir, true)

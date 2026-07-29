@@ -166,17 +166,18 @@ let private buildObjectNode
 
     { Num = num
       Name = nameOpt
-      // The new format has no home for the real, unsanitized live `.name`
-      // display string (`object.moo` never captures a bare `.name` unless
-      // an object happens to define that property itself) - `Handlers.fs`
-      // already falls back to `Name` gracefully when this is `None`.
-      LiveName = None
+      // Empty-string normalizes to `None` here (not in `ParsedObject`/
+      // `ObjectExport`, which stay plain mirrors of on-disk/live state) -
+      // preserves this field's pre-existing documented contract that `None`
+      // means "genuinely empty `.name`", same as the old $vcs-based system.
+      LiveName = po.Name |> Option.filter (fun s -> s <> "")
       Parents = parents
       Children = [] // filled by the post-pass below
       Verbs = verbs
       Owner = Some po.Owner
       Flags = Some(loadObjectFlags po.Flags)
-      Properties = properties }
+      Properties = properties
+      Aliases = po.Aliases }
 
 /// Reads `<surviveRoot>`'s export tree (`corponyms.moo` + `objects/*/`, per
 /// `FORMAT.md`) and `<surviveRoot>/builtins.json`, parsing every verb's

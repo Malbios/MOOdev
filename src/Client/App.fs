@@ -1228,6 +1228,18 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     inspectorContentEl.appendChild ownerRow |> ignore
 
+    // Only shown when the object actually has aliases - absent entirely for
+    // one with none (also the case for a tree exported before this field
+    // existed, per FORMAT.md's backwards-compat note on `aliases:`).
+    let aliases: string[] = unbox info?aliases
+
+    if aliases.Length > 0 then
+        let aliasesRow = document.createElement ("div")
+        aliasesRow.classList.add "inspector-owner"
+        aliasesRow.appendChild (document.createTextNode "Aliases: ") |> ignore
+        aliasesRow.appendChild (document.createTextNode (String.concat ", " aliases)) |> ignore
+        inspectorContentEl.appendChild aliasesRow |> ignore
+
     let flagsRow = document.createElement ("div")
     flagsRow.classList.add "inspector-flags"
 

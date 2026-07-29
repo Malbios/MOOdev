@@ -108,7 +108,9 @@ let ``parseObjectMoo round-trips renderObjectMoo - parents, flags, properties, v
               Properties =
                 [ { Name = "zeta"; Owner = 3L; Perms = "rc"; ValueLiteral = "1" }
                   { Name = "alpha"; Owner = 3L; Perms = "rc"; ValueLiteral = "\"a string\"" } ]
-              Verbs = [ verb1; verb2 ] } // declaration order: verb1 before verb2
+              Verbs = [ verb1; verb2 ] // declaration order: verb1 before verb2
+              LiveName = "Generic Room"
+              Aliases = [ "room"; "generic room" ] }
 
         let verbFileNames = assignVerbFileNames data.Verbs
 
@@ -133,6 +135,9 @@ let ``parseObjectMoo round-trips renderObjectMoo - parents, flags, properties, v
         Assert.Equal<string list>([ "look_self"; "tell_lines" ], parsed.Verbs |> List.map (fun v -> v.Names))
         Assert.Equal<string list>(verb1.Code, parsed.Verbs.[0].Code)
         Assert.Equal<string list>(verb2.Code, parsed.Verbs.[1].Code)
+
+        Assert.Equal(Some "Generic Room", parsed.Name)
+        Assert.Equal<string list>([ "room"; "generic room" ], parsed.Aliases)
     finally
         Directory.Delete(dir, true)
 
@@ -155,7 +160,9 @@ let ``parseObjectMoo handles a property value containing embedded newlines`` () 
                     Owner = 3L
                     Perms = "rc"
                     ValueLiteral = "\"line one\nline two\"" } ]
-              Verbs = [] }
+              Verbs = []
+              LiveName = ""
+              Aliases = [] }
 
         File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "$room" data [])
 
@@ -206,7 +213,9 @@ let ``parseObjectMoo round-trips a property named a literal quote character`` ()
               Owner = 36L
               Flags = []
               Properties = [ { Name = "\""; Owner = 36L; Perms = "r"; ValueLiteral = "\"how to quote things\"" } ]
-              Verbs = [] }
+              Verbs = []
+              LiveName = ""
+              Aliases = [] }
 
         File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo Map.empty "$help" data [])
 
@@ -229,7 +238,9 @@ let ``parseObjectMoo reads the raw "object #0" header form (FORMAT.md's system-o
               Owner = 0L
               Flags = [ "wizard"; "programmer" ]
               Properties = []
-              Verbs = [] }
+              Verbs = []
+              LiveName = ""
+              Aliases = [] }
 
         File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo Map.empty "#0" data [])
 
@@ -237,5 +248,29 @@ let ``parseObjectMoo reads the raw "object #0" header form (FORMAT.md's system-o
 
         Assert.Equal("0", parsed.SelfCorponym)
         Assert.Equal<string list>([ "wizard"; "programmer" ], parsed.Flags)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``parseObjectMoo tolerates a pre-name/aliases-feature object.moo with no name:/aliases: lines`` () =
+    let dir = tempDir ()
+    let objDir = Path.Combine(dir, "objects", "room")
+    let verbsDir = Path.Combine(objDir, "verbs")
+    Directory.CreateDirectory(verbsDir) |> ignore
+
+    try
+        // Hand-written rather than via renderObjectMoo (which always emits
+        // name:/aliases: now) - simulates a tree exported before this
+        // feature existed, e.g. the real, already-committed Survive/
+        // ToastCoreWorld corpora before their next re-export.
+        let objectMoo =
+            "@object $room\n" + "parents: #1\n" + "owner: #3\n" + "flags: r f\n" + "verbs: \n"
+
+        File.WriteAllText(Path.Combine(objDir, "object.moo"), objectMoo)
+
+        let parsed = parseObjectMoo (Path.Combine(objDir, "object.moo")) verbsDir
+
+        Assert.Equal(None, parsed.Name)
+        Assert.Equal<string list>([], parsed.Aliases)
     finally
         Directory.Delete(dir, true)

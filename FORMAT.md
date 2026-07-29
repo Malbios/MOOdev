@@ -100,6 +100,8 @@ string_utils #4
 parents: <corponym-or-#objnum> <corponym-or-#objnum> ...
 owner: #<objnum>
 flags: <subset of "r w f a" in that order>
+name: "<live .name value>"
+aliases: "<alias1>" "<alias2>" ...
 verbs: <verb-file-1.moo> <verb-file-2.moo> ...
 
 @property "<name>" owner=#<objnum> perms=<subset of "r w c" in that order>
@@ -132,6 +134,27 @@ verbs: <verb-file-1.moo> <verb-file-2.moo> ...
 - **Property order**: sorted by name, ordinal case-insensitive. Unlike verbs, property lookup is
   purely by name — sibling order has no runtime effect — so this sort is safe and exists purely for
   stable, readable diffs.
+- **`name:`/`aliases:`** — the object's live `.name` and `.aliases` values, for the tree
+  view/inspector's benefit. **Deliberate exception to invariant I5** ("only defining-object values
+  are recorded"): `.name`/`.aliases` are conventionally *declared* once on a root ancestor
+  (`$root_class`/`#1`) and every object overrides them with its own value via plain assignment, so
+  `properties(obj)` — normally how this format decides what to capture — essentially never lists
+  them for any individual object even though each has a distinct value (confirmed against a real
+  ToastCore export: only the object where they're actually declared captured them at all). Fetched
+  directly (`{o}.name`/`{o}.aliases`), same as `parents()`/`verbs()`/flags already are, bypassing
+  `properties()` entirely for just these two. Both lines are **optional** — a tree exported before
+  this field existed simply lacks them (`Array.tryFind`, not `Array.find`, on read); no forced
+  re-export, no parse failure. Both must render **before** `verbs:` (`headerLineCount`, where
+  property-block parsing starts, is computed from `verbs:`'s own line position). `name:`'s value uses
+  the same `\`/`"` quoting as `<name>` above; an empty `.name` renders as `name: ""` and loads as
+  `None` (not `Some ""`), matching this field's pre-existing display contract. `aliases:` uses **one
+  independently-escaped quoted token per alias** — deliberately *not* the same space-joined
+  convention as §4's verb name-spec: a MOO alias is routinely a multi-word phrase (e.g. "brass
+  lantern"; confirmed by reading ToastStunt's own `parse_cmd.cc`/`match.cc` — the command parser
+  joins multiple typed words into the match target before comparing it against each alias), and
+  joining/splitting aliases on space the way verb aliases do would silently corrupt any multi-word
+  one. Fetched-but-not-diffed by `Sidecar/Importer.fs`'s promotion planner — same deliberate scope as
+  the pre-existing `owner:`/`flags:` fields, neither of which has a corresponding promotion op either.
 - **Quoting**: `<name>` is escaped for `\` and `"` (`\\` and `\"` respectively) before being written
   between the quotes, and unescaped the same way on read — needed because a real property name can
   itself contain a literal `"` (confirmed live: real ToastCore's `$help` object has a property
