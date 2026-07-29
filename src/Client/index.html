@@ -42,6 +42,14 @@
       <div class="sidebar-filter-wrap">
         <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." title="Prefix with obj:, verb:, or prop: to search only objects, only verbs, or only properties" autocomplete="off" spellcheck="false" />
         <button id="tree-filter-clear" class="sidebar-filter-clear" title="Clear filter" aria-label="Clear filter">×</button>
+        <button id="tree-new-object-btn" class="sidebar-filter-settings-btn" title="New object" aria-label="New object">＋</button>
+        <div id="tree-new-object-popover" class="tree-filter-settings-popover">
+          <label class="settings-row">
+            Parent (MOO expression)
+            <input type="text" id="tree-new-object-parent" placeholder="#5 or $room" autocomplete="off" spellcheck="false" />
+          </label>
+          <button id="tree-new-object-create-btn" class="pane-action-btn">Create</button>
+        </div>
         <button id="tree-filter-settings" class="sidebar-filter-settings-btn" title="Tree display options" aria-label="Tree display options">⚙</button>
         <div id="tree-filter-settings-popover" class="tree-filter-settings-popover">
           <label class="settings-row">
@@ -69,7 +77,6 @@
         <div id="editor-monaco"></div>
         <pre id="editor-diagnostics"></pre>
         <div id="editor-status">
-          <button id="editor-history-btn" class="pane-action-btn">History</button>
           <span id="status-dirty"></span>
           <span id="status-position"></span>
         </div>

@@ -101,7 +101,7 @@ let private runCompareTrees (treeA: string) (treeB: string) : int =
 /// `compare-trees` were built and verified standalone first.
 let private runCheckpoint (treeDir: string) (sessionId: string) (message: string) (relativePaths: string list) : int =
     use repo = new Repository(treeDir)
-    let commit = GitStore.commitChangedFiles repo sessionId relativePaths message "moo-dev" "moo-dev@localhost"
+    let commit = GitStore.commitChangedFiles repo sessionId relativePaths [] message "moo-dev" "moo-dev@localhost"
     printfn "Committed %s onto refs/moo/wip/%s" (commit.Id.Sha.Substring(0, 8)) sessionId
     0
 
@@ -321,6 +321,18 @@ let private buildTryDispatch
                             (getStr "perms")
                             ct
 
+                    return true
+                | "delete-verb" ->
+                    do! IdeActions.deleteVerb config session webSocket (getObj ()) (getStr "verb") ct
+                    return true
+                | "delete-property" ->
+                    do! IdeActions.deleteProperty config session webSocket (getObj ()) (getStr "name") ct
+                    return true
+                | "recycle-object" ->
+                    do! IdeActions.recycleObject config session webSocket (getObj ()) ct
+                    return true
+                | "create-object" ->
+                    do! IdeActions.createObject config session webSocket (getStr "parentExpr") ct
                     return true
                 | "get-location" ->
                     do! IdeActions.getLocation config session webSocket ct

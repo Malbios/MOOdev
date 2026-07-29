@@ -174,7 +174,7 @@ html, body {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 0.3em 3.4em 0.3em 0.6em;
+  padding: 0.3em 5.2em 0.3em 0.6em;
   background: #222;
   color: #ddd;
   border: none;
@@ -204,11 +204,15 @@ html, body {
 }
 
 .sidebar-filter-clear {
-  right: 1.8em;
+  right: 3.6em;
 }
 
 .sidebar-filter-settings-btn {
   right: 0;
+}
+
+#tree-new-object-btn {
+  right: 1.8em;
 }
 
 .sidebar-filter-clear:hover,
@@ -634,6 +638,31 @@ html, body {
 
 .inspector-verb-row:hover {
   background: #2a2a2a;
+}
+
+.inspector-row-delete-btn {
+  background: none;
+  border: none;
+  color: #777;
+  cursor: pointer;
+  padding: 0 0.3em;
+  font-family: inherit;
+  font-size: inherit;
+  line-height: 1;
+}
+
+.inspector-row-delete-btn:hover {
+  color: #f77;
+}
+
+.inspector-recycle-btn {
+  margin-top: 0.6em;
+  color: #f77;
+  border-color: #744;
+}
+
+.inspector-recycle-btn:hover {
+  background: #3a1a1a;
 }
 
 .inspector-property-value {

@@ -59,11 +59,42 @@ let ``commitChangedFiles creates the wip ref if it doesn't exist, parented on ma
         use repo = new Repository(dir)
 
         let commit =
-            commitChangedFiles repo "session-1" [ "objects/room/verbs/look_self.moo" ] "test commit" "Tester" "t@example.com"
+            commitChangedFiles repo "session-1" [ "objects/room/verbs/look_self.moo" ] [] "test commit" "Tester" "t@example.com"
 
         Assert.Equal<string>("refs/moo/wip/session-1", (repo.Refs.["refs/moo/wip/session-1"]).CanonicalName)
         Assert.Equal(commit.Id, repo.Lookup<Commit>("refs/moo/wip/session-1").Id)
         Assert.Equal<Commit>(repo.Branches.["main"].Tip, commit.Parents |> Seq.exactlyOne)
+    finally
+        forceDeleteDirectory dir
+
+[<Fact>]
+let ``commitChangedFiles's removedPaths drops a path from the tree entirely`` () =
+    let dir = newTestRepo ()
+
+    try
+        use repo = new Repository(dir)
+
+        writeFile dir "objects/room/verbs/look_self.moo" "one\n"
+        writeFile dir "objects/room/verbs/describe.moo" "two\n"
+
+        let first =
+            commitChangedFiles
+                repo
+                "session-1"
+                [ "objects/room/verbs/look_self.moo"; "objects/room/verbs/describe.moo" ]
+                []
+                "first"
+                "Tester"
+                "t@example.com"
+
+        Assert.NotNull(first.Tree.["objects/room/verbs/look_self.moo"])
+        Assert.NotNull(first.Tree.["objects/room/verbs/describe.moo"])
+
+        let second =
+            commitChangedFiles repo "session-1" [] [ "objects/room/verbs/describe.moo" ] "removed a verb" "Tester" "t@example.com"
+
+        Assert.NotNull(second.Tree.["objects/room/verbs/look_self.moo"])
+        Assert.Null(second.Tree.["objects/room/verbs/describe.moo"])
     finally
         forceDeleteDirectory dir
 
@@ -75,10 +106,10 @@ let ``commitChangedFiles onto an existing wip ref parents on the wip ref's own t
         use repo = new Repository(dir)
 
         writeFile dir "a.moo" "one\n"
-        let first = commitChangedFiles repo "session-1" [ "a.moo" ] "first" "Tester" "t@example.com"
+        let first = commitChangedFiles repo "session-1" [ "a.moo" ] [] "first" "Tester" "t@example.com"
 
         writeFile dir "b.moo" "two\n"
-        let second = commitChangedFiles repo "session-1" [ "b.moo" ] "second" "Tester" "t@example.com"
+        let second = commitChangedFiles repo "session-1" [ "b.moo" ] [] "second" "Tester" "t@example.com"
 
         Assert.Equal<Commit>(first, second.Parents |> Seq.exactlyOne)
         // main hasn't moved - only the wip ref has.
@@ -109,9 +140,9 @@ let ``squashWipOntoMain produces exactly one new commit on main and removes the 
         let mainTipBefore = repo.Branches.["main"].Tip
 
         writeFile dir "a.moo" "one\n"
-        commitChangedFiles repo "session-1" [ "a.moo" ] "first" "Tester" "t@example.com" |> ignore
+        commitChangedFiles repo "session-1" [ "a.moo" ] [] "first" "Tester" "t@example.com" |> ignore
         writeFile dir "b.moo" "two\n"
-        commitChangedFiles repo "session-1" [ "b.moo" ] "second" "Tester" "t@example.com" |> ignore
+        commitChangedFiles repo "session-1" [ "b.moo" ] [] "second" "Tester" "t@example.com" |> ignore
 
         let squashed = squashWipOntoMain repo "session-1" "squash message" "Tester" "t@example.com"
 
@@ -136,7 +167,7 @@ let ``pruneStaleWipRefs removes only wip refs older than the threshold`` () =
 
         // A "fresh" wip ref via the normal path.
         writeFile dir "fresh.moo" "x\n"
-        commitChangedFiles repo "fresh-session" [ "fresh.moo" ] "fresh" "Tester" "t@example.com" |> ignore
+        commitChangedFiles repo "fresh-session" [ "fresh.moo" ] [] "fresh" "Tester" "t@example.com" |> ignore
 
         // A manually-constructed "stale" wip ref, backdated via Signature's
         // own DateTimeOffset parameter (no need to touch the system clock).

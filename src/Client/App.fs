@@ -62,6 +62,10 @@ let private treeFilterEl = document.getElementById ("tree-filter") :?> HTMLInput
 let private treeFilterClearEl = document.getElementById ("tree-filter-clear")
 let private treeFilterSettingsBtn = document.getElementById ("tree-filter-settings")
 let private treeFilterSettingsPopoverEl = document.getElementById ("tree-filter-settings-popover")
+let private treeNewObjectBtn = document.getElementById ("tree-new-object-btn")
+let private treeNewObjectPopoverEl = document.getElementById ("tree-new-object-popover")
+let private treeNewObjectParentEl = document.getElementById ("tree-new-object-parent") :?> HTMLInputElement
+let private treeNewObjectCreateBtn = document.getElementById ("tree-new-object-create-btn")
 
 let private treeFilterShowPropertiesEl =
     document.getElementById ("tree-filter-show-properties") :?> HTMLInputElement
@@ -83,7 +87,6 @@ let private terminalPaneEl = document.getElementById ("terminal-pane")
 let private inspectorPaneEl = document.getElementById ("inspector-pane")
 let private inspectorContentEl = document.getElementById ("inspector-content")
 let private inspectorDiagnosticsEl = document.getElementById ("inspector-diagnostics")
-let private editorHistoryBtn = document.getElementById ("editor-history-btn")
 let private verbHistoryPaneEl = document.getElementById ("verb-history-pane")
 let private verbHistoryListEl = document.getElementById ("verb-history-list")
 let private verbHistoryDiffEditorEl = document.getElementById ("verb-history-diff-editor")
@@ -426,14 +429,28 @@ settingsPanelEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 // Same "inner click stops propagation, outer click closes" idiom as the
 // Settings overlay just above - `document` stands in for a dedicated
 // backdrop element, since this is a small inline popover, not a full-screen
-// modal.
+// modal. Opening one of these two sidebar popovers closes the other, same
+// as VS Code's own toolbar popovers.
 treeFilterSettingsBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
+        treeNewObjectPopoverEl.classList.remove "visible"
         treeFilterSettingsPopoverEl.classList.toggle "visible" |> ignore
 
+treeNewObjectBtn.onclick <-
+    fun ev ->
+        ev.stopPropagation () |> ignore
+        treeFilterSettingsPopoverEl.classList.remove "visible"
+        treeNewObjectPopoverEl.classList.toggle "visible" |> ignore
+
 treeFilterSettingsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
-document.onclick <- fun _ -> treeFilterSettingsPopoverEl.classList.remove "visible"
+treeNewObjectPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
+
+document.onclick <-
+    fun _ ->
+        treeFilterSettingsPopoverEl.classList.remove "visible"
+        treeNewObjectPopoverEl.classList.remove "visible"
+
 Settings.init ()
 
 /// Which "tab" is showing in the main area - the game terminal, or one of
@@ -566,6 +583,20 @@ let private currentVerbDoc () : (int64 * string) option =
 /// same wire shape either way.
 let private sendAction (fields: (string * obj) list) : unit =
     ws.send (JS.JSON.stringify (createObj fields))
+
+// Wired here rather than alongside the popover's show/hide toggling above
+// (which is plain top-level code that runs before `sendAction` itself is
+// even defined) - F# requires a name to be lexically defined before use for
+// ordinary top-level bindings, unlike the `let rec ... and ...` chain
+// `renderTree`/`loadInspector`/etc. below belong to.
+treeNewObjectCreateBtn.onclick <-
+    fun _ ->
+        let parentExpr = treeNewObjectParentEl.value.Trim()
+
+        if parentExpr <> "" then
+            sendAction [ "action" ==> "create-object"; "parentExpr" ==> parentExpr ]
+            treeNewObjectParentEl.value <- ""
+            treeNewObjectPopoverEl.classList.remove "visible"
 
 /// Turns the editor's current content into the line array `IdeActions.saveVerb`
 /// expects for its JSON `code` field.
@@ -709,24 +740,6 @@ let private renderVerbHistoryList (objRef: int64) (verbName: string) (entries: (
                     sendAction [ "action" ==> "verb-at-commit"; "obj" ==> int objRef; "verb" ==> verbName; "sha" ==> sha ]
 
             verbHistoryListEl.appendChild li |> ignore
-
-// Toggles the currently-active verb tab's editor pane into (or out of) its
-// history view - only meaningful for a `VerbTab`, so a click while any
-// other tab is active is a silent no-op (the button only exists inside
-// `#editor-status`, which is itself only ever visible for a `VerbTab`).
-editorHistoryBtn.onclick <-
-    fun _ ->
-        match activeTab with
-        | VerbTab(objRef, verbName) ->
-            showingVerbHistory <- true
-            verbHistoryListEl.innerHTML <- "Loading..."
-            verbHistoryRestoreBtn.setAttribute ("style", "display:none")
-            currentHistoricalCode <- None
-            showPaneFor activeTab
-            sendAction [ "action" ==> "verb-history"; "obj" ==> int objRef; "verb" ==> verbName ]
-        | GameTab
-        | InspectorTab _
-        | HistoryTab -> ()
 
 // Loads the picked historical version straight into the live editor - not
 // a new server action, just `editor.setValue()` - the existing
@@ -924,6 +937,17 @@ let private mergeLiveChildren
     | None -> ()
     | Some parentNode ->
         treeNodes <- Map.add parentRef { parentNode with Children = children |> Array.map (fun (r, _, _, _, _) -> r) } treeNodes
+
+/// The removal-side counterpart to `mergeLiveChildren` above, for a recycled
+/// object: drops it from `treeNodes` entirely and scrubs it out of every
+/// remaining node's `Children` list (it may appear under more than one
+/// parent, same DAG reasoning as `ancestorsOf`), rather than waiting for a
+/// stale entry to self-heal on that parent's next expand.
+let private removeLiveNode (objRef: int64) : unit =
+    treeNodes <-
+        treeNodes
+        |> Map.remove objRef
+        |> Map.map (fun _ node -> { node with Children = node.Children |> Array.filter ((<>) objRef) })
 
 /// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
 /// expanding #7 once should reveal its children under *every* parent it
@@ -1312,6 +1336,41 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     inspectorContentEl.appendChild flagsRow |> ignore
 
+    // Recycling is irreversible (the object's data is gone, and its number
+    // gets reused later) - unlike every other mutation in this pane, this
+    // one gets a confirmation dialog first, naming the object and warning
+    // about any children. `recycle()` moves *contents* (`.location`)
+    // elsewhere via an optional `obj:recycle()` hook, and - confirmed
+    // against `ToastStunt/src/objects.cc`'s `bf_recycle` and live-verified
+    // against this fork - also walks the inheritance hierarchy, reparenting
+    // every child onto the recycled object's own parent(s) rather than
+    // leaving them with an invalid `parent()`. Still worth flagging: a
+    // child silently jumping up a level in the hierarchy can be just as
+    // surprising as losing it outright.
+    let recycleBtn = document.createElement ("button")
+    recycleBtn.classList.add "pane-action-btn"
+    recycleBtn.classList.add "inspector-recycle-btn"
+    recycleBtn.textContent <- "Recycle object"
+
+    recycleBtn.onclick <-
+        fun _ ->
+            let childCount: int = (unbox info?children: obj[]).Length
+            let name: string = info?name
+
+            let warning =
+                if childCount > 0 then
+                    sprintf
+                        "Recycle %s? This object has %d child object(s), which will be reparented onto its own parent. This cannot be undone."
+                        name
+                        childCount
+                else
+                    sprintf "Recycle %s? This cannot be undone." name
+
+            if window.confirm warning then
+                sendAction [ "action" ==> "recycle-object"; "obj" ==> int objRef ]
+
+    inspectorContentEl.appendChild recycleBtn |> ignore
+
     // `?objRef` here is a value freshly parsed from the LSP's JSON response -
     // see the matching comment on `ownerRef` above, same fix, same reason.
     let toRefList (refs: obj[]) : (int64 * string) list =
@@ -1331,7 +1390,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     propsTable.classList.add "inspector-table"
     let propsHeaderRow = document.createElement ("tr")
 
-    for h in [ "Name"; "Owner"; "Perms"; "Value" ] do
+    for h in [ "Name"; "Owner"; "Perms"; "Value"; "" ] do
         let th = document.createElement ("th")
         th.textContent <- h
         propsHeaderRow.appendChild th |> ignore
@@ -1387,6 +1446,18 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         valueTd.appendChild input |> ignore
         valueTd.appendChild preview |> ignore
         tr.appendChild valueTd |> ignore
+
+        // No confirmation - unlike recycling an object, a deleted property
+        // is trivial to recreate by hand if this was a mistake.
+        let deleteTd = document.createElement ("td")
+        let deleteBtn = document.createElement ("button")
+        deleteBtn.classList.add "inspector-row-delete-btn"
+        deleteBtn.textContent <- "×"
+        deleteBtn.title <- "Delete property"
+        deleteBtn.onclick <- fun _ -> sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
+        deleteTd.appendChild deleteBtn |> ignore
+        tr.appendChild deleteTd |> ignore
+
         propsTable.appendChild tr |> ignore
         inspectorPropertyInputs <- Map.add pname input inspectorPropertyInputs
         inspectorPropertyPreviews <- Map.add pname preview inspectorPropertyPreviews
@@ -1454,7 +1525,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     verbsTable.classList.add "inspector-table"
     let verbsHeaderRow = document.createElement ("tr")
 
-    for h in [ "Name"; "Perms"; "Dobj"; "Prep"; "Iobj" ] do
+    for h in [ "Name"; "Perms"; "Dobj"; "Prep"; "Iobj"; "" ] do
         let th = document.createElement ("th")
         th.textContent <- h
         verbsHeaderRow.appendChild th |> ignore
@@ -1471,6 +1542,25 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             let td = document.createElement ("td")
             td.textContent <- (cellText: string)
             tr.appendChild td |> ignore
+
+        // No confirmation - unlike recycling an object, a deleted verb is
+        // trivial to recreate by hand if this was a mistake. Stops
+        // propagation so this doesn't also open the verb via the row's own
+        // click handler above (same idiom `renderTabs`'s close-× uses
+        // against its tab's own switch-click).
+        let deleteTd = document.createElement ("td")
+        let deleteBtn = document.createElement ("button")
+        deleteBtn.classList.add "inspector-row-delete-btn"
+        deleteBtn.textContent <- "×"
+        deleteBtn.title <- "Delete verb"
+
+        deleteBtn.onclick <-
+            fun ev ->
+                ev.stopPropagation () |> ignore
+                sendAction [ "action" ==> "delete-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
+
+        deleteTd.appendChild deleteBtn |> ignore
+        tr.appendChild deleteTd |> ignore
 
         verbsTable.appendChild tr |> ignore
 
@@ -2369,6 +2459,82 @@ ws.onmessage <-
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | None -> ()
+            elif header.StartsWith("moodev-verb-delete-result") then
+                // No confirmation on the way in (see the inspector's own
+                // per-row delete button) - trivial to recreate by hand if
+                // this was a mistake, unlike recycling a whole object.
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            if openVerbTabs |> List.contains (objRef, verb) then
+                                closeTab (objRef, verb)
+
+                            if activeTab = InspectorTab objRef then
+                                loadInspector objRef None
+                        elif activeTab = InspectorTab objRef then
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-prop-delete-result") then
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            loadInspector objRef None
+                        else
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            elif header.StartsWith("moodev-recycle-result") then
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            // The object is gone - drop every open tab that
+                            // referenced it (a verb tab, or its own
+                            // inspector tab) and scrub it out of the tree,
+                            // rather than leaving a dangling reference an
+                            // unrelated click could still hit.
+                            for o, v in openVerbTabs |> List.filter (fun (o, _) -> o = objRef) do
+                                closeTab (o, v)
+
+                            if openInspectorTabs |> List.contains objRef then
+                                closeInspectorTab objRef
+
+                            removeLiveNode objRef
+                            renderTree ()
+                        elif activeTab = InspectorTab objRef then
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            elif header.StartsWith("moodev-object-create-result") then
+                if headerField "ok: " header = Some "1" then
+                    match headerField "newobj: #" header, headerField "parent: #" header with
+                    | Some newObjNum, Some parentNum ->
+                        match System.Int64.TryParse newObjNum, System.Int64.TryParse parentNum with
+                        | (true, newObj), (true, parentRef) ->
+                            // Same round trip an ordinary tree-expand click
+                            // triggers (see `renderTreeRows`'s own use of
+                            // "get-live-children") - the `moodev-live-children`
+                            // handler above folds the result into `treeNodes`,
+                            // which the new object's inspector needs before
+                            // `openOrSwitchToInspector` can show anything
+                            // useful for it.
+                            expandedRefs <- Set.add parentRef expandedRefs
+                            sendAction [ "action" ==> "get-live-children"; "obj" ==> int parentRef ]
+                            openOrSwitchToInspector newObj
+                        | _ -> ()
+                    | _ -> ()
+                else
+                    // No dedicated diagnostics area for the standalone "New
+                    // Object" popover (unlike every other action here, which
+                    // always has an open inspector tab to report into) - a
+                    // modal is the simplest surface available.
+                    window.alert (String.concat "\n" lines)
             elif header.StartsWith("moodev-live-children") then
                 // Folds live (uncorponym'd, per moo-vcs-plan.md I3) children
                 // into `treeNodes` exactly like a statically-preloaded

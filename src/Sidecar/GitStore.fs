@@ -77,10 +77,14 @@ let resolveParent (repo: Repository) (sessionId: string) : Commit =
 /// Commits the given files (paths relative to the repo root, read from
 /// their current on-disk content - not from the repo's index) onto
 /// `refs/moo/wip/<sessionId>`, creating the ref if it doesn't exist yet.
+/// `removedPaths` drops paths from the tree entirely (a deleted verb's own
+/// file, or an entire recycled object's directory) - `relativePaths` only
+/// ever adds/updates a blob, with no way to make a path disappear.
 let commitChangedFiles
     (repo: Repository)
     (sessionId: string)
     (relativePaths: string list)
+    (removedPaths: string list)
     (message: string)
     (authorName: string)
     (authorEmail: string)
@@ -93,6 +97,9 @@ let commitChangedFiles
         use stream = File.OpenRead(fullPath)
         let blob = repo.ObjectDatabase.CreateBlob(stream)
         treeDefinition.Add(relativePath.Replace('\\', '/'), blob, Mode.NonExecutableFile) |> ignore
+
+    for removedPath in removedPaths do
+        treeDefinition.Remove(removedPath.Replace('\\', '/')) |> ignore
 
     let tree = repo.ObjectDatabase.CreateTree(treeDefinition)
     let sig' = signature authorName authorEmail

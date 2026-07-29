@@ -147,10 +147,29 @@ let private exportAndCommitObject
                               "corponyms.moo" ]
                         )
 
+                    let currentFileNames = verbFileNames |> List.map snd |> Set.ofList
+
                     for verb, fileName in verbFileNames do
                         let path = System.IO.Path.Combine(verbsDir, fileName)
                         System.IO.File.WriteAllText(path, Exporter.renderVerbFile selfRefText verb)
                         relativePaths.Add(System.IO.Path.Combine("objects", dirName, "verbs", fileName))
+
+                    // Self-healing reconciliation, not just deleteVerb-specific
+                    // cleanup: any file already on disk in `verbsDir` that
+                    // isn't part of the *current* verb set (a verb just
+                    // deleted, or any other past staleness) gets removed from
+                    // disk and dropped from the git tree too - otherwise it
+                    // sits there orphaned forever, no longer referenced by
+                    // `object.moo`'s own `verbs:` manifest line but still
+                    // physically present.
+                    let removedPaths =
+                        System.IO.Directory.GetFiles(verbsDir)
+                        |> Array.map System.IO.Path.GetFileName
+                        |> Array.filter (fun fileName -> not (currentFileNames.Contains fileName))
+                        |> Array.map (fun fileName ->
+                            System.IO.File.Delete(System.IO.Path.Combine(verbsDir, fileName))
+                            System.IO.Path.Combine("objects", dirName, "verbs", fileName))
+                        |> List.ofArray
 
                     use repo = new LibGit2Sharp.Repository(config.TreeDir)
 
@@ -161,6 +180,7 @@ let private exportAndCommitObject
                         repo
                         config.SessionId
                         (List.ofSeq relativePaths)
+                        removedPaths
                         message
                         config.GitAuthorName
                         config.GitAuthorEmail
@@ -208,6 +228,51 @@ let saveVerb
             let diagnostics = gitError |> Option.map (fun m -> [ "(saved, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
 
             do! sendWire webSocket (sprintf "moodev-edit-result object: #%d verb: %s ok: 1" objRef verbName) diagnostics ct
+    }
+
+/// Removes a verb entirely - `delete_verb(obj, verb-desc)`, resolved to an
+/// index the same way `saveVerb`/`fetchVerb` do (matching whichever alias
+/// is currently displayed, not requiring the full name-spec). Re-exports
+/// on success (`GitStore.Removed`, per moo-vcs-plan.md I3's corponym gate)
+/// so the now-stale verb file is actually removed from the tree -
+/// `exportAndCommitObject`'s own stale-file reconciliation handles that,
+/// not this function.
+let deleteVerb
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (verbName: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let verbLit = "\"" + verbName.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            resolveVerbIndexStatements o verbLit
+            + $""" ok = 0; errtext = ""; if (idx == 0) errtext = "verb not found"; else try delete_verb({o}, idx); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry endif;"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Removed ct
+                    return gitError |> Option.map (fun m -> [ "(deleted, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-verb-delete-result object: #%d verb: %s ok: %d" objRef verbName (if ok then 1 else 0))
+                diagnostics
+                ct
     }
 
 /// `ide_get_properties(objRef)` replacement. `properties(obj)` already
@@ -321,6 +386,200 @@ let addProperty
                 webSocket
                 (sprintf "moodev-prop-add-result object: #%d ok: %d" objRef (if ok then 1 else 0))
                 diagnostics
+                ct
+    }
+
+/// Removes a property entirely - `delete_property(obj, pname)`, the
+/// removal counterpart to `addProperty` above. Properties live inline in
+/// `object.moo` (not their own file the way verbs do), so re-exporting
+/// after a successful delete is enough on its own - no separate stale-file
+/// cleanup needed the way `deleteVerb` needs for `verbsDir`.
+let deleteProperty
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (pname: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let pnameLit = "\"" + pname.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; try delete_property({o}, {pnameLit}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Removed ct
+                    return gitError |> Option.map (fun m -> [ "(deleted, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-prop-delete-result object: #%d name: %s ok: %d" objRef pname (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Destroys an object - `recycle(obj)`. If the object has a corponym (per
+/// moo-vcs-plan.md I3, only corponym'd objects are versioned at all), also
+/// unregisters that corponym from `#0` first (otherwise `$name` keeps
+/// pointing at a garbage/reused object number after this) and removes its
+/// entire `objects/<corponym>/` directory from the git tree - unlike
+/// `deleteVerb`/`deleteProperty`, there's no live object left to
+/// re-export afterward, so this deletes rather than re-renders.
+let recycleObject
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+        let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+        let corponym = Map.tryFind objRef corponymsByObjnum
+        let o = sprintf "#%d" objRef
+
+        let statements =
+            match corponym with
+            | Some name ->
+                let nameLit = "\"" + name.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+                $"""ok = 0; errtext = ""; try delete_property(#0, {nameLit}); recycle({o}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+            | None -> $"""ok = 0; errtext = ""; try recycle({o}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalRunner statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    match corponym with
+                    | None -> return []
+                    | Some dirName ->
+                        try
+                            let objDir = System.IO.Path.Combine(config.TreeDir, "objects", dirName)
+
+                            let removedPaths =
+                                if System.IO.Directory.Exists(objDir) then
+                                    let paths =
+                                        System.IO.Directory.GetFiles(objDir, "*", System.IO.SearchOption.AllDirectories)
+                                        |> Array.map (fun fullPath ->
+                                            System.IO.Path.GetRelativePath(config.TreeDir, fullPath).Replace('\\', '/'))
+                                        |> List.ofArray
+
+                                    System.IO.Directory.Delete(objDir, true)
+                                    paths
+                                else
+                                    []
+
+                            // Fresh, post-recycle query - #0 no longer has this
+                            // corponym property (deleted above), so
+                            // corponyms.moo needs the same refresh
+                            // `exportAndCommitObject` always does after any
+                            // change that could affect the registry.
+                            let! freshCorponyms = Exporter.getCorponyms evalRunner ct
+                            let corponymsList = freshCorponyms |> Map.toList |> List.map (fun (num, name) -> name, num)
+                            let corponymsPath = System.IO.Path.Combine(config.TreeDir, "corponyms.moo")
+                            System.IO.File.WriteAllText(corponymsPath, Exporter.renderCorponymsMoo corponymsList)
+
+                            use repo = new LibGit2Sharp.Repository(config.TreeDir)
+
+                            let message =
+                                GitStore.buildCommitMessage [ { Corponym = dirName; Name = dirName; Kind = GitStore.Removed } ]
+
+                            GitStore.commitChangedFiles
+                                repo
+                                config.SessionId
+                                [ "corponyms.moo" ]
+                                removedPaths
+                                message
+                                config.GitAuthorName
+                                config.GitAuthorEmail
+                            |> ignore
+
+                            return []
+                        with ex ->
+                            return [ "(recycled, but git cleanup failed: " + ex.Message + ")" ]
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-recycle-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Creates a new object - `create(parent, player)`. `parentExpr` is an
+/// arbitrary MOO expression (`#5`, `$room`, ...) evaluated server-side, the
+/// same "type a real MOO expression" convention `setProperty`'s value
+/// input already uses, so any resolvable parent reference works, not just
+/// a literal object number. Stays live-only (no export/commit) per
+/// invariant I3 - the caller can separately register a corponym via the
+/// existing add-property-on-`#0` flow if they want it versioned.
+let createObject
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (parentExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let exprLit = "\"" + parentExpr.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; newobj = #-1; parentRef = #-1;
+try
+  presult = eval("return " + {exprLit} + ";");
+  if (presult[1])
+    parentRef = presult[2];
+    try
+      newobj = create(parentRef, player);
+      ok = 1;
+    except err2 (ANY)
+      errtext = tostr(err2[2]);
+    endtry
+  else
+    errtext = "parse error";
+  endif
+except err (ANY)
+  errtext = tostr(err[2]);
+endtry"""
+
+        let! json =
+            evalOnSession
+                session
+                statements
+                """["ok" -> ok, "errtext" -> errtext, "newobj" -> tostr(newobj), "parent" -> tostr(parentRef)]"""
+                ct
+
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+        let newobj = root.GetProperty("newobj").GetString()
+        let parent = root.GetProperty("parent").GetString()
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-object-create-result ok: %d newobj: %s parent: %s" (if ok then 1 else 0) newobj parent)
+                (if ok then [] else [ errtext ])
                 ct
     }
 
