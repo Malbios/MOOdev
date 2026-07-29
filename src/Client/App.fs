@@ -1493,14 +1493,131 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addNameInput.classList.add "inspector-property-value"
     addNameInput.placeholder <- "name"
 
+    // Properties only ever have three permission bits - r/w/c (Read/Write/
+    // Chown) - confirmed against `ToastStunt/src/property.cc`'s
+    // `validate_prop_info`; verbs' x/d don't apply here. A dropdown of
+    // checkboxes behind a toggle button, same popover pattern the sidebar's
+    // "Tree display options" button already uses. Defined before the owner
+    // widget below (even though it's appended after it) because the owner
+    // widget's own visibility depends on `chownCb`'s state.
+    let permsWidget = document.createElement ("div")
+    permsWidget.classList.add "inspector-perms-widget"
+
+    let permsToggleBtn = document.createElement ("button")
+    permsToggleBtn.classList.add "pane-action-btn"
+
+    let permsPopover = document.createElement ("div")
+    permsPopover.classList.add "tree-filter-settings-popover"
+    permsPopover.onclick <- fun ev -> ev.stopPropagation () |> ignore
+
+    let mkPermCheckbox (label: string) (isChecked: bool) : HTMLInputElement =
+        let row = document.createElement ("label")
+        row.classList.add "settings-row"
+
+        let cb = document.createElement ("input") :?> HTMLInputElement
+        cb.setAttribute ("type", "checkbox")
+        cb.``checked`` <- isChecked
+
+        row.appendChild cb |> ignore
+        row.appendChild (document.createTextNode label) |> ignore
+        permsPopover.appendChild row |> ignore
+        cb
+
+    let readCb = mkPermCheckbox "Read" true
+    let writeCb = mkPermCheckbox "Write" false
+    let chownCb = mkPermCheckbox "Chown" true
+
+    let currentPerms () : string =
+        [ readCb, "r"; writeCb, "w"; chownCb, "c" ]
+        |> List.filter (fun (cb, _) -> cb.``checked``)
+        |> List.map snd
+        |> String.concat ""
+
+    let refreshPermsLabel () =
+        let s = currentPerms ()
+        permsToggleBtn.textContent <- sprintf "Perms: %s" (if s = "" then "(none)" else s)
+
+    refreshPermsLabel ()
+
+    permsToggleBtn.onclick <-
+        fun ev ->
+            ev.stopPropagation () |> ignore
+            permsPopover.classList.toggle "visible" |> ignore
+
+    permsWidget.appendChild permsToggleBtn |> ignore
+    permsWidget.appendChild permsPopover |> ignore
+
+    // Owner is any MOO expression resolving to a valid object - same
+    // convention as the value input below, and as the "New Object"
+    // popover's parent field - `player`/`#N` here just happen to be the two
+    // most common cases, pre-offered as quick-fill buttons rather than a
+    // separate input mode. BUT the Chown ('c') perm bit - confirmed live
+    // and against `ToastStunt/src/db_properties.cc`'s `insert_prop2` -
+    // unconditionally forces a property's owner to match the *object's*
+    // own owner the instant it's created, discarding whatever owner was
+    // requested. So while Chown is checked, offering a picker that
+    // silently does nothing would be worse than not offering one at all -
+    // show what the owner will actually end up being instead.
+    let ownerWidget = document.createElement ("div")
+    ownerWidget.classList.add "inspector-owner-widget"
+
+    let ownerEditGroup = document.createElement ("span")
+    ownerEditGroup.classList.add "inspector-owner-edit-group"
+
+    let addOwnerInput = document.createElement ("input") :?> HTMLInputElement
+    addOwnerInput.classList.add "inspector-property-value"
+    addOwnerInput.placeholder <- "player, #5, or $room"
+    addOwnerInput.value <- "player"
+
+    let ownerYouBtn = document.createElement ("button")
+    ownerYouBtn.classList.add "inspector-owner-quick-btn"
+    ownerYouBtn.textContent <- "You"
+    ownerYouBtn.title <- "Owned by the connected player"
+    ownerYouBtn.onclick <- fun _ -> addOwnerInput.value <- "player"
+
+    let ownerThisBtn = document.createElement ("button")
+    ownerThisBtn.classList.add "inspector-owner-quick-btn"
+    ownerThisBtn.textContent <- "This object"
+    ownerThisBtn.title <- "Owned by this object"
+    ownerThisBtn.onclick <- fun _ -> addOwnerInput.value <- sprintf "#%d" objRef
+
+    ownerEditGroup.appendChild addOwnerInput |> ignore
+    ownerEditGroup.appendChild ownerYouBtn |> ignore
+    ownerEditGroup.appendChild ownerThisBtn |> ignore
+
+    // The object's own current owner - reuses `ownerVal`, already fetched
+    // above for the header's "Owner:" row - as both the auto-label's text
+    // and the actual `ownerExpr` sent when Chown is checked.
+    let objectOwnerRef: int64 option =
+        if isNullOrUndefined ownerVal then None else Some(int64 (ownerVal?objRef: float))
+
+    let ownerAutoLabel = document.createElement ("span")
+    ownerAutoLabel.classList.add "inspector-owner-auto-label"
+    ownerAutoLabel.title <- "Locked to the object's own owner while Chown is checked"
+    ownerAutoLabel.textContent <- (if isNullOrUndefined ownerVal then "?" else (ownerVal?name: string))
+
+    ownerWidget.appendChild ownerEditGroup |> ignore
+    ownerWidget.appendChild ownerAutoLabel |> ignore
+
+    let refreshOwnerWidgetVisibility () =
+        if chownCb.``checked`` then
+            ownerEditGroup.setAttribute ("style", "display:none")
+            ownerAutoLabel.setAttribute ("style", "")
+        else
+            ownerEditGroup.setAttribute ("style", "")
+            ownerAutoLabel.setAttribute ("style", "display:none")
+
+    refreshOwnerWidgetVisibility ()
+
+    for cb in [ readCb; writeCb; chownCb ] do
+        cb.onchange <-
+            fun _ ->
+                refreshPermsLabel ()
+                refreshOwnerWidgetVisibility ()
+
     let addValueInput = document.createElement ("input") :?> HTMLInputElement
     addValueInput.classList.add "inspector-property-value"
     addValueInput.placeholder <- "value (MOO expr)"
-
-    let addPermsInput = document.createElement ("input") :?> HTMLInputElement
-    addPermsInput.classList.add "inspector-property-value"
-    addPermsInput.placeholder <- "perms"
-    addPermsInput.value <- "rc"
 
     let addBtn = document.createElement ("button")
     addBtn.classList.add "pane-action-btn"
@@ -1510,17 +1627,25 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         fun _ ->
             let name = addNameInput.value.Trim()
 
-            if name <> "" then
+            let ownerExpr =
+                if chownCb.``checked`` then
+                    objectOwnerRef |> Option.map (sprintf "#%d") |> Option.defaultValue "player"
+                else
+                    addOwnerInput.value.Trim()
+
+            if name <> "" && ownerExpr <> "" then
                 sendAction
                     [ "action" ==> "add-property"
                       "obj" ==> int objRef
                       "name" ==> name
+                      "ownerExpr" ==> ownerExpr
                       "valueExpr" ==> addValueInput.value
-                      "perms" ==> addPermsInput.value ]
+                      "perms" ==> currentPerms () ]
 
     addPropRow.appendChild addNameInput |> ignore
+    addPropRow.appendChild ownerWidget |> ignore
+    addPropRow.appendChild permsWidget |> ignore
     addPropRow.appendChild addValueInput |> ignore
-    addPropRow.appendChild addPermsInput |> ignore
     addPropRow.appendChild addBtn |> ignore
     propsSection.appendChild addPropRow |> ignore
 

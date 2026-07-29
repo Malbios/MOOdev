@@ -340,13 +340,18 @@ let setProperty
 /// perms})` instead of a plain assignment - unlike `setProperty`'s bare
 /// `.{pname}` identifier splice, the property name here is a real quoted
 /// MOO string argument to `add_property`, so it doesn't need to be a
-/// syntactically valid identifier to pass through safely.
+/// syntactically valid identifier to pass through safely. `ownerExpr` is
+/// evaluated the same way `literalText` is (any expression resolving to a
+/// valid object - `player`, `#N`, `$name`, ...) - `add_property` itself
+/// raises `E_INVARG` for an invalid owner, caught below like any other
+/// failure, so there's no separate validation step needed here.
 let addProperty
     (config: Config)
     (session: Session)
     (webSocket: WebSocket)
     (objRef: int64)
     (pname: string)
+    (ownerExpr: string)
     (literalText: string)
     (perms: string)
     (ct: CancellationToken)
@@ -357,9 +362,10 @@ let addProperty
         let literalLit = quote literalText
         let pnameLit = quote pname
         let permsLit = quote perms
+        let ownerLit = quote ownerExpr
 
         let statements =
-            $"""ok = 0; errtext = ""; try result = eval("return " + {literalLit} + ";"); if (result[1]) try add_property({o}, {pnameLit}, result[2], {{player, {permsLit}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+            $"""ok = 0; errtext = ""; try ownerResult = eval("return " + {ownerLit} + ";"); if (ownerResult[1]) try result = eval("return " + {literalLit} + ";"); if (result[1]) try add_property({o}, {pnameLit}, result[2], {{ownerResult[2], {permsLit}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error (value)"; endif except err3 (ANY) errtext = tostr(err3[2]); endtry else errtext = "parse error (owner)"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
 
         let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
         let root = json.RootElement

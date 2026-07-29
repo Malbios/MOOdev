@@ -728,6 +728,53 @@ html, body {
   min-width: 0;
 }
 
+.inspector-owner-widget {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector-owner-edit-group {
+  display: flex;
+  gap: 0.3em;
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector-owner-edit-group input {
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector-owner-quick-btn {
+  flex: none;
+  background: #2a2a2a;
+  color: #ccc;
+  border: 1px solid #444;
+  border-radius: 3px;
+  padding: 0.2em 0.5em;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+
+.inspector-owner-auto-label {
+  color: #999;
+  font-style: italic;
+  white-space: nowrap;
+}
+
+.inspector-owner-quick-btn:hover {
+  border-color: #6cf;
+}
+
+.inspector-perms-widget {
+  position: relative;
+  flex: none;
+}
+
 #editor-monaco {
   flex: 1;
   min-height: 0;
