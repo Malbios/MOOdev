@@ -324,6 +324,273 @@ let addProperty
                 ct
     }
 
+/// Formats a display label the same way `LanguageServer.Handlers`'s
+/// (private) `displayNameFor` does - `"<name> (#N) [$corponym]"`, or without
+/// the suffix if uncorponym'd, `"#N"` alone for a genuinely empty live name.
+/// Duplicated here rather than shared (that function is private to a
+/// different project, reads from the static graph, and this is a live
+/// query) - same deliberate per-module duplication convention already used
+/// for `Sidecar/TreeParser.fs` vs `Metadata/TreeFormat.fs`.
+let private formatLiveName (corponymsByObjnum: Map<int64, string>) (objRef: int64) (liveName: string) : string =
+    let baseName = if liveName = "" then sprintf "#%d" objRef else liveName
+
+    match Map.tryFind objRef corponymsByObjnum with
+    | Some propName -> sprintf "%s (#%d) [$%s]" baseName objRef propName
+    | None -> sprintf "%s (#%d)" baseName objRef
+
+/// Live objects can have an arbitrary number of children (a monster class
+/// with hundreds of spawned instances) - this directly answers the concern
+/// that motivated this whole feature (don't let the IDE choke trying to
+/// browse into a world with huge numbers of runtime instances).
+let private maxLiveChildren = 500
+
+/// `get-live-children` replacement for the tree's expand action on a node
+/// the static (corponym-only, see moo-vcs-plan.md I3) graph doesn't fully
+/// cover. Returns `children(objRef)` (capped at `maxLiveChildren`) with
+/// enough per-child structural summary - live name, parents, verb/property
+/// signatures, no verb code or property values - to build a tree row
+/// identical in shape to a statically-preloaded one. Deliberately not built
+/// on `Exporter.getObjectExport`: that fetches full decompiled verb code and
+/// serialized property values for every verb/property, the right cost for
+/// an export/commit but wasteful for a tree-expand click (would mean
+/// decompiling every verb on every live instance of a monster class just to
+/// show a name and a chevron) - this mirrors the lighter level of detail
+/// `Handlers.ObjectTreeVerb`/`ObjectTreeProperty` already use for the same
+/// purpose. Also, `getObjectExport` has no notion of `children()` at all -
+/// the static graph's `Children` is inferred by inverting `Parents` across
+/// the whole *loaded* set, which doesn't work for a partial live query.
+let getLiveChildren
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+        let o = sprintf "#%d" objRef
+
+        let statements =
+            $"""if (!valid({o}))
+  result = ["error" -> "invalid"];
+else
+  allkids = children({o});
+  total = length(allkids);
+  kids = (total > {maxLiveChildren}) ? allkids[1..{maxLiveChildren}] | allkids;
+  out = {{}};
+  for k in (kids)
+    kname = typeof(k.name) == STR ? k.name | "";
+    kparents = {{}};
+    for p in (parents(k)) kparents = {{@kparents, tostr(p)}}; endfor
+    kverbs = {{}};
+    vlist = verbs(k);
+    for i in [1..length(vlist)]
+      vi = verb_info(k, i);
+      va = verb_args(k, i);
+      kverbs = {{@kverbs, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
+    endfor
+    kprops = {{}};
+    for pn in (properties(k))
+      pi = property_info(k, pn);
+      kprops = {{@kprops, ["name" -> pn, "perms" -> pi[2]]}};
+    endfor
+    out = {{@out, ["objref" -> tostr(k), "name" -> kname, "parents" -> kparents, "verbs" -> kverbs, "properties" -> kprops]}};
+  endfor
+  result = ["kids" -> out, "truncated" -> ((total > {maxLiveChildren}) ? 1 | 0)];
+endif"""
+
+        let! json = evalRunner statements "result" ct
+        let root = json.RootElement
+        let hasError, _ = root.TryGetProperty("error")
+
+        if hasError then
+            do! sendWire webSocket (sprintf "moodev-live-children object: #%d truncated: 0" objRef) [] ct
+        else
+            let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+            let truncated = root.GetProperty("truncated").GetInt32() = 1
+
+            let firstAlias (nameSpec: string) =
+                nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
+
+            let lines =
+                root.GetProperty("kids").EnumerateArray()
+                |> Seq.map (fun k ->
+                    let kObjRef = int64 (k.GetProperty("objref").GetString().TrimStart('#'))
+                    let liveName = k.GetProperty("name").GetString()
+                    let displayName = formatLiveName corponymsByObjnum kObjRef liveName
+
+                    let parents =
+                        k.GetProperty("parents").EnumerateArray()
+                        |> Seq.map (fun p -> int64 (p.GetString().TrimStart('#')))
+                        |> Array.ofSeq
+
+                    let verbs =
+                        k.GetProperty("verbs").EnumerateArray()
+                        |> Seq.map (fun v ->
+                            {| name = firstAlias (v.GetProperty("names").GetString())
+                               perms = v.GetProperty("perms").GetString()
+                               dobj = v.GetProperty("dobj").GetString()
+                               prep = v.GetProperty("prep").GetString()
+                               iobj = v.GetProperty("iobj").GetString() |})
+                        |> Array.ofSeq
+
+                    let properties =
+                        k.GetProperty("properties").EnumerateArray()
+                        |> Seq.map (fun p ->
+                            {| name = p.GetProperty("name").GetString()
+                               perms = p.GetProperty("perms").GetString() |})
+                        |> Array.ofSeq
+
+                    JsonSerializer.Serialize(
+                        {| objRef = kObjRef
+                           name = displayName
+                           parents = parents
+                           verbs = verbs
+                           properties = properties |}
+                    ))
+                |> List.ofSeq
+
+            do!
+                sendWire
+                    webSocket
+                    (sprintf "moodev-live-children object: #%d truncated: %d" objRef (if truncated then 1 else 0))
+                    lines
+                    ct
+    }
+
+/// `get-live-info` replacement for the inspector's fallback when
+/// `moodev/getObjectInfo` (the LSP's static, corponym-only graph) has never
+/// heard of `objRef`. Computes, live, the exact same structural shape the
+/// static path already returns (`Handlers.ObjectInfo`'s JSON contract) so
+/// the client's `renderInspectorStructure` needs zero changes - it's already
+/// loosely typed (`?` dynamic field access) and can't tell the difference.
+/// Owner/parent/child refs each get their own live-name lookup (a live-only
+/// object's ancestors can themselves be either corponym'd or not), same
+/// `formatLiveName` convention used throughout this feature. No verb code,
+/// no property values - same reasoning as `getLiveChildren`.
+let getLiveInfo (config: Config) (session: Session) (webSocket: WebSocket) (objRef: int64) (ct: CancellationToken) : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+        let o = sprintf "#%d" objRef
+
+        let statements =
+            $"""if (!valid({o}))
+  result = ["error" -> "invalid"];
+else
+  live_name = typeof({o}.name) == STR ? {o}.name | "";
+  alias_list = {{}};
+  try
+    if (typeof({o}.aliases) == LIST)
+      for a in ({o}.aliases)
+        if (typeof(a) == STR)
+          alias_list = {{@alias_list, a}};
+        endif
+      endfor
+    endif
+  except (E_PROPNF)
+  endtry
+  ownername = valid({o}.owner) ? (typeof({o}.owner.name) == STR ? {o}.owner.name | "") | "";
+  parents_out = {{}};
+  for p in (parents({o}))
+    pname = valid(p) ? (typeof(p.name) == STR ? p.name | "") | "";
+    parents_out = {{@parents_out, ["objref" -> tostr(p), "name" -> pname]}};
+  endfor
+  children_out = {{}};
+  for c in (children({o}))
+    cname = valid(c) ? (typeof(c.name) == STR ? c.name | "") | "";
+    children_out = {{@children_out, ["objref" -> tostr(c), "name" -> cname]}};
+  endfor
+  verbs_out = {{}};
+  vlist = verbs({o});
+  for i in [1..length(vlist)]
+    vi = verb_info({o}, i);
+    va = verb_args({o}, i);
+    verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
+  endfor
+  props_out = {{}};
+  for pn in (properties({o}))
+    pi = property_info({o}, pn);
+    powner = pi[1];
+    pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
+    props_out = {{@props_out, ["name" -> pn, "owner" -> tostr(powner), "ownername" -> pownername, "perms" -> pi[2]]}};
+  endfor
+  result = ["name" -> live_name, "aliases" -> alias_list, "owner" -> tostr({o}.owner), "ownername" -> ownername,
+            "player" -> is_player({o}), "programmer" -> {o}.programmer, "wizard" -> {o}.wizard,
+            "read" -> {o}.r, "write" -> {o}.w, "fertile" -> {o}.f, "anonymous" -> {o}.a,
+            "parents" -> parents_out, "children" -> children_out, "verbs" -> verbs_out, "properties" -> props_out];
+endif"""
+
+        let! json = evalRunner statements "result" ct
+        let root = json.RootElement
+        let hasError, _ = root.TryGetProperty("error")
+
+        if hasError then
+            do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [] ct
+        else
+            let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+
+            let refOf (objref: string) (name: string) =
+                let r = int64 (objref.TrimStart('#'))
+                {| objRef = r; name = formatLiveName corponymsByObjnum r name |}
+
+            let firstAlias (nameSpec: string) =
+                nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
+
+            // MOO has no real boolean type - `is_player()`/`.programmer`/
+            // `.wizard`/`.r`/`.w`/`.f`/`.a` are all plain integers (0/1),
+            // which the eval bridge round-trips as JSON numbers, not JSON
+            // booleans - `GetBoolean()` throws on a Number-kind element
+            // (confirmed live: this crashed the whole connection before a
+            // response was ever sent, the same "silent hang" class of bug
+            // `Exporter.getObjectExport`'s own doc comment warns about,
+            // just via a different mechanism). Read as int and compare to 1
+            // instead, so the wire payload still carries a genuine JSON
+            // boolean for `renderInspectorStructure`'s `(info?xxx: bool)`
+            // reads on the client side.
+            let flag (name: string) = root.GetProperty(name).GetInt32() = 1
+
+            let payload =
+                {| name = formatLiveName corponymsByObjnum objRef (root.GetProperty("name").GetString())
+                   owner = refOf (root.GetProperty("owner").GetString()) (root.GetProperty("ownername").GetString())
+                   aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> Array.ofSeq
+                   player = flag "player"
+                   programmer = flag "programmer"
+                   wizard = flag "wizard"
+                   read = flag "read"
+                   write = flag "write"
+                   fertile = flag "fertile"
+                   anonymous = flag "anonymous"
+                   parents =
+                     root.GetProperty("parents").EnumerateArray()
+                     |> Seq.map (fun p -> refOf (p.GetProperty("objref").GetString()) (p.GetProperty("name").GetString()))
+                     |> Array.ofSeq
+                   children =
+                     root.GetProperty("children").EnumerateArray()
+                     |> Seq.map (fun c -> refOf (c.GetProperty("objref").GetString()) (c.GetProperty("name").GetString()))
+                     |> Array.ofSeq
+                   verbs =
+                     root.GetProperty("verbs").EnumerateArray()
+                     |> Seq.map (fun v ->
+                         {| name = firstAlias (v.GetProperty("names").GetString())
+                            perms = v.GetProperty("perms").GetString()
+                            dobj = v.GetProperty("dobj").GetString()
+                            prep = v.GetProperty("prep").GetString()
+                            iobj = v.GetProperty("iobj").GetString() |})
+                     |> Array.ofSeq
+                   properties =
+                     root.GetProperty("properties").EnumerateArray()
+                     |> Seq.map (fun p ->
+                         let ownerRef = int64 (p.GetProperty("owner").GetString().TrimStart('#'))
+                         let ownerName = p.GetProperty("ownername").GetString()
+
+                         {| name = p.GetProperty("name").GetString()
+                            owner = formatLiveName corponymsByObjnum ownerRef ownerName
+                            perms = p.GetProperty("perms").GetString() |})
+                     |> Array.ofSeq |}
+
+            do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [ JsonSerializer.Serialize(payload) ] ct
+    }
+
 /// `ide_get_location()` replacement - "player" here is whichever character
 /// is logged into this session, matching the retired verb's own
 /// `player.location` (this only works correctly because the query runs

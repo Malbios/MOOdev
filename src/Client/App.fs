@@ -890,6 +890,41 @@ let private buildTree
         |> Array.filter (fun (_, _, parents, _, _, _) -> Array.isEmpty parents)
         |> Array.map (fun (objRef, _, _, _, _, _) -> objRef)
 
+/// Folds a `get-live-children` response into `treeNodes` - the mechanism
+/// that lets a live (uncorponym'd, per moo-vcs-plan.md I3) object appear in
+/// the tree exactly like a statically-preloaded one, with zero rendering
+/// changes anywhere else: every field here is typed identically to a
+/// preloaded `TreeNode`, so `flattenVisibleRows`/`renderTreeRows` can't tell
+/// how an entry got into the map. A child already present in `treeNodes`
+/// (a corponym'd child the static preload already covered) is left
+/// untouched - its own `Children` may carry real static data that must not
+/// be clobbered by this partial, one-level-deep query. `parentRef`'s own
+/// `Children` is *replaced*, not unioned, with the live-authoritative list
+/// just returned - simpler than tracking removals separately, and it
+/// self-heals a recycled/destroyed child for free (it just stops appearing
+/// next time the parent re-expands).
+let private mergeLiveChildren
+    (parentRef: int64)
+    (children: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[])
+    : unit =
+    for objRef, name, parents, verbs, properties in children do
+        if not (Map.containsKey objRef treeNodes) then
+            treeNodes <-
+                Map.add
+                    objRef
+                    { ObjRef = objRef
+                      Name = name
+                      Parents = parents
+                      Children = [||]
+                      Verbs = verbs
+                      Properties = properties }
+                    treeNodes
+
+    match Map.tryFind parentRef treeNodes with
+    | None -> ()
+    | Some parentNode ->
+        treeNodes <- Map.add parentRef { parentNode with Children = children |> Array.map (fun (r, _, _, _, _) -> r) } treeNodes
+
 /// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
 /// expanding #7 once should reveal its children under *every* parent it
 /// appears under (the object graph is a DAG - see the project plan's
@@ -917,6 +952,15 @@ let mutable private expandedPropGroups: Set<int64> = Set.empty
 /// parent's own row, so revealing a deeply-nested object needs every
 /// ancestor's children group opened, not just its own row.
 let mutable private expandedChildGroups: Set<int64> = Set.empty
+
+/// Objects whose live children have been asked for at least once (a
+/// `get-live-children` round trip has landed, whether or not it turned up
+/// anything new) - lets `isExpandable` show a chevron before the first ask
+/// (an object whose *only* children are live-only would otherwise show none
+/// at all, hiding the exact case this feature exists to reveal) while still
+/// self-correcting to "no chevron" afterward if nothing real ever surfaces.
+/// Same reset lifecycle as `expandedRefs`.
+let mutable private liveChildrenChecked: Set<int64> = Set.empty
 
 /// The object row the user actually clicked (or opened the inspector for)
 /// while a filter was active - the one thing `promoteFilterExpansionIfAny`
@@ -1151,7 +1195,12 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
         if activeTab = InspectorTab objRef then
             match infoOpt with
             | Some info -> renderInspectorStructure objRef info highlightProp
-            | None -> inspectorContentEl.textContent <- sprintf "#%d - not found." objRef
+            | None ->
+                // Not in the static (corponym-only, per moo-vcs-plan.md I3)
+                // graph - fall back to a live query rather than reporting
+                // "not found" outright, since this may just be a live-only
+                // object the static export never covered.
+                sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
     }
     |> Async.StartImmediate
 
@@ -1616,6 +1665,7 @@ and private flattenVisibleRows
     (expandedPropGroups: Set<int64>)
     (expandedVerbGroups: Set<int64>)
     (expandedChildGroups: Set<int64>)
+    (liveChildrenChecked: Set<int64>)
     (roots: int64[])
     : TreeRow list =
     let childrenOf (node: TreeNode) : int64[] =
@@ -1639,6 +1689,7 @@ and private flattenVisibleRows
                 not (Array.isEmpty visibleChildren)
                 || (showVerbs && not (Array.isEmpty node.Verbs))
                 || (showProperties && not (Array.isEmpty node.Properties))
+                || not (Set.contains objRef liveChildrenChecked) // unknown - assume yes until asked once
 
             let selfRow = ObjectRow(objRef, depth, isExpandable)
 
@@ -1770,9 +1821,17 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                         selectedObjRef <- Some objRef
 
                         if isExpandable then
-                            expandedRefs <-
-                                if Set.contains objRef expandedRefs then Set.remove objRef expandedRefs
-                                else Set.add objRef expandedRefs
+                            let wasExpanded = Set.contains objRef expandedRefs
+
+                            expandedRefs <- if wasExpanded then Set.remove objRef expandedRefs else Set.add objRef expandedRefs
+
+                            // Every expand asks live, unconditionally - there's no
+                            // reliable client-side signal for "this corponym'd
+                            // object might have live-only children" without
+                            // asking, and the response is a cheap no-op merge
+                            // when nothing new turns up.
+                            if not wasExpanded then
+                                sendAction [ "action" ==> "get-live-children"; "obj" ==> int objRef ]
 
                         renderTree ()
             | PropGroupRow(objRef, depth, count) ->
@@ -1904,6 +1963,7 @@ and private renderTree () : unit =
                 expandedPropGroups
                 expandedVerbGroups
                 expandedChildGroups
+                liveChildrenChecked
                 rootRefs
         )
     else
@@ -1962,6 +2022,7 @@ and private renderTree () : unit =
                 expandedPropGroups
                 expandedVerbGroups
                 expandedChildGroups
+                liveChildrenChecked
                 rootRefs
 
         // Keep a row if it's itself a match, or an ancestor object-row on
@@ -2226,6 +2287,7 @@ ws.onmessage <-
                         let! nodes = LspClient.getObjectTreeAsync ()
                         buildTree nodes
                         expandedRefs <- Set.empty
+                        liveChildrenChecked <- Set.empty
                         selectedObjRef <- None
                         renderTree ()
                     }
@@ -2288,6 +2350,61 @@ ws.onmessage <-
                             loadInspector objRef None
                         else
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            elif header.StartsWith("moodev-live-children") then
+                // Folds live (uncorponym'd, per moo-vcs-plan.md I3) children
+                // into `treeNodes` exactly like a statically-preloaded
+                // object - see `mergeLiveChildren`'s own comment. One JSON
+                // object per line (nested verb/property arrays don't fit the
+                // tab-separated convention `moodev-prop-content` uses for
+                // flat rows), same envelope parsing as the outer `{header,
+                // lines}` message itself.
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, parentRef ->
+                        let children =
+                            lines
+                            |> Array.map (fun line ->
+                                let o: obj = JS.JSON.parse line
+
+                                int64 (o?objRef: float),
+                                (o?name: string),
+                                ((o?parents: float[]) |> Array.map int64),
+                                ((o?verbs: obj[])
+                                 |> Array.map (fun v ->
+                                     { Name = v?name; Perms = v?perms; Dobj = v?dobj; Prep = v?prep; Iobj = v?iobj }
+                                     : LspClient.TreeVerb)),
+                                ((o?properties: obj[])
+                                 |> Array.map (fun p -> { Name = p?name; Perms = p?perms }: LspClient.TreeProperty)))
+
+                        mergeLiveChildren parentRef children
+                        liveChildrenChecked <- Set.add parentRef liveChildrenChecked
+                        renderTree ()
+                    | _ -> ()
+                | None -> ()
+            elif header.StartsWith("moodev-live-info") then
+                // Inspector fallback for an object the static graph never
+                // heard of (see `loadInspector`'s `None` arm) - same
+                // `renderInspectorStructure` the LSP-sourced path uses,
+                // unchanged, since this payload is shaped identically.
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        match Array.tryHead lines with
+                        | Some line ->
+                            let info: obj = JS.JSON.parse line
+
+                            if isNullOrUndefined info then
+                                inspectorContentEl.textContent <- sprintf "#%d - not found." objRef
+                            else
+                                let highlightProp =
+                                    activeInspectorProp |> Option.bind (fun (r, p) -> if r = objRef then Some p else None)
+
+                                renderInspectorStructure objRef info highlightProp
+                        | None -> inspectorContentEl.textContent <- sprintf "#%d - not found." objRef
                     | _ -> ()
                 | None -> ()
             // "-result" (the ok:0 / error variants) checked before their

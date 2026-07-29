@@ -325,6 +325,12 @@ let private buildTryDispatch
                 | "get-location" ->
                     do! IdeActions.getLocation config session webSocket ct
                     return true
+                | "get-live-children" ->
+                    do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
+                    return true
+                | "get-live-info" ->
+                    do! IdeActions.getLiveInfo config session webSocket (getObj ()) ct
+                    return true
                 | "checkpoint" ->
                     do! IdeActions.checkpoint config webSocket ct
                     return true
