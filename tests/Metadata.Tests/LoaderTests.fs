@@ -251,6 +251,31 @@ let ``builtins.json absence degrades to an empty map, not a crash`` () =
         Directory.Delete(dir, true)
 
 [<Fact>]
+let ``a present, valid builtins.json loads name/arity/types and merges in the embedded static docs`` () =
+    let dir = tempDir ()
+
+    try
+        writeFixtureTree dir
+
+        let functions =
+            [ { Name = "eval"; MinArgs = 1; MaxArgs = 1; Types = [ 2 ] }
+              { Name = "notify"; MinArgs = 2; MaxArgs = 3; Types = [ 1; 2; -1 ] } ]
+
+        File.WriteAllText(Path.Combine(dir, "builtins.json"), renderBuiltinsJson functions)
+
+        let graph = load dir
+        let evalFn = Map.find "eval" graph.Builtins
+
+        Assert.Equal(1, evalFn.MinArgs)
+        Assert.Equal(1, evalFn.MaxArgs)
+        Assert.Equal<int list>([ 2 ], evalFn.ArgTypes)
+        // Static, build-time-embedded resources (unrelated to this checkout's
+        // builtins.json) - confirms the two sources actually merge by name.
+        Assert.True(evalFn.Description.IsSome)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
 let ``a dangling $name parent reference fails loudly rather than silently dropping`` () =
     let dir = tempDir ()
 

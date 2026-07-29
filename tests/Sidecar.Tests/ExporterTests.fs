@@ -1,5 +1,6 @@
 module Sidecar.Tests.ExporterTests
 
+open System.Text.Json
 open Xunit
 open Sidecar.Exporter
 
@@ -159,3 +160,33 @@ let ``renderObjectMoo renders the raw #0 self-reference for FORMAT.md's system-o
     let result = renderObjectMoo Map.empty "#0" data []
 
     Assert.StartsWith("@object #0\n", result)
+
+// ---------------------------------------------------------------------------
+// builtins.json - restored producer for the retired `$vcs:export_builtins()`
+// verb's job (see Metadata/Loader.fs's `parseBuiltinFunc`, which this must
+// match field-for-field: "name"/"minargs"/"maxargs"/"types").
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``renderBuiltinsJson matches Loader.fs's expected "functions" array shape`` () =
+    let functions =
+        [ { Name = "eval"; MinArgs = 1; MaxArgs = 1; Types = [ 2 ] }
+          { Name = "notify"; MinArgs = 2; MaxArgs = 3; Types = [ 1; 2; -1 ] } ]
+
+    let result = renderBuiltinsJson functions
+    use doc = JsonDocument.Parse(result)
+    let funcsEl = doc.RootElement.GetProperty("functions")
+
+    Assert.Equal(2, funcsEl.GetArrayLength())
+
+    let eval = funcsEl.[0]
+    Assert.Equal("eval", eval.GetProperty("name").GetString())
+    Assert.Equal(1, eval.GetProperty("minargs").GetInt32())
+    Assert.Equal(1, eval.GetProperty("maxargs").GetInt32())
+    Assert.Equal<int list>([ 2 ], eval.GetProperty("types").EnumerateArray() |> Seq.map (fun t -> t.GetInt32()) |> List.ofSeq)
+
+    let notify = funcsEl.[1]
+    // maxargs > minargs and a -1 ("any") type proto both need to survive -
+    // not special-cased anywhere in the rendering path.
+    Assert.Equal(3, notify.GetProperty("maxargs").GetInt32())
+    Assert.Equal(-1, notify.GetProperty("types").EnumerateArray() |> Seq.last |> fun t -> t.GetInt32())

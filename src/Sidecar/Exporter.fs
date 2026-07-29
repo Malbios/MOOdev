@@ -115,6 +115,57 @@ endfor"""
             |> Map.ofSeq
     }
 
+/// One entry from `function_info()` (no args) - every builtin ToastStunt
+/// registers, confirmed against `ToastStunt/src/functions.cc`'s
+/// `bf_function_info`/`function_description`. Replaces the retired
+/// `$vcs:export_builtins()` MOOcode verb as the source of `builtins.json` -
+/// `Metadata/Loader.fs`'s `loadBuiltins`/`parseBuiltinFunc` and
+/// `LanguageServer/Handlers.fs`'s hover text were both already written
+/// against this exact shape and never needed to change, only the producer
+/// did. `Types` is already the "masked, user-visible" encoding
+/// (`proto < 0 ? proto : (proto & TYPE_DB_MASK)`, per `functions.cc`) that
+/// `Handlers.fs`'s `typeName` expects - no transformation needed.
+type BuiltinFuncExport =
+    { Name: string
+      MinArgs: int
+      MaxArgs: int
+      Types: int list }
+
+/// One eval, connection-wide (not per-object) - every registered builtin's
+/// name/arity/arg-type-protos, straight from the live server.
+let getBuiltinFunctions (evalRunner: EvalRunner) (ct: CancellationToken) : Task<BuiltinFuncExport list> =
+    task {
+        let statements =
+            """funcs = {};
+for entry in (function_info())
+  funcs = {@funcs, ["name" -> entry[1], "minargs" -> entry[2], "maxargs" -> entry[3], "types" -> entry[4]]};
+endfor"""
+
+        let! json = evalRunner statements "funcs" ct
+
+        return
+            json.RootElement.EnumerateArray()
+            |> Seq.map (fun el ->
+                { Name = el.GetProperty("name").GetString()
+                  MinArgs = el.GetProperty("minargs").GetInt32()
+                  MaxArgs = el.GetProperty("maxargs").GetInt32()
+                  Types = el.GetProperty("types").EnumerateArray() |> Seq.map (fun t -> t.GetInt32()) |> List.ofSeq })
+            |> List.ofSeq
+    }
+
+/// `builtins.json`'s on-disk shape - a `"functions"` array, each element
+/// `name`/`minargs`/`maxargs`/`types`, exactly matching `Loader.fs`'s
+/// `parseBuiltinFunc` field-for-field (no renaming step exists anywhere in
+/// this pipeline).
+let renderBuiltinsJson (functions: BuiltinFuncExport list) : string =
+    let payload =
+        {| functions =
+             functions
+             |> List.map (fun f -> {| name = f.Name; minargs = f.MinArgs; maxargs = f.MaxArgs; types = f.Types |})
+             |> List.ofSeq |}
+
+    JsonSerializer.Serialize(payload, JsonSerializerOptions(WriteIndented = true))
+
 let private getString (el: JsonElement) (name: string) = el.GetProperty(name).GetString()
 let private getInt64 (el: JsonElement) (name: string) = int64 (el.GetProperty(name).GetString().TrimStart('#'))
 
@@ -387,6 +438,12 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         let corponymList = corponymsByObjnum |> Map.toList |> List.map (fun (n, name) -> name, n)
 
         File.WriteAllText(Path.Combine(outputDir, "corponyms.moo"), renderCorponymsMoo corponymList)
+
+        // Connection-wide, one-shot - server-version-specific, not
+        // per-object, so it belongs here rather than in the per-corponym
+        // loop below or IdeActions.fs's per-object live-save re-export.
+        let! functions = getBuiltinFunctions evalRunner ct
+        File.WriteAllText(Path.Combine(outputDir, "builtins.json"), renderBuiltinsJson functions)
 
         let sortedByName =
             corponymList |> List.sortWith (fun (a, _) (b, _) -> String.Compare(a, b, StringComparison.OrdinalIgnoreCase))
