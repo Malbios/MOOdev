@@ -337,9 +337,11 @@ module private Settings =
     let setHideEmptyLeaves (enabled: bool) : unit =
         window.localStorage.setItem (hideEmptyLeavesKey, (if enabled then "on" else "off"))
 
-    /// Both default ON, matching today's always-shown behavior until someone
-    /// opens the tree filter's settings popover and turns one off.
-    let showPropertiesEnabled () : bool = loadString showPropertiesKey "on" = "on"
+    /// Properties default OFF - noisy for day-to-day editing (most objects
+    /// have far more properties than verbs), so they're opt-in via the tree
+    /// filter's settings popover. Verbs stay default ON, matching today's
+    /// always-shown behavior.
+    let showPropertiesEnabled () : bool = loadString showPropertiesKey "off" = "on"
     let showVerbsEnabled () : bool = loadString showVerbsKey "on" = "on"
 
     let setShowProperties (enabled: bool) : unit =
