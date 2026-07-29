@@ -22,8 +22,12 @@ let parseObjRef (s: string) : ObjRef = Int64.Parse(s.TrimStart('#'))
 
 /// `builtin-param-names.json` is embedded in this assembly (see
 /// `Metadata.fsproj`) - a static, build-time extraction from ToastStunt's
-/// own C source comments, not per-`Survive`-checkout data.
-let private loadBuiltinParamNames () : Map<string, string list> =
+/// own C source comments, not per-`Survive`-checkout data. Not `private`:
+/// `LanguageServer.SidecarBridge` reuses this (and `loadBuiltinDescriptions`/
+/// `parseBuiltinFunc` below) to merge these same static docs onto live
+/// `get-builtins` responses, so hover text is identical whether the arity/
+/// type data came from `builtins.json` or a live query.
+let loadBuiltinParamNames () : Map<string, string list> =
     let asm = System.Reflection.Assembly.GetExecutingAssembly()
     let resourceName = "Metadata.builtin-param-names.json"
 
@@ -43,7 +47,7 @@ let private loadBuiltinParamNames () : Map<string, string list> =
 /// is - one-line "what does this do" hover text, hand-written per builtin
 /// (not extracted from source comments the way param names are, since
 /// there's no equivalent doc-comment convention for behavior).
-let private loadBuiltinDescriptions () : Map<string, string> =
+let loadBuiltinDescriptions () : Map<string, string> =
     let asm = System.Reflection.Assembly.GetExecutingAssembly()
     let resourceName = "Metadata.builtin-descriptions.json"
 
@@ -59,7 +63,7 @@ let private loadBuiltinDescriptions () : Map<string, string> =
         |> Seq.map (fun p -> p.Name, p.Value.GetString())
         |> Map.ofSeq
 
-let private parseBuiltinFunc
+let parseBuiltinFunc
     (paramNames: Map<string, string list>)
     (descriptions: Map<string, string>)
     (el: JsonElement)

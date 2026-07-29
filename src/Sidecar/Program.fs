@@ -409,6 +409,16 @@ let main args =
             { Host = app.Configuration.GetValue<string>("Moo:Host", "127.0.0.1")
               Port = app.Configuration.GetValue<int>("Moo:Port", 7777) }
 
+        // The world's dedicated LSP-service listener (see moo-dev's CLAUDE.md
+        // bootstrap docs) - a separate port, bound to a separate player
+        // character, so the LSP's own live connection here never collides
+        // with a browser tab's Wizard session on `endpoint` above (ToastStunt
+        // kicks a *repeated login of the same character*, not "more than one
+        // live connection").
+        let lspBridgeEndpoint: LspBridge.MooEndpoint =
+            { Host = app.Configuration.GetValue<string>("Moo:Host", "127.0.0.1")
+              Port = app.Configuration.GetValue<int>("Moo:LspBridgePort", 7780) }
+
         let treeDir = app.Configuration.GetValue<string>("Moo:TreeDir", "../../../Survive")
         let gitAuthorName = app.Configuration.GetValue<string>("Moo:GitAuthorName", "moo-dev")
         let gitAuthorEmail = app.Configuration.GetValue<string>("Moo:GitAuthorEmail", "moo-dev@localhost")
@@ -450,6 +460,19 @@ let main args =
                         let tryDispatch = buildTryDispatch ideConfig
 
                         do! handleConnection endpoint webSocket tryDispatch ctx.RequestAborted
+                    else
+                        ctx.Response.StatusCode <- StatusCodes.Status400BadRequest
+                })
+        )
+        |> ignore
+
+        app.Map(
+            "/lsp-bridge",
+            Func<HttpContext, Threading.Tasks.Task>(fun ctx ->
+                task {
+                    if ctx.WebSockets.IsWebSocketRequest then
+                        use! webSocket = ctx.WebSockets.AcceptWebSocketAsync()
+                        do! LspBridge.handleConnection lspBridgeEndpoint webSocket ctx.RequestAborted
                     else
                         ctx.Response.StatusCode <- StatusCodes.Status400BadRequest
                 })

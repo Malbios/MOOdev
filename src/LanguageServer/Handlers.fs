@@ -149,17 +149,6 @@ let private resolvableVerbCallAt
         |> Option.map (fun startObj -> startObj, verbName, args)
     | _ -> None
 
-/// `verb`'s primary (first-declared) name is what the client re-requests
-/// through the normal `ide_fetch` flow to actually jump there - not
-/// necessarily the alias the caller happened to use.
-let private locationOfVerb (definer: ObjRef) (verb: VerbNode) : Location =
-    { Uri = moodevVerbUri definer (List.head verb.Meta.Names)
-      // No per-statement spans exist yet for the verb body itself (only
-      // expression-level reference nodes carry positions) - land at the
-      // top of the file rather than guess a line.
-      Range =
-        { Start = { Line = 0u; Character = 0u }
-          End = { Line = 0u; Character = 0u } } }
 
 /// Every declared field defaulted to `None`/absent - `CompletionItem` has
 /// 19 fields and only `Label` is ever meaningfully populated here.
@@ -235,6 +224,44 @@ let private definerName (graph: Graph) (definer: ObjRef) : string =
     |> Map.tryFind definer
     |> Option.bind (fun o -> o.Name)
     |> Option.defaultValue (sprintf "#%d" definer)
+
+/// A live display name, falling back to bare `#N` when the live query
+/// didn't have one (e.g. a genuinely nameless object) - simpler than
+/// `displayNameFor` above (no `[$corponym]` suffix, since that needs the
+/// corponym registry too - a known, deliberate gap for this first live
+/// version, not a bug).
+let private liveDisplayName (name: string) (objRef: ObjRef) : string =
+    if name = "" then sprintf "#%d" objRef else sprintf "%s (#%d)" name objRef
+
+/// Hover body for a `VerbCall` resolved via `SidecarBridge.ResolveVerbDispatch`
+/// - the live equivalent of the old `hoverForResolvedVerb`, which took a
+/// static-graph `VerbNode` this project no longer builds for the resolved
+/// verb (see `Handlers.MooLspServer`'s `TextDocumentHover`/`TextDocumentDefinition`).
+let private hoverForResolvedVerbLive (verbName: string) (result: SidecarBridge.VerbDispatchResult) : Hover =
+    sprintf
+        "**%s** on `#%d (%s)`\n\nnames: `%s`  \nargs: `%s %s %s`  \nperms: `%s`  \nowner: `%s`"
+        verbName
+        result.Definer
+        (if result.DefinerName = "" then sprintf "#%d" result.Definer else result.DefinerName)
+        result.Names
+        result.Dobj
+        result.Prep
+        result.Iobj
+        result.Perms
+        (liveDisplayName result.OwnerName result.Owner)
+    |> mkHover
+
+/// `result.Names`'s primary (first-declared) name is what the client
+/// re-requests through the normal `ide_fetch` flow to actually jump there -
+/// not necessarily the alias the caller happened to use.
+let private locationOfVerbLive (result: SidecarBridge.VerbDispatchResult) : Location =
+    { Uri = moodevVerbUri result.Definer (result.Names.Split(' ') |> Array.head)
+      // No per-statement spans exist yet for the verb body itself (only
+      // expression-level reference nodes carry positions) - land at the
+      // top of the file rather than guess a line.
+      Range =
+        { Start = { Line = 0u; Character = 0u }
+          End = { Line = 0u; Character = 0u } } }
 
 /// Reverse of `Graph.SystemObjectProperties` (`$name` -> obj) - if a real
 /// object happens to be registered under more than one `$name`, this
@@ -453,7 +480,7 @@ let private allVerbCallReferences (graph: Graph) : (ObjRef * string * AstQuery.F
 type MooLspClient() =
     inherit LspClient()
 
-type MooLspServer(_client: MooLspClient, graph: Graph) =
+type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.SidecarBridge) =
     inherit LspServer()
 
     override _.Dispose() = ()
@@ -548,51 +575,48 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                 let astLine = int p.Position.Line + 1
                 let astCol = int p.Position.Character + 1
 
-                let hoverForResolvedVerb (verbName: string) (definer: ObjRef) (foundVerb: VerbNode) : Hover =
-                    sprintf
-                        "**%s** on `#%d (%s)`\n\nnames: `%s`  \nargs: `%s %s %s`  \nperms: `%s`  \nowner: `%s`"
-                        verbName
-                        definer
-                        (definerName graph definer)
-                        (String.concat " " foundVerb.Meta.Names)
-                        foundVerb.Meta.Dobj
-                        foundVerb.Meta.Prep
-                        foundVerb.Meta.Iobj
-                        foundVerb.Meta.Perms
-                        (displayNameFor graph foundVerb.Meta.Owner)
-                    |> mkHover
-
-                let fromReference =
-                    verb.Ast
-                    |> Option.bind (fun stmts -> AstQuery.referenceAt astLine astCol stmts)
-                    |> Option.map (fun r ->
+                // Verb-call dispatch and builtin lookups go live (via
+                // `bridge`, the Sidecar's `/lsp-bridge` connection) instead
+                // of the static `graph` - see `SidecarBridge.fs`'s own doc
+                // comment for why. Everything else here is pure AST/local
+                // lookup, unchanged.
+                let computeHover (r: AstQuery.FoundReference) : Async<Hover> =
+                    async {
                         match r.Ref with
                         | AstQuery.RefVerbCall(receiver, StrLit verbName, _) ->
                             match Metadata.Resolver.resolveReceiverInContext graph enclosingObj receiver with
                             | Some startObj ->
-                                match Metadata.Resolver.findCallableVerb graph startObj verbName with
-                                | Some(definer, foundVerb) -> hoverForResolvedVerb verbName definer foundVerb
+                                let! resolved = bridge.ResolveVerbDispatch startObj verbName |> Async.AwaitTask
+
+                                match resolved with
+                                | Some result -> return hoverForResolvedVerbLive verbName result
                                 | None ->
-                                    mkHover (sprintf "**%s** - no callable verb found via dispatch from `#%d`." verbName startObj)
-                            | None -> hoverForUnresolvedVerbCall graph verbName
-                        | AstQuery.RefVerbCall(_, _, _) -> mkHover "Verb call with a computed name - cannot resolve statically."
+                                    return
+                                        mkHover (sprintf "**%s** - no callable verb found via dispatch from `#%d`." verbName startObj)
+                            | None -> return hoverForUnresolvedVerbCall graph verbName
+                        | AstQuery.RefVerbCall(_, _, _) -> return mkHover "Verb call with a computed name - cannot resolve statically."
                         | AstQuery.RefCall(name, _) ->
-                            match Map.tryFind name graph.Builtins with
-                            | Some fn -> mkHover (builtinHoverText fn)
-                            | None -> mkHover (sprintf "**%s(...)** - not a captured builtin." name)
+                            let! builtins = bridge.GetBuiltins() |> Async.AwaitTask
+
+                            match Map.tryFind name builtins with
+                            | Some fn -> return mkHover (builtinHoverText fn)
+                            | None -> return mkHover (sprintf "**%s(...)** - not a registered builtin function." name)
                         | AstQuery.RefProp(ObjLit 0L, StrLit name) ->
                             match Metadata.Resolver.resolveReceiver graph (Prop(ObjLit 0L, StrLit name, 0, 0)) with
-                            | Some objRef -> mkHover (sprintf "**$%s** -> `#%d (%s)`" name objRef (definerName graph objRef))
-                            | None -> mkHover (sprintf "**$%s** - `#0.%s` isn't a registered object property." name name)
-                        | AstQuery.RefProp(_, StrLit name) -> mkHover (sprintf "Property **%s**." name)
-                        | AstQuery.RefProp(_, _) -> mkHover "Computed property access - cannot resolve the property name statically."
+                            | Some objRef -> return mkHover (sprintf "**$%s** -> `#%d (%s)`" name objRef (definerName graph objRef))
+                            | None -> return mkHover (sprintf "**$%s** - `#0.%s` isn't a registered object property." name name)
+                        | AstQuery.RefProp(_, StrLit name) -> return mkHover (sprintf "Property **%s**." name)
+                        | AstQuery.RefProp(_, _) -> return mkHover "Computed property access - cannot resolve the property name statically."
                         | AstQuery.RefIdent name ->
                             match implicitVariableHelp name with
-                            | Some help -> mkHover (sprintf "**%s** (built-in variable)\n\n%s" name help)
-                            | None -> mkHover (sprintf "**%s** - local variable." name))
+                            | Some help -> return mkHover (sprintf "**%s** (built-in variable)\n\n%s" name help)
+                            | None -> return mkHover (sprintf "**%s** - local variable." name)
+                    }
 
-                match fromReference with
-                | Some hover -> return Ok(Some hover)
+                match verb.Ast |> Option.bind (fun stmts -> AstQuery.referenceAt astLine astCol stmts) with
+                | Some r ->
+                    let! hover = computeHover r
+                    return Ok(Some hover)
                 | None ->
                     let fromKeyword =
                         verb.Tokens
@@ -626,8 +650,10 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
 
                     match resolvableVerbCallAt graph enclosingObj stmts lspLine lspCol with
                     | Some(startObj, verbName, _args) ->
-                        match Metadata.Resolver.findCallableVerb graph startObj verbName with
-                        | Some(definer, foundVerb) -> return Ok(Some(U2.C1(U2.C1(locationOfVerb definer foundVerb))))
+                        let! resolved = bridge.ResolveVerbDispatch startObj verbName |> Async.AwaitTask
+
+                        match resolved with
+                        | Some result -> return Ok(Some(U2.C1(U2.C1(locationOfVerbLive result))))
                         | None -> return Ok None
                     | None ->
                         match AstQuery.referenceAt (lspLine + 1) (lspCol + 1) stmts with
@@ -673,8 +699,10 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                         AstQuery.boundVariableNames stmts
                         |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Variable)
 
+                    let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+
                     let builtinItems =
-                        graph.Builtins
+                        liveBuiltins
                         |> Map.toList
                         |> List.map (fun (name, _) -> mkCompletionItem name CompletionItemKind.Function)
 
@@ -715,7 +743,9 @@ type MooLspServer(_client: MooLspClient, graph: Graph) =
                             | AstQuery.RefCall(name, _) -> Some name
                             | _ -> None)
 
-                    match builtinName |> Option.bind (fun name -> Map.tryFind name graph.Builtins) with
+                    let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+
+                    match builtinName |> Option.bind (fun name -> Map.tryFind name liveBuiltins) with
                     | None -> return Ok None
                     | Some fn ->
                         let parameters =

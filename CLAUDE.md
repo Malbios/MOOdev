@@ -152,6 +152,36 @@ describes, just via the native path instead of `do_command`) to break the chicke
 `executables/vcs-commit.sh` (the old `$vcs`-era shell-out script) no longer runs at all - retired
 along with `$vcs` itself.
 
+## LSP service character + listener - the LanguageServer's own live connection
+
+The LSP (`src/LanguageServer`) resolves hover, go-to-definition, and builtin docs live now, via a
+direct connection to the Sidecar's own `/lsp-bridge` endpoint (`src/Sidecar/LspBridge.fs`) - not
+the once-loaded static export tree these used to be read from. This needed a way for the LSP's
+connection to coexist with a browser tab's own Wizard connection without kicking it: ToastStunt
+kicks the currently-connected session whenever the **same player object** logs in a second time
+(confirmed live, repeatedly) - it's per-character, not "only one live connection total." So each
+world gets two small, additive bootstrap objects (no corponym, same as `#0` itself - never appear
+in the exported tree, only exist baked into the db file):
+
+- **A dedicated service character** (`#4` on Survive, `#127` on ToastCore) - `wizard`+`programmer`
+  flags, never used interactively, just a distinct login identity for the LSP's own connection.
+- **A dedicated listener object** (`#5` on Survive, `#127`+`1`=`#128` on ToastCore) bound to its own
+  port (`7780` for Survive, `7781` for ToastCore - see `test.ps1`'s `LspBridgeMooPort`/
+  `LspListenerObj` profile fields) via the `listen()` builtin, with its own copy of the two bootstrap
+  verbs described above:
+  - **`:do_login_command`** - unconditionally `return #<service character>;` (mirrors `#0`'s own
+    `return #3;` exactly, just a different target object).
+  - **`:do_command`** - the identical `;;`-eval shim `#0:do_command` has, needed because this verb
+    dispatches on `tq->handler` (the listener object for that connection), not always `#0` -
+    confirmed live: without this, `Sidecar.MooEval`'s `;;`-eval protocol never fires for a
+    connection through this listener at all, since there's no `<listener>:do_command` to catch it
+    (the server's own "I couldn't understand that." fallback swallows everything silently instead).
+
+`listen()` doesn't persist across a server restart, unlike the bootstrap verbs/objects themselves
+(those live in the db) - `test.ps1` re-binds it every launch, right after the MOO server itself
+comes up, wrapped in a MOO `try`/`except` so re-running against an already-up server (which already
+has it bound) doesn't surface a scary "already listening" error.
+
 ## There is no real login/accounting yet - this is intentional for now
 
 `#0:do_login_command()` is untouched stock `Minimal.db` (`ToastStunt/docs/README.Minimal`) -

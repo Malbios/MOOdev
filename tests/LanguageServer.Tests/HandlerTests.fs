@@ -13,6 +13,7 @@ module LanguageServer.Tests.HandlerTests
 
 open System
 open System.IO
+open System.Threading.Tasks
 open Xunit
 open Ionide.LanguageServerProtocol.Types
 open Language.Ast
@@ -20,6 +21,7 @@ open Metadata.Schema
 open Metadata.Loader
 open LanguageServer.Handlers
 open LanguageServer.AstQuery
+open LanguageServer.SidecarBridge
 open Sidecar.Exporter
 
 // ---------------------------------------------------------------------------
@@ -196,7 +198,49 @@ let private fixtureDir =
     dir
 
 let private graph = lazy (load fixtureDir)
-let private server = lazy (new MooLspServer(new MooLspClient(), graph.Value))
+
+/// Test-only stand-in for the live Sidecar bridge - resolves against this
+/// module's own static fixture graph instead of a real live MOO connection,
+/// since these tests exercise `Handlers.fs`'s hover/definition/completion
+/// logic, not `SidecarBridge`'s own live-query wiring (that's a separate
+/// concern, verified live rather than by a fixture). Reusing
+/// `Metadata.Resolver.findCallableVerb` against the identical fixture graph
+/// the old static-graph-based hover/definition code used to call directly
+/// means every existing assertion below still holds - the *data* comes from
+/// the same place, just routed through the new bridge interface instead of
+/// called in-process. `bareNameFor` mirrors the live protocol's own
+/// convention (`SidecarBridge.fs`'s `DefinerName`/`OwnerName`: a bare name,
+/// or `""` if none - `hoverForResolvedVerbLive` does the "(#N)" wrapping
+/// itself), not `Handlers.fs`'s private `definerName` (which instead
+/// defaults to a pre-formatted `"#N"`).
+let private bareNameFor (objRef: ObjRef) : string =
+    graph.Value.Objects
+    |> Map.tryFind objRef
+    |> Option.bind (fun o -> o.LiveName |> Option.orElse o.Name)
+    |> Option.defaultValue ""
+
+let private fakeBridge: SidecarBridge =
+    { ResolveVerbDispatch =
+        fun startObj verbName ->
+            task {
+                match Metadata.Resolver.findCallableVerb graph.Value startObj verbName with
+                | Some(definer, foundVerb) ->
+                    return
+                        Some
+                            { Definer = definer
+                              DefinerName = bareNameFor definer
+                              Names = String.concat " " foundVerb.Meta.Names
+                              Perms = foundVerb.Meta.Perms
+                              Dobj = foundVerb.Meta.Dobj
+                              Prep = foundVerb.Meta.Prep
+                              Iobj = foundVerb.Meta.Iobj
+                              Owner = foundVerb.Meta.Owner
+                              OwnerName = bareNameFor foundVerb.Meta.Owner }
+                | None -> return None
+            }
+      GetBuiltins = fun () -> task { return graph.Value.Builtins } }
+
+let private server = lazy (new MooLspServer(new MooLspClient(), graph.Value, fakeBridge))
 
 /// Finds `(objRef, VerbNode)` by object number + verb name - simpler than
 /// the old file's path-suffix matching (a workaround for not knowing real

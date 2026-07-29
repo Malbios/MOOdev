@@ -13,14 +13,14 @@ open Metadata.Schema
 open LanguageServer.Handlers
 
 /// Blocks until the client disconnects or the socket closes.
-let run (socket: WebSocket) (graph: Graph) : unit =
+let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge) : unit =
     let handlings =
         Server.defaultRequestHandlings ()
         |> Map.add "moodev/getObjectTree" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetObjectTree p))
         |> Map.add "moodev/getObjectInfo" (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetObjectInfoParams) -> s.GetObjectInfo p))
 
     let clientCreator (_notify, _request) = new MooLspClient()
-    let serverCreator (client: MooLspClient) = new MooLspServer(client, graph)
+    let serverCreator (client: MooLspClient) = new MooLspServer(client, graph, bridge)
     // `JsonRpc(handler)` is StreamJsonRpc's own plain constructor - no
     // extra customization needed for this phase.
     let customizeRpc (handler: IJsonRpcMessageHandler) = new JsonRpc(handler)
