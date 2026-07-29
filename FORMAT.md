@@ -129,6 +129,11 @@ verbs: <verb-file-1.moo> <verb-file-2.moo> ...
 - **Property order**: sorted by name, ordinal case-insensitive. Unlike verbs, property lookup is
   purely by name — sibling order has no runtime effect — so this sort is safe and exists purely for
   stable, readable diffs.
+- **Quoting**: `<name>` is escaped for `\` and `"` (`\\` and `\"` respectively) before being written
+  between the quotes, and unescaped the same way on read — needed because a real property name can
+  itself contain a literal `"` (confirmed live: real ToastCore's `$help` object has a property
+  literally named `"`, the help topic for quoting syntax). The same convention applies to §4's verb
+  name-spec field, for the same reason.
 - **Property values**: rendered with `toliteral()`, read back with `eval("return " + line + ";")`.
   This isn't a new idea — it's the exact round-trip already used by the current `$vcs` IDE property
   verbs (`Survive/VCS/12_ide_set_property.moo`), reused here rather than inventing a new value
@@ -163,6 +168,8 @@ player:tell(this:title());
 .
 ```
 
+- **Quoting**: `<full name-spec, all aliases>` follows §3's same `\`/`"` escaping convention (an
+  alias could in principle contain a literal `"`, same reasoning as a property name).
 - **`verb_code()` flags are pinned, not defaulted.** Call it as `verb_code(obj, idx, 0, 1)` — fully
   parenthesized `0` (off), indent `1` (on) — passed as **explicit literal arguments**. The current
   `$vcs` code passes only 2 of 4 args and silently rides ToastStunt's C-level defaults

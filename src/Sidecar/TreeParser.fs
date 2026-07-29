@@ -34,6 +34,29 @@ let private parseObjRefToken (token: string) : int64 = int64 (token.TrimStart('#
 let private parseParentRef (token: string) : ParentRef =
     if token.StartsWith("$") then ByCorponym(token.Substring(1)) else ByObjnum(parseObjRefToken token)
 
+/// Reads a quoted field (a property name, or a verb's name-spec) starting at
+/// `openQuoteIdx`, unescaping `\\`/`\"` along the way, and returns the
+/// unescaped text plus the index of the closing (unescaped) quote. Needed
+/// because real ToastCore content can have a name that's itself a literal `"`
+/// (e.g. `$help`'s quoting-syntax topic) - see `Exporter.escapeQuotedField`,
+/// which this undoes.
+let private parseQuotedField (s: string) (openQuoteIdx: int) : string * int =
+    let sb = System.Text.StringBuilder()
+    let mutable i = openQuoteIdx + 1
+    let mutable closeIdx = -1
+
+    while closeIdx < 0 do
+        if s.[i] = '\\' then
+            sb.Append(s.[i + 1]) |> ignore
+            i <- i + 2
+        elif s.[i] = '"' then
+            closeIdx <- i
+        else
+            sb.Append(s.[i]) |> ignore
+            i <- i + 1
+
+    sb.ToString(), closeIdx
+
 /// `corponyms.moo`: one `<name> #<objnum>` per line. Split from `parseCorponyms`
 /// below so `History.fs` can parse a blob's content (fetched from git, never
 /// written to disk) with the exact same logic instead of a copy of it.
@@ -56,12 +79,20 @@ let parseVerbFileLines (lines: string[]) : VerbExport =
     let verbLine = lines.[0]
 
     let firstQuote = verbLine.IndexOf('"')
-    let secondQuote = verbLine.IndexOf('"', firstQuote + 1)
-    let names = verbLine.Substring(firstQuote + 1, secondQuote - firstQuote - 1)
+    let names, secondQuote = parseQuotedField verbLine firstQuote
 
     let tail = verbLine.Substring(secondQuote + 1).Trim().Split(' ')
-    // tail = [| dobj; prep; iobj; perms; "#owner" |]
-    let dobj, prep, iobj, perms, owner = tail.[0], tail.[1], tail.[2], tail.[3], parseObjRefToken tail.[4]
+    // tail = [| dobj; <prep - one or more words>; iobj; perms; "#owner" |].
+    // dobj/iobj/perms/owner are always single tokens; prep is the only field
+    // that can itself contain spaces - real MOO prepositions include
+    // multi-word forms like "on top of/on/onto/upon" or "out of/from inside/from"
+    // (ToastStunt's db_verbs.cc prep_list) - so prep is whatever's left
+    // between dobj and the fixed-width iobj/perms/owner suffix.
+    let dobj = tail.[0]
+    let owner = parseObjRefToken tail.[tail.Length - 1]
+    let perms = tail.[tail.Length - 2]
+    let iobj = tail.[tail.Length - 3]
+    let prep = String.concat " " tail.[1 .. tail.Length - 4]
 
     // Code runs from line index 2 (after @verb, @program) up to a line that
     // is exactly "." - safe because MOO code can never contain a bare "."
@@ -133,8 +164,7 @@ let parseObjectMoo (objectMooPath: string) (verbsDir: string) : ParsedObject =
             else
                 let header = lines.[idx] // @property "name" owner=#N perms=XX
                 let firstQuote = header.IndexOf('"')
-                let secondQuote = header.IndexOf('"', firstQuote + 1)
-                let name = header.Substring(firstQuote + 1, secondQuote - firstQuote - 1)
+                let name, secondQuote = parseQuotedField header firstQuote
 
                 let tail = header.Substring(secondQuote + 1).Trim()
                 // tail = "owner=#N perms=XX"

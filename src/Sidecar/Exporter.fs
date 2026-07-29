@@ -245,6 +245,15 @@ let private refText (corponymsByObjnum: Map<int64, string>) (objRef: int64) : st
     | Some name -> "$" + name
     | None -> sprintf "#%d" objRef
 
+/// Escapes `\` and `"` so a name (a property name, or a verb's space-separated
+/// name-spec) can be embedded in a quoted FORMAT.md field even if it contains
+/// one of those characters itself - real ToastCore content does this (e.g.
+/// `$help` has a property literally named `"`, the help topic for quoting
+/// syntax). Paired with `TreeParser`/`TreeFormat`'s own quote-aware field
+/// readers, which undo this same escaping.
+let private escapeQuotedField (s: string) : string =
+    s.Replace("\\", "\\\\").Replace("\"", "\\\"")
+
 let renderCorponymsMoo (corponyms: (string * int64) list) : string =
     corponyms
     |> List.sortWith (fun (a, _) (b, _) -> String.Compare(a, b, StringComparison.OrdinalIgnoreCase))
@@ -284,7 +293,7 @@ let renderObjectMoo
 
     for p in sortedProps do
         lines.Add("")
-        lines.Add(sprintf "@property \"%s\" owner=#%d perms=%s" p.Name p.Owner p.Perms)
+        lines.Add(sprintf "@property \"%s\" owner=#%d perms=%s" (escapeQuotedField p.Name) p.Owner p.Perms)
         lines.Add(p.ValueLiteral)
         lines.Add(".")
 
@@ -295,7 +304,9 @@ let renderVerbFile (selfRefText: string) (v: VerbExport) : string =
     let firstAliasNoStar = v.Names.Split(' ').[0].Replace("*", "")
     let lines = ResizeArray<string>()
 
-    lines.Add(sprintf "@verb %s:\"%s\" %s %s %s %s #%d" selfRefText v.Names v.Dobj v.Prep v.Iobj v.Perms v.Owner)
+    lines.Add(
+        sprintf "@verb %s:\"%s\" %s %s %s %s #%d" selfRefText (escapeQuotedField v.Names) v.Dobj v.Prep v.Iobj v.Perms v.Owner
+    )
     lines.Add(sprintf "@program %s:%s" selfRefText firstAliasNoStar)
 
     for line in v.Code do

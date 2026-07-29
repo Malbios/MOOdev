@@ -166,6 +166,57 @@ let ``parseObjectMoo handles a property value containing embedded newlines`` () 
         Directory.Delete(dir, true)
 
 [<Fact>]
+let ``parseVerbFile round-trips a name-spec containing a literal quote character`` () =
+    let dir = tempDir ()
+
+    try
+        // Real ToastCore content does this - e.g. some cores define a verb
+        // alias that is itself a `"` for quoting-syntax help/commands.
+        let original: VerbExport =
+            { Names = "\"quote"
+              Owner = 3L
+              Perms = "rxd"
+              Dobj = "any"
+              Prep = "any"
+              Iobj = "any"
+              Code = [ "return;" ] }
+
+        let path = Path.Combine(dir, "quote.moo")
+        File.WriteAllText(path, renderVerbFile "$room" original)
+
+        let parsed = parseVerbFile path
+
+        Assert.Equal(original, parsed)
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
+let ``parseObjectMoo round-trips a property named a literal quote character`` () =
+    let dir = tempDir ()
+    let objDir = Path.Combine(dir, "objects", "help")
+    let verbsDir = Path.Combine(objDir, "verbs")
+    Directory.CreateDirectory(verbsDir) |> ignore
+
+    try
+        // Real ToastCore's `$help` object has a property literally named `"`
+        // (the help topic for quoting syntax) - confirmed live against a real
+        // ToastCore export, which is what surfaced this bug.
+        let data: ObjectExport =
+            { Parents = []
+              Owner = 36L
+              Flags = []
+              Properties = [ { Name = "\""; Owner = 36L; Perms = "r"; ValueLiteral = "\"how to quote things\"" } ]
+              Verbs = [] }
+
+        File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo Map.empty "$help" data [])
+
+        let parsed = parseObjectMoo (Path.Combine(objDir, "object.moo")) verbsDir
+
+        Assert.Equal<string list>([ "\"" ], parsed.Properties |> List.map (fun p -> p.Name))
+    finally
+        Directory.Delete(dir, true)
+
+[<Fact>]
 let ``parseObjectMoo reads the raw "object #0" header form (FORMAT.md's system-object exception) as SelfCorponym "0"`` () =
     let dir = tempDir ()
     let objDir = Path.Combine(dir, "objects", "0")
