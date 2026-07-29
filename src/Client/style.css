@@ -564,6 +564,9 @@ html, body {
 }
 
 .inspector-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5em;
   font-size: 1.2em;
   font-weight: bold;
 }
@@ -656,13 +659,17 @@ html, body {
 }
 
 .inspector-recycle-btn {
-  margin-top: 0.6em;
-  color: #f77;
-  border-color: #744;
+  background: none;
+  border: none;
+  color: #a55;
+  cursor: pointer;
+  padding: 0 0.2em;
+  font-size: 0.85em;
+  line-height: 1;
 }
 
 .inspector-recycle-btn:hover {
-  background: #3a1a1a;
+  color: #f77;
 }
 
 .inspector-property-value {

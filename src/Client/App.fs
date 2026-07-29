@@ -949,6 +949,26 @@ let private removeLiveNode (objRef: int64) : unit =
         |> Map.remove objRef
         |> Map.map (fun _ node -> { node with Children = node.Children |> Array.filter ((<>) objRef) })
 
+/// The tree's own `Verbs`/`Properties` arrays (static preload, or the
+/// live-children fetch) are a separate, independently-cached copy from what
+/// the inspector shows - a successful `delete-verb`/`delete-property`
+/// refreshes the inspector fine via `loadInspector`'s own fresh round-trip,
+/// but leaves the tree's cached copy stale (confirmed live: the deleted
+/// verb/property kept showing under the object's tree row until a full
+/// reload). `verbName`/`propName` here is the same identifier string
+/// `openOrSwitchToVerb`/the inspector's own row both already use, so it
+/// matches `TreeVerb.Name`/`TreeProperty.Name` directly with no extra
+/// resolution.
+let private removeTreeVerb (objRef: int64) (verbName: string) : unit =
+    match Map.tryFind objRef treeNodes with
+    | None -> ()
+    | Some node -> treeNodes <- Map.add objRef { node with Verbs = node.Verbs |> Array.filter (fun v -> v.Name <> verbName) } treeNodes
+
+let private removeTreeProperty (objRef: int64) (propName: string) : unit =
+    match Map.tryFind objRef treeNodes with
+    | None -> ()
+    | Some node -> treeNodes <- Map.add objRef { node with Properties = node.Properties |> Array.filter (fun p -> p.Name <> propName) } treeNodes
+
 /// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
 /// expanding #7 once should reveal its children under *every* parent it
 /// appears under (the object graph is a DAG - see the project plan's
@@ -1273,7 +1293,45 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     let header = document.createElement ("div")
     header.classList.add "inspector-header"
-    header.textContent <- (info?name: string)
+
+    let headerName = document.createElement ("span")
+    headerName.textContent <- (info?name: string)
+    header.appendChild headerName |> ignore
+
+    // Recycling is irreversible (the object's data is gone, and its number
+    // gets reused later) - unlike every other mutation in this pane, this
+    // one gets a confirmation dialog first, naming the object and warning
+    // about any children. `recycle()` moves *contents* (`.location`)
+    // elsewhere via an optional `obj:recycle()` hook, and - confirmed
+    // against `ToastStunt/src/objects.cc`'s `bf_recycle` and live-verified
+    // against this fork - also walks the inheritance hierarchy, reparenting
+    // every child onto the recycled object's own parent(s) rather than
+    // leaving them with an invalid `parent()`. Still worth flagging: a
+    // child silently jumping up a level in the hierarchy can be just as
+    // surprising as losing it outright.
+    let recycleBtn = document.createElement ("button")
+    recycleBtn.classList.add "inspector-recycle-btn"
+    recycleBtn.textContent <- "🗑"
+    recycleBtn.title <- "Recycle object"
+
+    recycleBtn.onclick <-
+        fun _ ->
+            let childCount: int = (unbox info?children: obj[]).Length
+            let name: string = info?name
+
+            let warning =
+                if childCount > 0 then
+                    sprintf
+                        "Recycle %s? This object has %d child object(s), which will be reparented onto its own parent. This cannot be undone."
+                        name
+                        childCount
+                else
+                    sprintf "Recycle %s? This cannot be undone." name
+
+            if window.confirm warning then
+                sendAction [ "action" ==> "recycle-object"; "obj" ==> int objRef ]
+
+    header.appendChild recycleBtn |> ignore
     inspectorContentEl.appendChild header |> ignore
 
     let ownerRow = document.createElement ("div")
@@ -1335,41 +1393,6 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         flagsRow.appendChild badge |> ignore
 
     inspectorContentEl.appendChild flagsRow |> ignore
-
-    // Recycling is irreversible (the object's data is gone, and its number
-    // gets reused later) - unlike every other mutation in this pane, this
-    // one gets a confirmation dialog first, naming the object and warning
-    // about any children. `recycle()` moves *contents* (`.location`)
-    // elsewhere via an optional `obj:recycle()` hook, and - confirmed
-    // against `ToastStunt/src/objects.cc`'s `bf_recycle` and live-verified
-    // against this fork - also walks the inheritance hierarchy, reparenting
-    // every child onto the recycled object's own parent(s) rather than
-    // leaving them with an invalid `parent()`. Still worth flagging: a
-    // child silently jumping up a level in the hierarchy can be just as
-    // surprising as losing it outright.
-    let recycleBtn = document.createElement ("button")
-    recycleBtn.classList.add "pane-action-btn"
-    recycleBtn.classList.add "inspector-recycle-btn"
-    recycleBtn.textContent <- "Recycle object"
-
-    recycleBtn.onclick <-
-        fun _ ->
-            let childCount: int = (unbox info?children: obj[]).Length
-            let name: string = info?name
-
-            let warning =
-                if childCount > 0 then
-                    sprintf
-                        "Recycle %s? This object has %d child object(s), which will be reparented onto its own parent. This cannot be undone."
-                        name
-                        childCount
-                else
-                    sprintf "Recycle %s? This cannot be undone." name
-
-            if window.confirm warning then
-                sendAction [ "action" ==> "recycle-object"; "obj" ==> int objRef ]
-
-    inspectorContentEl.appendChild recycleBtn |> ignore
 
     // `?objRef` here is a value freshly parsed from the LSP's JSON response -
     // see the matching comment on `ownerRef` above, same fix, same reason.
@@ -2468,6 +2491,14 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
+                            // The tree's own `Verbs` list is a separate cached
+                            // copy from what the inspector shows - always
+                            // scrub it, not just when this object's inspector
+                            // happens to be the active tab (see
+                            // `removeTreeVerb`'s own comment).
+                            removeTreeVerb objRef verb
+                            renderTree ()
+
                             if openVerbTabs |> List.contains (objRef, verb) then
                                 closeTab (objRef, verb)
 
@@ -2478,16 +2509,20 @@ ws.onmessage <-
                     | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-prop-delete-result") then
-                match headerField "object: #" header with
-                | Some objNum ->
+                match headerField "object: #" header, headerField "name: " header with
+                | Some objNum, Some pname ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            loadInspector objRef None
-                        else
+                            removeTreeProperty objRef pname
+                            renderTree ()
+
+                            if activeTab = InspectorTab objRef then
+                                loadInspector objRef None
+                        elif activeTab = InspectorTab objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
-                | None -> ()
+                | _ -> ()
             elif header.StartsWith("moodev-recycle-result") then
                 match headerField "object: #" header with
                 | Some objNum ->
