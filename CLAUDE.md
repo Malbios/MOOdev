@@ -87,12 +87,13 @@ rich, real ToastCore core. It can run alongside the `Survive` profile with no po
 more named profiles later by extending `test.ps1`'s `$profiles` table - no other script logic is
 per-environment.
 
-## Bootstrap verbs baked into every `Minimal.db`-derived world
+## Bootstrap verbs baked into every world (`Minimal.db` *or* real ToastCore-derived)
 
-Two tiny verbs must exist on `#0` for the sidecar/live IDE to work against a bare `Minimal.db`
-world at all - things ToastCore + `$vcs` used to provide implicitly, now gone along with them.
-Neither appears in `Survive`'s own exported tree (`#0` has no corponym, per moo-vcs-plan.md's
-invariant I3), so they only exist baked into the db file itself:
+Two tiny verbs must exist on `#0` for the sidecar/live IDE to work against **any** world - a bare
+`Minimal.db` world, or a real ToastCore-derived one (e.g. the `ToastCore` `test.ps1` profile) -
+things ToastCore's own core + the old `$vcs` used to provide implicitly for `Survive`'s world, now
+gone along with them. Neither appears in the exported tree (`#0` has no corponym, per
+moo-vcs-plan.md's invariant I3), so they only exist baked into the db file itself:
 
 - **`#0:user_connected`** — `notify()`s `#$#moodev-login-result ref: 0 ok: 1` followed by
   `#$#: 0` on every login. Without it, nothing tells the browser client a login succeeded
@@ -110,6 +111,15 @@ invariant I3), so they only exist baked into the db file itself:
   ```
   (`0` is just a fixed, arbitrary tag - this is the only message of its kind, so there's no need for
   a fresh one per login.)
+  **On a real ToastCore-derived world, `#0:user_connected` already exists** (a real, stock
+  ToastCore verb doing real work - MCP negotiation via `$mcp:(verb)(@args)`, then
+  `user.location:confunc(user)`/`user:confunc()` dispatch). Don't overwrite it - **append** these two
+  `notify()` lines to the end of its existing code (`newcode = {@verb_code(#0, "user_connected", 0,
+  1), "notify(...)", "notify(...)"}`) so both the real connection logic and the login signal work.
+  Confirmed live that the two coexist fine: the real `#$#mcp version: ...` line and our
+  `#$#moodev-login-result`/`#$#: 0` lines are independently recognized by `McpFilter.classifyHashLine`
+  without conflict (the real MCP line doesn't match the `moodev-*` shape it filters for, so it passes
+  straight through as plain terminal text, same as it would with no sidecar involved at all).
 - **`#0:do_command`** — a minimal `;;`-eval shim: recognizes a raw `;;<code>` line and runs it via
   the real `eval()` builtin, letting a plain, unrecognized command fall through afterward (hence
   "I couldn't understand that." on every eval call - harmless noise, not a failure). This is the
@@ -120,9 +130,24 @@ invariant I3), so they only exist baked into the db file itself:
   comes, rather than failing fast.
 
 Both verbs require `#0.wizard = 1` **and** `#0.programmer = 1` (two independent flags - `eval()`
-itself checks `is_programmer()`, not `is_wizard()`) and must be re-applied (via the server's
-`-e`/`--emergency` console, not a live connection - there is no other bootstrapping path before
-these verbs exist) any time a fresh `Minimal.db`-derived world is seeded from scratch.
+itself checks `is_programmer()`, not `is_wizard()`) - not because the *connecting player* needs
+those flags, but because **a verb runs with its owner's permissions by default**, and both verbs are
+owned by `#0` itself. On a bare `Minimal.db` world with no connectable programmer account yet, these
+flags must be set via the server's `-e`/`--emergency` console, since there's no other bootstrapping
+path before the verbs exist.
+
+On a real ToastCore-derived world, there's already a live-connectable `wizard` player, so this can
+be bootstrapped over a normal connection instead - but with one live-confirmed gotcha: **fix `#0`'s
+own flags *before* `#0:do_command` exists, and do the fixing via ToastCore's native single-`;` eval,
+not `;;`.** Once `do_command` exists, the server tries it first for every command line, including
+`;;`-prefixed ones (confirmed in `tasks.cc`) - so if `#0` isn't yet wizard+programmer,
+`do_command`'s own `eval()` call inside itself throws `E_PERM` for literally every subsequent command,
+including the one meant to fix `#0`'s flags. The native single-`;` command (real ToastCore's own
+`#58:eval_cmd_string`, or the server's built-in recognition) doesn't go through the `eval()` builtin
+at all, so it isn't gated the same way - use `; ; #0.wizard = 1; #0.programmer = 1;` (leading `;` for
+the command, a no-op `;` as the code's first statement to defeat ToastCore's auto-`return`-prepend
+quirk for multi-statement bodies - same double-semicolon idiom `Sidecar.MooEval`'s own doc comment
+describes, just via the native path instead of `do_command`) to break the chicken-and-egg lock.
 
 `executables/vcs-commit.sh` (the old `$vcs`-era shell-out script) no longer runs at all - retired
 along with `$vcs` itself.
