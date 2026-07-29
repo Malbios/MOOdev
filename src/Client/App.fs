@@ -1582,6 +1582,16 @@ and private renderTabs () : unit =
         closeBtn.textContent <- "×"
         closeBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; closeTab (objRef, verbName)
 
+        // Middle-click anywhere on the tab closes it, matching VS Code -
+        // `preventDefault` on `mousedown` (not just the `click`/`auxclick`
+        // that would follow) since the middle button's default action,
+        // autoscroll mode, otherwise activates before either fires.
+        tab.onmousedown <-
+            fun ev ->
+                if ev.button = 1.0 then
+                    ev.preventDefault ()
+                    closeTab (objRef, verbName)
+
         tab.appendChild label |> ignore
         tab.appendChild closeBtn |> ignore
         verbTabsEl.appendChild tab |> ignore
@@ -1613,6 +1623,13 @@ and private renderTabs () : unit =
         closeBtn.classList.add "main-tab-close"
         closeBtn.textContent <- "×"
         closeBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; closeInspectorTab objRef
+
+        // Middle-click anywhere on the tab closes it - same as verb tabs above.
+        tab.onmousedown <-
+            fun ev ->
+                if ev.button = 1.0 then
+                    ev.preventDefault ()
+                    closeInspectorTab objRef
 
         tab.appendChild label |> ignore
         tab.appendChild closeBtn |> ignore
