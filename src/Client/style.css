@@ -716,30 +716,16 @@ html, body {
   animation: inspector-prop-flash 1.5s ease-out;
 }
 
-.inspector-add-property {
-  display: flex;
-  gap: 0.4em;
-  margin-top: 0.6em;
-}
-
-.inspector-add-property input {
-  width: auto;
-  flex: 1;
-  min-width: 0;
-}
-
 .inspector-owner-widget {
   display: flex;
   align-items: center;
-  flex: 1;
-  min-width: 0;
+  width: 100%;
 }
 
 .inspector-owner-edit-group {
   display: flex;
   gap: 0.3em;
-  flex: 1;
-  min-width: 0;
+  width: 100%;
 }
 
 .inspector-owner-edit-group input {
@@ -772,7 +758,6 @@ html, body {
 
 .inspector-perms-widget {
   position: relative;
-  flex: none;
 }
 
 #editor-monaco {

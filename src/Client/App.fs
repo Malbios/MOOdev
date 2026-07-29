@@ -1477,16 +1477,18 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         if highlightProp = Some pname then
             highlightRow <- Some tr
 
-    propsSection.appendChild propsTable |> ignore
-
     // Nothing before this could create a *new* property at all - `set-property`
     // (the autosave-on-blur inputs above) only ever assigns to one that
     // already exists (`E_PROPNF` otherwise). This is a separate action
     // (`add-property`), reported back on its own wire header
     // (`moodev-prop-add-result`, handled below) so a successful add can
     // trigger a full inspector refresh (a new row now needs to exist),
-    // unlike a plain value change.
-    let addPropRow = document.createElement ("div")
+    // unlike a plain value change. A real `<tr>` in the same table (not a
+    // separate flex row below it) so its cells line up with the Name/
+    // Owner/Perms/Value columns above - confirmed live this was
+    // misaligned as a standalone row, since an unrelated flex container
+    // has no way to match a `<table>`'s own column widths.
+    let addPropRow = document.createElement ("tr")
     addPropRow.classList.add "inspector-add-property"
 
     let addNameInput = document.createElement ("input") :?> HTMLInputElement
@@ -1642,12 +1644,19 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                       "valueExpr" ==> addValueInput.value
                       "perms" ==> currentPerms () ]
 
-    addPropRow.appendChild addNameInput |> ignore
-    addPropRow.appendChild ownerWidget |> ignore
-    addPropRow.appendChild permsWidget |> ignore
-    addPropRow.appendChild addValueInput |> ignore
-    addPropRow.appendChild addBtn |> ignore
-    propsSection.appendChild addPropRow |> ignore
+    let mkCell (child: HTMLElement) : HTMLElement =
+        let td = document.createElement ("td")
+        td.appendChild child |> ignore
+        td
+
+    addPropRow.appendChild (mkCell addNameInput) |> ignore
+    addPropRow.appendChild (mkCell ownerWidget) |> ignore
+    addPropRow.appendChild (mkCell permsWidget) |> ignore
+    addPropRow.appendChild (mkCell addValueInput) |> ignore
+    addPropRow.appendChild (mkCell addBtn) |> ignore
+    propsTable.appendChild addPropRow |> ignore
+
+    propsSection.appendChild propsTable |> ignore
 
     inspectorContentEl.appendChild propsSection |> ignore
 
