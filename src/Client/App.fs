@@ -51,7 +51,6 @@ let private settingsCloseBtn = document.getElementById ("settings-close")
 let private settingWordWrapEl = document.getElementById ("setting-wordwrap") :?> HTMLInputElement
 let private settingFontSizeEl = document.getElementById ("setting-fontsize") :?> HTMLInputElement
 let private settingMinimapEl = document.getElementById ("setting-minimap") :?> HTMLInputElement
-let private settingHideEmptyLeavesEl = document.getElementById ("setting-hide-empty-leaves") :?> HTMLInputElement
 let private settingForgetLoginBtn = document.getElementById ("setting-forget-login")
 let private settingForgetLoginStatusEl = document.getElementById ("setting-forget-login-status")
 
@@ -71,6 +70,10 @@ let private treeFilterShowPropertiesEl =
     document.getElementById ("tree-filter-show-properties") :?> HTMLInputElement
 
 let private treeFilterShowVerbsEl = document.getElementById ("tree-filter-show-verbs") :?> HTMLInputElement
+
+let private treeFilterHideEmptyLeavesEl =
+    document.getElementById ("tree-filter-hide-empty-leaves") :?> HTMLInputElement
+
 let private treeListEl = document.getElementById ("tree-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
 let private sidebarToggleBtn = document.getElementById ("sidebar-toggle")
@@ -397,9 +400,9 @@ module private Settings =
         settingWordWrapEl.``checked`` <- (wordWrap = "on")
         settingFontSizeEl.value <- string fontSize
         settingMinimapEl.``checked`` <- minimap
-        settingHideEmptyLeavesEl.``checked`` <- hideEmptyLeavesEnabled ()
         treeFilterShowPropertiesEl.``checked`` <- showPropertiesEnabled ()
         treeFilterShowVerbsEl.``checked`` <- showVerbsEnabled ()
+        treeFilterHideEmptyLeavesEl.``checked`` <- hideEmptyLeavesEnabled ()
 
         settingWordWrapEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingFontSizeEl.onchange <- fun _ -> applyAndSaveFromControls ()
@@ -2246,14 +2249,9 @@ treeFilterClearEl.onclick <-
         renderTree ()
         treeFilterEl.focus ()
 
-// Persistence + the checkbox's initial `checked` state are handled inside
+// Persistence + each checkbox's initial `checked` state are handled inside
 // `Settings.init()` already (called earlier, before `renderTree` existed) -
 // this just wires the redraw, now that it's in scope.
-settingHideEmptyLeavesEl.onchange <-
-    fun _ ->
-        Settings.setHideEmptyLeaves settingHideEmptyLeavesEl.``checked``
-        renderTree ()
-
 treeFilterShowPropertiesEl.onchange <-
     fun _ ->
         Settings.setShowProperties treeFilterShowPropertiesEl.``checked``
@@ -2262,6 +2260,11 @@ treeFilterShowPropertiesEl.onchange <-
 treeFilterShowVerbsEl.onchange <-
     fun _ ->
         Settings.setShowVerbs treeFilterShowVerbsEl.``checked``
+        renderTree ()
+
+treeFilterHideEmptyLeavesEl.onchange <-
+    fun _ ->
+        Settings.setHideEmptyLeaves treeFilterHideEmptyLeavesEl.``checked``
         renderTree ()
 
 // Starts out showing its empty-state placeholder - populated for real once
