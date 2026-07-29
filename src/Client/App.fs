@@ -1464,7 +1464,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let deleteTd = document.createElement ("td")
         let deleteBtn = document.createElement ("button")
         deleteBtn.classList.add "inspector-row-delete-btn"
-        deleteBtn.textContent <- "×"
+        deleteBtn.textContent <- "🗑"
         deleteBtn.title <- "Delete property"
         deleteBtn.onclick <- fun _ -> sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
         deleteTd.appendChild deleteBtn |> ignore
@@ -1507,6 +1507,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     let permsToggleBtn = document.createElement ("button")
     permsToggleBtn.classList.add "pane-action-btn"
+    permsToggleBtn.title <- "Permissions"
 
     let permsPopover = document.createElement ("div")
     permsPopover.classList.add "tree-filter-settings-popover"
@@ -1537,7 +1538,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     let refreshPermsLabel () =
         let s = currentPerms ()
-        permsToggleBtn.textContent <- sprintf "Perms: %s" (if s = "" then "(none)" else s)
+        permsToggleBtn.textContent <- (if s = "" then "(none)" else s)
 
     refreshPermsLabel ()
 
@@ -1622,8 +1623,9 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addValueInput.placeholder <- "value (MOO expr)"
 
     let addBtn = document.createElement ("button")
-    addBtn.classList.add "pane-action-btn"
-    addBtn.textContent <- "Add property"
+    addBtn.classList.add "inspector-add-property-btn"
+    addBtn.textContent <- "+"
+    addBtn.title <- "Add property"
 
     addBtn.onclick <-
         fun _ ->
@@ -1697,7 +1699,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let deleteTd = document.createElement ("td")
         let deleteBtn = document.createElement ("button")
         deleteBtn.classList.add "inspector-row-delete-btn"
-        deleteBtn.textContent <- "×"
+        deleteBtn.textContent <- "🗑"
         deleteBtn.title <- "Delete verb"
 
         deleteBtn.onclick <-

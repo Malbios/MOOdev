@@ -646,16 +646,32 @@ html, body {
 .inspector-row-delete-btn {
   background: none;
   border: none;
-  color: #777;
+  color: #a55;
   cursor: pointer;
   padding: 0 0.3em;
   font-family: inherit;
-  font-size: inherit;
+  font-size: 1.1em;
   line-height: 1;
 }
 
 .inspector-row-delete-btn:hover {
   color: #f77;
+}
+
+.inspector-add-property-btn {
+  background: none;
+  border: none;
+  color: #5a5;
+  cursor: pointer;
+  padding: 0 0.4em;
+  font-family: inherit;
+  font-size: 1.3em;
+  font-weight: bold;
+  line-height: 1;
+}
+
+.inspector-add-property-btn:hover {
+  color: #7d7;
 }
 
 .inspector-recycle-btn {
