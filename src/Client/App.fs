@@ -1233,18 +1233,8 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
     inspectorDiagnosticsEl.textContent <- ""
     inspectorContentEl.textContent <- "Loading..."
 
-    // Always live, never `LspClient.getObjectInfoAsync` (the LSP's static,
-    // corponym-only graph) - that graph is loaded once at LSP startup and
-    // never invalidated, so for any corponym'd object it silently keeps
-    // showing whatever the object looked like when the LSP last started,
-    // missing every live edit since (confirmed live: deleting a verb from a
-    // corponym'd object correctly updated the MOO and the sidebar tree, but
-    // this pane kept showing the deleted verb until the LSP itself was
-    // restarted - the actual bug behind "the inspector doesn't update").
-    // Matches the same "live governs, no export needed" call already made
-    // for hover/go-to-definition/builtins earlier in this project - the
-    // inspector is exactly the same kind of "show me current truth" view,
-    // just one that also has to handle mutation, not only reads.
+    // Always live - matches the "live governs, no export needed" rule
+    // already applied to hover/go-to-definition/builtins.
     sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
 
     sendAction [ "action" ==> "get-properties"; "obj" ==> int objRef ]

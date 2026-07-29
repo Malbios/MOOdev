@@ -717,16 +717,13 @@ endif"""
                     ct
     }
 
-/// `get-live-info` replacement for the inspector's fallback when
-/// `moodev/getObjectInfo` (the LSP's static, corponym-only graph) has never
-/// heard of `objRef`. Computes, live, the exact same structural shape the
-/// static path already returns (`Handlers.ObjectInfo`'s JSON contract) so
-/// the client's `renderInspectorStructure` needs zero changes - it's already
-/// loosely typed (`?` dynamic field access) and can't tell the difference.
-/// Owner/parent/child refs each get their own live-name lookup (a live-only
-/// object's ancestors can themselves be either corponym'd or not), same
-/// `formatLiveName` convention used throughout this feature. No verb code,
-/// no property values - same reasoning as `getLiveChildren`.
+/// The inspector's sole source of structural data (owner, flags,
+/// parents/children, verbs, properties) - always live, never a static
+/// export, so it reflects edits made moments ago. Owner/parent/child refs
+/// each get their own live-name lookup (a live-only object's ancestors can
+/// themselves be either corponym'd or not), same `formatLiveName`
+/// convention used throughout this feature. No verb code, no property
+/// values - same reasoning as `getLiveChildren`.
 let getLiveInfo (config: Config) (session: Session) (webSocket: WebSocket) (objRef: int64) (ct: CancellationToken) : Task<unit> =
     task {
         let evalRunner = evalOnSession session

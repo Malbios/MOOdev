@@ -175,19 +175,6 @@ let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * TreeVerb
                          (o?properties: obj[]) |> Array.map (fun p -> { Name = p?name; Perms = p?perms }: TreeProperty)))
     }
 
-/// Custom method - the object inspector's structural data (owner, flags,
-/// parents/children, verbs, properties) for `objRef` (matches
-/// `Handlers.MooLspServer.GetObjectInfo`). Kept as a loosely-typed `obj`
-/// (dynamic `?` field access at the render site in `App.fs`), matching this
-/// file's existing style for `getObjectTreeAsync` rather than
-/// introducing heavier typed modeling just for this one screen. `None` if
-/// `objRef` isn't in the loaded graph at all.
-let getObjectInfoAsync (objRef: int64) : Async<obj option> =
-    async {
-        let! result = requestAsync "moodev/getObjectInfo" (createObj [ "objRef" ==> objRef ])
-        return if isNullOrUndefined result then None else Some result
-    }
-
 /// Wires hover, go-to-definition, completions, signature help,
 /// find-references, and the custom `moodev-verb://` URI opener into the
 /// given Monaco instance for the "moocode" language.

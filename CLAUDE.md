@@ -11,6 +11,14 @@ repo, not here. This repo holds the sidecar, browser client, and (later) the LSP
 parser, and `moo-eval` — the tooling that lets you develop against the MOO without needing raw
 telnet or the in-world editor.
 
+## Development conventions
+
+- **Remove dead code and dead tests.** When a change makes a function, method, or test
+  unreachable, delete it in that same change rather than leaving it for later cleanup.
+- **Write unit tests where possible** for new logic, not just live/manual verification.
+- **Prefer self-documenting code over lengthy comments.** A well-named function/variable
+  should carry the "what"; comments are for the non-obvious "why" only, and should stay short.
+
 **MOOcode reference material should be verified against the live server or the C source in
 `C:\dev\moo-code\ToastStunt\src\` rather than trusted from training data** — the reference doc explains
 why (MOO documentation is sparse and much of what's findable describes LambdaMOO 1.8.1, not

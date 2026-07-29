@@ -17,7 +17,6 @@ let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge)
     let handlings =
         Server.defaultRequestHandlings ()
         |> Map.add "moodev/getObjectTree" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetObjectTree p))
-        |> Map.add "moodev/getObjectInfo" (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetObjectInfoParams) -> s.GetObjectInfo p))
 
     let clientCreator (_notify, _request) = new MooLspClient()
     let serverCreator (client: MooLspClient) = new MooLspServer(client, graph, bridge)

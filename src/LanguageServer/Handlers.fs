@@ -28,11 +28,7 @@ open Metadata.Schema
 /// under more than one parent; the client rebuilds parent-to-children
 /// adjacency itself from these edges rather than this server picking one
 /// parent arbitrarily.
-/// Structural summary of one verb for the tree's compact perms/args
-/// suffix - a bulk/cheap flat-export shape, deliberately kept separate
-/// from `ObjectInfoVerb` even though the fields currently overlap exactly
-/// (`GetObjectTree` and `GetObjectInfo` are different contracts that
-/// shouldn't become coupled just because they happen to agree today).
+/// Structural summary of one verb for the tree's compact perms/args suffix.
 type ObjectTreeVerb =
     { Name: string
       Perms: string
@@ -40,9 +36,7 @@ type ObjectTreeVerb =
       Prep: string
       Iobj: string }
 
-/// Same idea as `ObjectTreeVerb`, for properties - no `Owner`, unlike
-/// `ObjectInfoProperty`, since the tree's compact suffix only ever shows
-/// perms.
+/// Same idea as `ObjectTreeVerb`, for properties.
 type ObjectTreeProperty = { Name: string; Perms: string }
 
 type ObjectTreeNode =
@@ -52,45 +46,6 @@ type ObjectTreeNode =
       Children: ObjRef[]
       Verbs: ObjectTreeVerb[]
       Properties: ObjectTreeProperty[] }
-
-type GetObjectInfoParams = { ObjRef: ObjRef }
-
-/// A parent/child/owner reference in `ObjectInfo`, pre-formatted with the
-/// same display label `ListObjects` uses - the client renders these as
-/// clickable links to jump to that object's own inspector without doing
-/// any of its own name lookup.
-type ObjectInfoRef = { ObjRef: ObjRef; Name: string }
-type ObjectInfoVerb = { Name: string; Perms: string; Dobj: string; Prep: string; Iobj: string }
-
-/// Structural only (name/owner/perms) - like `ObjectInfoVerb`, deliberately
-/// missing the property's current *value* (that's `$vcs:ide_get_properties`'s
-/// job, a separate live round-trip - see the plan's "client" section for why
-/// values aren't baked into this graph-derived response).
-type ObjectInfoProperty = { Name: string; Owner: string; Perms: string }
-
-type ObjectInfo =
-    { ObjRef: ObjRef
-      Name: string
-      /// `None` only if `metadata.json` predates `export_metadata`'s owner
-      /// field (see `Schema.fs`'s `ObjectNode.Owner`) - in practice always
-      /// `Some`. Carries the raw `ObjRef` (not just a formatted label) so
-      /// the client can render it as a clickable link to the owner's own
-      /// inspector, same as `Parents`/`Children`.
-      Owner: ObjectInfoRef option
-      Player: bool
-      Programmer: bool
-      Wizard: bool
-      Read: bool
-      Write: bool
-      Fertile: bool
-      Anonymous: bool
-      Parents: ObjectInfoRef[]
-      Children: ObjectInfoRef[]
-      Verbs: ObjectInfoVerb[]
-      Properties: ObjectInfoProperty[]
-      /// `[]` for no aliases, or for a tree exported before this field
-      /// existed - see `Schema.ObjectNode.Aliases`.
-      Aliases: string[] }
 
 /// The browser client never has a real filesystem path - it only ever
 /// knows "object # + verb name" (the same pair `$vcs:ide_fetch`/`ide_save`
@@ -276,11 +231,8 @@ let private corifiedNamesOf (graph: Graph) : Map<ObjRef, string> =
 /// Full display label for an object number - the real (unsanitized) live
 /// name (falling back to `lookups.toml`'s sanitized name, then bare `#N`),
 /// the object number, and its corified `$name` suffix if `#0` registers
-/// one, e.g. "Generic Room (#3) [$room]". Shared by `ListObjects` (the
-/// picker) and `GetObjectInfo` (the inspector - parents/children/owner all
-/// need the identical label a picker row would show). Falls back to bare
-/// `#N` for a ref with no `ObjectNode` at all (e.g. an owner outside the
-/// loaded graph).
+/// one, e.g. "Generic Room (#3) [$room]". Falls back to bare `#N` for a ref
+/// with no `ObjectNode` at all (e.g. an owner outside the loaded graph).
 let private displayNameFor (graph: Graph) (objRef: ObjRef) : string =
     match Map.tryFind objRef graph.Objects with
     | None -> sprintf "#%d" objRef
@@ -870,62 +822,4 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                 |> Array.ofSeq
 
             return Ok nodes
-        }
-
-    /// Custom method (`moodev/getObjectInfo`, `{objRef}`) - the object
-    /// inspector's structural data: owner, permission flags, parents/
-    /// children (as clickable-ready `ObjectInfoRef`s), verbs (with perm
-    /// bits), and properties (structural only - name/owner/perms, not the
-    /// live value; that's `$vcs:ide_get_properties`'s job). `Ok None` for
-    /// an object not in the graph at all - not an error, since the client
-    /// may ask about any `#N` it has seen referenced (e.g. an owner),
-    /// including ones this exporter never captured.
-    ///
-    /// `Flags`/`Owner` being `None` on `ObjectNode` (metadata.json predates
-    /// `export_metadata`'s extended fields - see `Schema.fs`) degrades to
-    /// all-false flags and an `Owner` label of "?" rather than failing the
-    /// whole response, matching this graph's existing graceful-degradation
-    /// convention for `LiveName`.
-    member _.GetObjectInfo(p: GetObjectInfoParams) : Async<Result<ObjectInfo option, JsonRpc.Error>> =
-        async {
-            match Map.tryFind p.ObjRef graph.Objects with
-            | None -> return Ok None
-            | Some o ->
-                let refFor (r: ObjRef) : ObjectInfoRef = { ObjRef = r; Name = displayNameFor graph r }
-
-                let verbs =
-                    o.Verbs
-                    |> List.map (fun v ->
-                        { Name = v.Meta.Names |> List.tryHead |> Option.defaultValue ""
-                          Perms = v.Meta.Perms
-                          Dobj = v.Meta.Dobj
-                          Prep = v.Meta.Prep
-                          Iobj = v.Meta.Iobj }: ObjectInfoVerb)
-                    |> Array.ofList
-
-                let properties =
-                    o.Properties
-                    |> List.map (fun pr -> { Name = pr.Name; Owner = displayNameFor graph pr.Owner; Perms = pr.Perms })
-                    |> Array.ofList
-
-                let flag (f: ObjectFlags -> bool) = o.Flags |> Option.map f |> Option.defaultValue false
-
-                let info: ObjectInfo =
-                    { ObjRef = o.Num
-                      Name = displayNameFor graph o.Num
-                      Owner = o.Owner |> Option.map refFor
-                      Player = flag (fun f -> f.Player)
-                      Programmer = flag (fun f -> f.Programmer)
-                      Wizard = flag (fun f -> f.Wizard)
-                      Read = flag (fun f -> f.Read)
-                      Write = flag (fun f -> f.Write)
-                      Fertile = flag (fun f -> f.Fertile)
-                      Anonymous = flag (fun f -> f.Anonymous)
-                      Parents = o.Parents |> List.map refFor |> Array.ofList
-                      Children = o.Children |> List.map refFor |> Array.ofList
-                      Verbs = verbs
-                      Properties = properties
-                      Aliases = o.Aliases |> Array.ofList }
-
-                return Ok(Some info)
         }
