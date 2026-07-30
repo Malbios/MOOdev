@@ -516,6 +516,21 @@ let mutable private openVerbTabs: (int64 * string) list = []
 /// client-side - see `loadInspector`'s own comment for why.
 let mutable private openInspectorTabs: int64 list = []
 
+/// Most-recently-active-first history of tabs actually switched away from
+/// (across every kind - Game/History/Verb/Inspector), so closing a tab can
+/// fall back to whatever was genuinely active right before it, not just
+/// "the next one over" in that tab's own kind-specific list. Pushed to by
+/// `switchToTab` itself; `closeTab`/`closeInspectorTab` consume it via
+/// `isTabStillOpen` when picking a fallback.
+let mutable private tabHistory: OpenTab list = []
+
+let private isTabStillOpen (tab: OpenTab) : bool =
+    match tab with
+    | GameTab
+    | HistoryTab -> true
+    | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
+    | InspectorTab o -> openInspectorTabs |> List.contains o
+
 /// Each currently-rendered inspector's property `<input>` elements, by
 /// property name - populated by `renderInspectorStructure`, then read both
 /// by the `moodev-prop-content` handler (to fill in the live values once
@@ -1075,6 +1090,7 @@ type private TreeRow =
 let rec private switchToTab (tab: OpenTab) : unit =
     if tab <> activeTab then
         cacheCurrentEditorContent ()
+        tabHistory <- activeTab :: (tabHistory |> List.filter (fun t -> t <> activeTab))
         activeTab <- tab
         showingVerbHistory <- false
 
@@ -1105,46 +1121,38 @@ and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
     else
         fetchVerb objRef verbName
 
-/// Closes an open verb tab. If it was the active one, falls back to the
-/// tab that was to its left (or the new first tab, or Game if none remain).
-/// See `saveIfDirty`'s comment for why this never risks losing unsaved
-/// edits without a confirmation prompt.
+/// Closes an open verb tab. If it was the active one, falls back to
+/// whatever tab was genuinely active right before it (`tabHistory`,
+/// skipping anything no longer open), or Game if history has nothing
+/// valid left. See `saveIfDirty`'s comment for why this never risks
+/// losing unsaved edits without a confirmation prompt.
 and private closeTab (objRef: int64, verbName: string) : unit =
     let wasActive = activeTab = VerbTab(objRef, verbName)
-    let idx = openVerbTabs |> List.findIndex (fun t -> t = (objRef, verbName))
     openVerbTabs <- openVerbTabs |> List.filter (fun t -> t <> (objRef, verbName))
-    tabContent <- Map.remove (objRef, verbName) tabContent
     if previewTab = Some(objRef, verbName) then previewTab <- None
 
     if wasActive then
-        activeTab <-
-            match openVerbTabs with
-            | [] -> GameTab
-            | tabs -> VerbTab tabs.[max 0 (min (idx - 1) (tabs.Length - 1))]
-
-        showingVerbHistory <- false
-
-        match activeTab with
-        | VerbTab(o, v) ->
-            editor.setValue (Map.find (o, v) tabContent)
-            setDirty false
-        | GameTab
-        | InspectorTab _
-        | HistoryTab -> ()
-
-        showPaneFor activeTab
-
-    renderTabs ()
-    renderTree ()
+        // `switchToTab` below still sees `activeTab = VerbTab(objRef,
+        // verbName)` and will re-cache its editor content into
+        // `tabContent` as part of the switch - harmless, since the removal
+        // right after discards it again, but it must come *after* the
+        // switch, not before, or `switchToTab` would resurrect the entry
+        // this is trying to delete.
+        let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
+        switchToTab fallback
+        tabContent <- Map.remove (objRef, verbName) tabContent
+    else
+        tabContent <- Map.remove (objRef, verbName) tabContent
+        renderTabs ()
+        renderTree ()
 
 /// Closes an open inspector tab. If it was the active one, falls back the
-/// same way `closeTab` does for verb tabs (the tab to its left, or the new
-/// first tab, or Game if none remain) - and, per `loadInspector`'s "always
-/// fresh" rule, re-loads whichever inspector tab it falls back to rather
-/// than showing whatever that tab last happened to render.
+/// same way `closeTab` does (`tabHistory`, or Game if nothing valid is
+/// left) - and, per `loadInspector`'s "always fresh" rule, re-loads
+/// whichever inspector tab it falls back to rather than showing whatever
+/// that tab last happened to render.
 and private closeInspectorTab (objRef: int64) : unit =
     let wasActive = activeTab = InspectorTab objRef
-    let idx = openInspectorTabs |> List.findIndex (fun r -> r = objRef)
     openInspectorTabs <- openInspectorTabs |> List.filter (fun r -> r <> objRef)
     if previewInspectorTab = Some objRef then previewInspectorTab <- None
 
@@ -1156,21 +1164,17 @@ and private closeInspectorTab (objRef: int64) : unit =
         selectedObjRef <- None
 
     if wasActive then
-        activeTab <-
-            match openInspectorTabs with
-            | [] -> GameTab
-            | refs -> InspectorTab refs.[max 0 (min (idx - 1) (refs.Length - 1))]
+        let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
+        switchToTab fallback
 
-        showPaneFor activeTab
-
-        match activeTab with
+        match fallback with
         | InspectorTab o -> loadInspector o None
         | GameTab
         | VerbTab _
         | HistoryTab -> ()
-
-    renderTabs ()
-    renderTree ()
+    else
+        renderTabs ()
+        renderTree ()
 
 /// Opens `objRef`'s inspector - switches instantly if it's already an open
 /// tab (adding it first if not), then *always* kicks off a fresh load
@@ -1270,22 +1274,151 @@ and private mkQuickFillInput
 
     group, input
 
-/// A small "+" trigger that reveals an already-built (currently hidden)
-/// element on click, then hides itself - the same reveal-on-click
-/// convention the header's owner/rename pencils use. `target` should
+/// A permissions popover widget - a toggle button showing the current
+/// letters (or "(none)"), and a popover with one tooltipped checkbox per
+/// `(label, letter, tooltip)` - the shared shape behind every permission
+/// editor in this pane (add-property, add-verb, and the per-field editors
+/// on existing rows). Returns the widget, the individual (letter,
+/// checkbox) pairs (so a caller can hook into one specifically - e.g. the
+/// property add-row's Chown-hides-owner wiring - without losing that), and
+/// the aggregate `currentPerms` reader. `onChange` fires (after the
+/// widget's own label refresh) on every checkbox change - a no-op `fun ()
+/// -> ()` for callers that don't need anything extra.
+and private mkPermsWidget
+    (options: (string * string * string) list)
+    (initialPerms: string)
+    (onChange: unit -> unit)
+    : HTMLElement * (string * HTMLInputElement) list * (unit -> string) =
+    let widget = document.createElement ("div")
+    widget.classList.add "inspector-perms-widget"
+
+    let toggleBtn = document.createElement ("button")
+    toggleBtn.classList.add "pane-action-btn"
+    toggleBtn.title <- "Permissions"
+
+    let popover = document.createElement ("div")
+    popover.classList.add "tree-filter-settings-popover"
+    popover.onclick <- fun ev -> ev.stopPropagation () |> ignore
+
+    let checkboxes =
+        options
+        |> List.map (fun (label, letter, tooltip) ->
+            let row = document.createElement ("label")
+            row.classList.add "settings-row"
+            row.title <- tooltip
+
+            let cb = document.createElement ("input") :?> HTMLInputElement
+            cb.setAttribute ("type", "checkbox")
+            cb.``checked`` <- initialPerms.Contains(letter)
+
+            row.appendChild cb |> ignore
+            row.appendChild (document.createTextNode label) |> ignore
+            popover.appendChild row |> ignore
+            letter, cb)
+
+    let currentPerms () : string =
+        checkboxes |> List.filter (fun (_, cb) -> cb.``checked``) |> List.map fst |> String.concat ""
+
+    let refreshLabel () =
+        let s = currentPerms ()
+        toggleBtn.textContent <- (if s = "" then "(none)" else s)
+
+    refreshLabel ()
+
+    toggleBtn.onclick <-
+        fun ev ->
+            ev.stopPropagation () |> ignore
+            popover.classList.toggle "visible" |> ignore
+
+    for _, cb in checkboxes do
+        cb.onchange <-
+            fun _ ->
+                refreshLabel ()
+                onChange ()
+
+    widget.appendChild toggleBtn |> ignore
+    widget.appendChild popover |> ignore
+    widget, checkboxes, currentPerms
+
+/// A table cell showing a static text label with a trailing pencil;
+/// clicking it hides the label and reveals `widget` (already built by the
+/// caller - a text input, an owner picker, a perms popover, an arg-spec
+/// select, whatever fits the field) plus a confirm button that calls
+/// `onConfirm`. Hides the label while editing by construction (the current
+/// value is already shown pre-filled inside `widget`, so showing both
+/// would just be a redundant, possibly-stale-looking duplicate).
+and private mkEditableCell (labelText: string) (widget: HTMLElement) (onConfirm: unit -> unit) : HTMLElement =
+    let td = document.createElement ("td")
+
+    let labelSpan = document.createElement ("span")
+    labelSpan.textContent <- labelText
+
+    let editGroup = document.createElement ("span")
+    editGroup.classList.add "inspector-inline-edit-group"
+    editGroup.setAttribute ("style", "display:none")
+    // A verb row's own `tr.onclick` opens the verb editor on any click
+    // anywhere in the row - stopping propagation only once the widget is
+    // actually revealed means the pencil/input/confirm stay safe to click
+    // without also opening the editor, while a plain click on the label
+    // (not yet editing) still bubbles up as before.
+    editGroup.onclick <- fun ev -> ev.stopPropagation ()
+
+    let confirmBtn = document.createElement ("button")
+    confirmBtn.classList.add "inspector-add-property-btn"
+    confirmBtn.textContent <- "✓"
+    confirmBtn.title <- "Confirm"
+    confirmBtn.onclick <- fun _ -> onConfirm ()
+
+    editGroup.appendChild widget |> ignore
+    editGroup.appendChild confirmBtn |> ignore
+
+    let editBtn = document.createElement ("button")
+    editBtn.classList.add "inspector-owner-edit-btn"
+    editBtn.textContent <- "✎"
+    editBtn.title <- "Edit"
+
+    editBtn.onclick <-
+        fun ev ->
+            ev.stopPropagation ()
+            labelSpan.setAttribute ("style", "display:none")
+            editBtn.setAttribute ("style", "display:none")
+            editGroup.setAttribute ("style", "")
+
+    td.appendChild labelSpan |> ignore
+    td.appendChild editBtn |> ignore
+    td.appendChild editGroup |> ignore
+    td
+
+/// A "+"/"−" toggle that shows/hides every element in `targets` together.
+/// Green "+" when collapsed, dark-red "−" (`.inspector-remove-trigger`)
+/// once expanded, flipping back on a second click. `targets` should
 /// already be `display:none`; this only wires the toggle, it doesn't set
 /// the initial hidden state (callers do that themselves, since some also
-/// need to seed default field values first).
-and private mkAddTrigger (label: string) (target: HTMLElement) : HTMLElement =
+/// need to seed default field values first, and Properties/Verbs only
+/// includes their header row here when the table starts genuinely empty).
+and private mkAddTrigger (label: string) (targets: HTMLElement list) : HTMLElement =
     let triggerBtn = document.createElement ("button")
     triggerBtn.classList.add "inspector-add-property-btn"
     triggerBtn.textContent <- "+"
     triggerBtn.title <- label
 
+    let mutable expanded = false
+
     triggerBtn.onclick <-
         fun _ ->
-            triggerBtn.setAttribute ("style", "display:none")
-            target.setAttribute ("style", "")
+            expanded <- not expanded
+            let displayStyle = if expanded then "" else "display:none"
+            for target in targets do
+                target.setAttribute ("style", displayStyle)
+
+            triggerBtn.textContent <- (if expanded then "−" else "+")
+
+            if expanded then
+                triggerBtn.classList.add "inspector-remove-trigger"
+            else
+                triggerBtn.classList.remove "inspector-remove-trigger"
+
+            triggerBtn.title <- (if expanded then "Cancel" else label)
 
     triggerBtn
 
@@ -1335,7 +1468,10 @@ and private renderObjRefList
             removeBtn.classList.add "inspector-row-delete-btn"
             removeBtn.textContent <- "🗑"
             removeBtn.title <- sprintf "Remove %s as a parent" name
-            removeBtn.onclick <- fun _ -> remove refObj
+            removeBtn.onclick <-
+                fun _ ->
+                    if window.confirm (sprintf "Remove %s as a parent?" name) then
+                        remove refObj
             item.appendChild removeBtn |> ignore
         | None -> ()
 
@@ -1365,7 +1501,7 @@ and private renderObjRefList
         addItem.appendChild addBtn |> ignore
         list.appendChild addItem |> ignore
 
-        titleRow.appendChild (mkAddTrigger (sprintf "Add %s" label) addItem) |> ignore
+        titleRow.appendChild (mkAddTrigger (sprintf "Add %s" label) [ addItem ]) |> ignore
     | None -> ()
 
     section.appendChild list |> ignore
@@ -1546,7 +1682,17 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
         editGroup.appendChild ownerConfirmBtn |> ignore
 
-        editBtn.onclick <- fun _ -> editGroup.setAttribute ("style", "")
+        // The current value is already shown pre-filled in the editor
+        // (`ownerEditInput`'s initial value above), so the static link
+        // would just be a redundant, possibly-stale-looking duplicate
+        // while editing - hide it until the change is done (a full
+        // `loadInspector` refresh, like every other action here, is what
+        // brings it back).
+        editBtn.onclick <-
+            fun _ ->
+                link.setAttribute ("style", "display:none")
+                editBtn.setAttribute ("style", "display:none")
+                editGroup.setAttribute ("style", "")
 
         ownerRow.appendChild editBtn |> ignore
         ownerRow.appendChild editGroup |> ignore
@@ -1638,18 +1784,85 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         th.textContent <- h
         propsHeaderRow.appendChild th |> ignore
 
+    // Column labels are noise for an empty table - hidden until either a
+    // real row exists or the add-trigger reveals them alongside the add
+    // row (see the trigger wiring below).
+    if props.Length = 0 then
+        propsHeaderRow.setAttribute ("style", "display:none")
+
     propsTable.appendChild propsHeaderRow |> ignore
 
     let mutable highlightRow: HTMLElement option = None
 
     for p in props do
         let pname: string = p?name
+        let pPerms: string = p?perms
+        let pOwnerRef: int64 = int64 (p?ownerRef: float)
         let tr = document.createElement ("tr")
 
-        for cellText in [ p?name; p?owner; p?perms ] do
-            let td = document.createElement ("td")
-            td.textContent <- (cellText: string)
-            tr.appendChild td |> ignore
+        // Every field below resubmits the *other* two unchanged alongside
+        // whichever one this particular pencil is for - `set_property_info`
+        // always wants all three together (confirmed against
+        // `ToastStunt/src/property.cc`'s `bf_set_prop_info`), so there's no
+        // way to change just one via the builtin itself.
+        let nameInput = document.createElement ("input") :?> HTMLInputElement
+        nameInput.classList.add "inspector-property-value"
+        nameInput.value <- pname
+
+        let nameTd =
+            mkEditableCell pname nameInput (fun () ->
+                let newName = nameInput.value.Trim()
+
+                if newName <> "" then
+                    sendAction
+                        [ "action" ==> "set-property-info"
+                          "obj" ==> int objRef
+                          "name" ==> pname
+                          "newName" ==> newName
+                          "ownerExpr" ==> sprintf "#%d" pOwnerRef
+                          "perms" ==> pPerms ])
+
+        tr.appendChild nameTd |> ignore
+
+        let pOwnerGroup, pOwnerInput =
+            mkQuickFillInput "player, #5, or $room" (sprintf "#%d" pOwnerRef) ownerQuickFills false
+
+        let ownerTd =
+            mkEditableCell (p?owner: string) pOwnerGroup (fun () ->
+                let expr = pOwnerInput.value.Trim()
+
+                if expr <> "" then
+                    sendAction
+                        [ "action" ==> "set-property-info"
+                          "obj" ==> int objRef
+                          "name" ==> pname
+                          "newName" ==> pname
+                          "ownerExpr" ==> expr
+                          "perms" ==> pPerms ])
+
+        tr.appendChild ownerTd |> ignore
+
+        let pPermsWidget, _, pCurrentPerms =
+            mkPermsWidget
+                [ "Read", "r", "Other players' code can read this property's value."
+                  "Write", "w", "Other players' code can set this property's value."
+                  "Chown",
+                  "c",
+                  "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick." ]
+                pPerms
+                (fun () -> ())
+
+        let permsTd =
+            mkEditableCell pPerms pPermsWidget (fun () ->
+                sendAction
+                    [ "action" ==> "set-property-info"
+                      "obj" ==> int objRef
+                      "name" ==> pname
+                      "newName" ==> pname
+                      "ownerExpr" ==> sprintf "#%d" pOwnerRef
+                      "perms" ==> pCurrentPerms () ])
+
+        tr.appendChild permsTd |> ignore
 
         let valueTd = document.createElement ("td")
         let input = document.createElement ("input") :?> HTMLInputElement
@@ -1690,14 +1903,15 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         valueTd.appendChild preview |> ignore
         tr.appendChild valueTd |> ignore
 
-        // No confirmation - unlike recycling an object, a deleted property
-        // is trivial to recreate by hand if this was a mistake.
         let deleteTd = document.createElement ("td")
         let deleteBtn = document.createElement ("button")
         deleteBtn.classList.add "inspector-row-delete-btn"
         deleteBtn.textContent <- "🗑"
         deleteBtn.title <- "Delete property"
-        deleteBtn.onclick <- fun _ -> sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
+        deleteBtn.onclick <-
+            fun _ ->
+                if window.confirm (sprintf "Delete property \"%s\"?" pname) then
+                    sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
         deleteTd.appendChild deleteBtn |> ignore
         tr.appendChild deleteTd |> ignore
 
@@ -1728,64 +1942,25 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     // Properties only ever have three permission bits - r/w/c (Read/Write/
     // Chown) - confirmed against `ToastStunt/src/property.cc`'s
-    // `validate_prop_info`; verbs' x/d don't apply here. A dropdown of
-    // checkboxes behind a toggle button, same popover pattern the sidebar's
-    // "Tree display options" button already uses. Defined before the owner
-    // widget below (even though it's appended after it) because the owner
-    // widget's own visibility depends on `chownCb`'s state.
-    let permsWidget = document.createElement ("div")
-    permsWidget.classList.add "inspector-perms-widget"
+    // `validate_prop_info`; verbs' x/d don't apply here. Defined before the
+    // owner widget below (even though it's appended after it) because the
+    // owner widget's own visibility depends on `chownCb`'s state -
+    // `onPermsChange` is a forwarding shim wired up to
+    // `refreshOwnerWidgetVisibility` once that's defined further down,
+    // since it doesn't exist yet at this point.
+    let mutable onPermsChange: unit -> unit = fun () -> ()
 
-    let permsToggleBtn = document.createElement ("button")
-    permsToggleBtn.classList.add "pane-action-btn"
-    permsToggleBtn.title <- "Permissions"
+    let permsWidget, propPermCheckboxes, currentPerms =
+        mkPermsWidget
+            [ "Read", "r", "Other players' code can read this property's value."
+              "Write", "w", "Other players' code can set this property's value."
+              "Chown",
+              "c",
+              "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick." ]
+            "rc"
+            (fun () -> onPermsChange ())
 
-    let permsPopover = document.createElement ("div")
-    permsPopover.classList.add "tree-filter-settings-popover"
-    permsPopover.onclick <- fun ev -> ev.stopPropagation () |> ignore
-
-    let mkPermCheckbox (label: string) (tooltip: string) (isChecked: bool) : HTMLInputElement =
-        let row = document.createElement ("label")
-        row.classList.add "settings-row"
-        row.title <- tooltip
-
-        let cb = document.createElement ("input") :?> HTMLInputElement
-        cb.setAttribute ("type", "checkbox")
-        cb.``checked`` <- isChecked
-
-        row.appendChild cb |> ignore
-        row.appendChild (document.createTextNode label) |> ignore
-        permsPopover.appendChild row |> ignore
-        cb
-
-    let readCb = mkPermCheckbox "Read" "Other players' code can read this property's value." true
-    let writeCb = mkPermCheckbox "Write" "Other players' code can set this property's value." false
-
-    let chownCb =
-        mkPermCheckbox
-            "Chown"
-            "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick."
-            true
-
-    let currentPerms () : string =
-        [ readCb, "r"; writeCb, "w"; chownCb, "c" ]
-        |> List.filter (fun (cb, _) -> cb.``checked``)
-        |> List.map snd
-        |> String.concat ""
-
-    let refreshPermsLabel () =
-        let s = currentPerms ()
-        permsToggleBtn.textContent <- (if s = "" then "(none)" else s)
-
-    refreshPermsLabel ()
-
-    permsToggleBtn.onclick <-
-        fun ev ->
-            ev.stopPropagation () |> ignore
-            permsPopover.classList.toggle "visible" |> ignore
-
-    permsWidget.appendChild permsToggleBtn |> ignore
-    permsWidget.appendChild permsPopover |> ignore
+    let chownCb = propPermCheckboxes |> List.find (fun (letter, _) -> letter = "c") |> snd
 
     // Owner is any MOO expression resolving to a valid object - same
     // convention as the value input below, and as the "New Object"
@@ -1827,12 +2002,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             ownerAutoLabel.setAttribute ("style", "display:none")
 
     refreshOwnerWidgetVisibility ()
-
-    for cb in [ readCb; writeCb; chownCb ] do
-        cb.onchange <-
-            fun _ ->
-                refreshPermsLabel ()
-                refreshOwnerWidgetVisibility ()
+    onPermsChange <- refreshOwnerWidgetVisibility
 
     let addValueInput = document.createElement ("input") :?> HTMLInputElement
     addValueInput.classList.add "inspector-property-value"
@@ -1875,10 +2045,12 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addPropRow.setAttribute ("style", "display:none")
     propsTable.appendChild addPropRow |> ignore
 
+    let propsAddTargets = if props.Length = 0 then [ propsHeaderRow; addPropRow ] else [ addPropRow ]
+
     let propsTitleRow = document.createElement ("div")
     propsTitleRow.classList.add "inspector-section-title-row"
     propsTitleRow.appendChild propsTitle |> ignore
-    propsTitleRow.appendChild (mkAddTrigger "Add property" addPropRow) |> ignore
+    propsTitleRow.appendChild (mkAddTrigger "Add property" propsAddTargets) |> ignore
 
     propsSection.appendChild propsTitleRow |> ignore
     propsSection.appendChild propsTable |> ignore
@@ -1900,24 +2072,149 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         th.textContent <- h
         verbsHeaderRow.appendChild th |> ignore
 
+    if verbs.Length = 0 then
+        verbsHeaderRow.setAttribute ("style", "display:none")
+
     verbsTable.appendChild verbsHeaderRow |> ignore
+
+    let mkArgSpecSelect (options: string list) (defaultValue: string) : HTMLSelectElement =
+        let select = document.createElement ("select") :?> HTMLSelectElement
+
+        for opt in options do
+            let optionEl = document.createElement ("option") :?> HTMLOptionElement
+            optionEl.value <- opt
+            optionEl.textContent <- opt
+            select.appendChild optionEl |> ignore
+
+        select.value <- defaultValue
+        select
 
     for v in verbs do
         let tr = document.createElement ("tr")
         tr.classList.add "inspector-verb-row"
         let verbName: string = v?name
+        let vFullNames: string = v?fullNames
+        let vPerms: string = v?perms
+        let vDobj: string = v?dobj
+        let vPrep: string = v?prep
+        let vIobj: string = v?iobj
+        let vOwnerRef: int64 = int64 (v?ownerRef: float)
         tr.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
 
-        for cellText in [ v?name; v?owner; v?perms; v?dobj; v?prep; v?iobj ] do
-            let td = document.createElement ("td")
-            td.textContent <- (cellText: string)
-            tr.appendChild td |> ignore
+        // Every field below resubmits the verb's *other* current fields
+        // unchanged alongside whichever one this pencil is for -
+        // `set_verb_info`/`set_verb_args` always want their whole triple
+        // together (confirmed against `ToastStunt/src/verbs.cc`'s
+        // `bf_set_verb_info`/`bf_set_verb_args`), so there's no way to
+        // change just one via the builtins themselves. `verbName` (the
+        // first alias) is only ever used to *resolve* which verb this is
+        // server-side, never as the value being changed.
+        let nameInput = document.createElement ("input") :?> HTMLInputElement
+        nameInput.classList.add "inspector-property-value"
+        nameInput.value <- vFullNames
 
-        // No confirmation - unlike recycling an object, a deleted verb is
-        // trivial to recreate by hand if this was a mistake. Stops
-        // propagation so this doesn't also open the verb via the row's own
-        // click handler above (same idiom `renderTabs`'s close-× uses
-        // against its tab's own switch-click).
+        let nameTd =
+            mkEditableCell verbName nameInput (fun () ->
+                let newNames = nameInput.value.Trim()
+
+                if newNames <> "" then
+                    sendAction
+                        [ "action" ==> "set-verb-info"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "newNames" ==> newNames
+                          "ownerExpr" ==> sprintf "#%d" vOwnerRef
+                          "perms" ==> vPerms ])
+
+        tr.appendChild nameTd |> ignore
+
+        let vOwnerGroup, vOwnerInput =
+            mkQuickFillInput "player, #5, or $room" (sprintf "#%d" vOwnerRef) ownerQuickFills false
+
+        let ownerTd =
+            mkEditableCell (v?owner: string) vOwnerGroup (fun () ->
+                let expr = vOwnerInput.value.Trim()
+
+                if expr <> "" then
+                    sendAction
+                        [ "action" ==> "set-verb-info"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "newNames" ==> vFullNames
+                          "ownerExpr" ==> expr
+                          "perms" ==> vPerms ])
+
+        tr.appendChild ownerTd |> ignore
+
+        let vPermsWidget, _, vCurrentPerms =
+            mkPermsWidget
+                [ "Read", "r", "Other players' code can read this verb's source."
+                  "Write", "w", "Other players' code can modify this verb's source."
+                  "Exec", "x", "Other players' code can call this verb."
+                  "Debug",
+                  "d",
+                  "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed." ]
+                vPerms
+                (fun () -> ())
+
+        let permsTd =
+            mkEditableCell vPerms vPermsWidget (fun () ->
+                sendAction
+                    [ "action" ==> "set-verb-info"
+                      "obj" ==> int objRef
+                      "verb" ==> verbName
+                      "newNames" ==> vFullNames
+                      "ownerExpr" ==> sprintf "#%d" vOwnerRef
+                      "perms" ==> vCurrentPerms () ])
+
+        tr.appendChild permsTd |> ignore
+
+        let dobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vDobj
+
+        let dobjTd =
+            mkEditableCell vDobj dobjEditSelect (fun () ->
+                sendAction
+                    [ "action" ==> "set-verb-args"
+                      "obj" ==> int objRef
+                      "verb" ==> verbName
+                      "dobj" ==> dobjEditSelect.value
+                      "prep" ==> vPrep
+                      "iobj" ==> vIobj ])
+
+        tr.appendChild dobjTd |> ignore
+
+        let prepEditGroup, prepEditInput =
+            mkQuickFillInput "none, any, or a preposition" vPrep [ "none", "none"; "any", "any" ] false
+
+        let prepTd =
+            mkEditableCell vPrep prepEditGroup (fun () ->
+                sendAction
+                    [ "action" ==> "set-verb-args"
+                      "obj" ==> int objRef
+                      "verb" ==> verbName
+                      "dobj" ==> vDobj
+                      "prep" ==> prepEditInput.value.Trim()
+                      "iobj" ==> vIobj ])
+
+        tr.appendChild prepTd |> ignore
+
+        let iobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vIobj
+
+        let iobjTd =
+            mkEditableCell vIobj iobjEditSelect (fun () ->
+                sendAction
+                    [ "action" ==> "set-verb-args"
+                      "obj" ==> int objRef
+                      "verb" ==> verbName
+                      "dobj" ==> vDobj
+                      "prep" ==> vPrep
+                      "iobj" ==> iobjEditSelect.value ])
+
+        tr.appendChild iobjTd |> ignore
+
+        // Stops propagation so this doesn't also open the verb via the
+        // row's own click handler above (same idiom `renderTabs`'s
+        // close-× uses against its tab's own switch-click).
         let deleteTd = document.createElement ("td")
         let deleteBtn = document.createElement ("button")
         deleteBtn.classList.add "inspector-row-delete-btn"
@@ -1927,7 +2224,9 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         deleteBtn.onclick <-
             fun ev ->
                 ev.stopPropagation () |> ignore
-                sendAction [ "action" ==> "delete-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
+
+                if window.confirm (sprintf "Delete verb \"%s\"?" verbName) then
+                    sendAction [ "action" ==> "delete-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
 
         deleteTd.appendChild deleteBtn |> ignore
         tr.appendChild deleteTd |> ignore
@@ -1956,82 +2255,22 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     // Verbs only ever have four permission bits - r/w/x/d (Read/Write/Exec/
     // Debug) - confirmed against `ToastStunt/src/verbs.cc`'s
     // `validate_verb_info`; properties' `c` (Chown) doesn't apply here.
-    // Same popover pattern the properties table's own perms widget uses.
-    let verbPermsWidget = document.createElement ("div")
-    verbPermsWidget.classList.add "inspector-perms-widget"
-
-    let verbPermsToggleBtn = document.createElement ("button")
-    verbPermsToggleBtn.classList.add "pane-action-btn"
-    verbPermsToggleBtn.title <- "Permissions"
-
-    let verbPermsPopover = document.createElement ("div")
-    verbPermsPopover.classList.add "tree-filter-settings-popover"
-    verbPermsPopover.onclick <- fun ev -> ev.stopPropagation () |> ignore
-
-    let mkVerbPermCheckbox (label: string) (tooltip: string) (isChecked: bool) : HTMLInputElement =
-        let row = document.createElement ("label")
-        row.classList.add "settings-row"
-        row.title <- tooltip
-
-        let cb = document.createElement ("input") :?> HTMLInputElement
-        cb.setAttribute ("type", "checkbox")
-        cb.``checked`` <- isChecked
-
-        row.appendChild cb |> ignore
-        row.appendChild (document.createTextNode label) |> ignore
-        verbPermsPopover.appendChild row |> ignore
-        cb
-
     // Read+Exec checked by default - a normal callable command verb; Write
     // and Debug off, matching the properties widget's own "least-surprising
-    // default" convention.
-    let verbReadCb = mkVerbPermCheckbox "Read" "Other players' code can read this verb's source." true
-    let verbWriteCb = mkVerbPermCheckbox "Write" "Other players' code can modify this verb's source." false
-    let verbExecCb = mkVerbPermCheckbox "Exec" "Other players' code can call this verb." true
-
-    // Verified against `ToastStunt/src/execute.cc`'s `RAISE_ERROR` macro -
-    // with this flag unset, a runtime error is dropped entirely (not just
-    // logged differently), so the verb silently continues past the failure.
-    let verbDebugCb =
-        mkVerbPermCheckbox
-            "Debug"
-            "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed."
-            false
-
-    let currentVerbPerms () : string =
-        [ verbReadCb, "r"; verbWriteCb, "w"; verbExecCb, "x"; verbDebugCb, "d" ]
-        |> List.filter (fun (cb, _) -> cb.``checked``)
-        |> List.map snd
-        |> String.concat ""
-
-    let refreshVerbPermsLabel () =
-        let s = currentVerbPerms ()
-        verbPermsToggleBtn.textContent <- (if s = "" then "(none)" else s)
-
-    refreshVerbPermsLabel ()
-
-    verbPermsToggleBtn.onclick <-
-        fun ev ->
-            ev.stopPropagation () |> ignore
-            verbPermsPopover.classList.toggle "visible" |> ignore
-
-    for cb in [ verbReadCb; verbWriteCb; verbExecCb; verbDebugCb ] do
-        cb.onchange <- fun _ -> refreshVerbPermsLabel ()
-
-    verbPermsWidget.appendChild verbPermsToggleBtn |> ignore
-    verbPermsWidget.appendChild verbPermsPopover |> ignore
-
-    let mkArgSpecSelect (options: string list) (defaultValue: string) : HTMLSelectElement =
-        let select = document.createElement ("select") :?> HTMLSelectElement
-
-        for opt in options do
-            let optionEl = document.createElement ("option") :?> HTMLOptionElement
-            optionEl.value <- opt
-            optionEl.textContent <- opt
-            select.appendChild optionEl |> ignore
-
-        select.value <- defaultValue
-        select
+    // default" convention. Debug's tooltip is verified against
+    // `ToastStunt/src/execute.cc`'s `RAISE_ERROR` macro - with this flag
+    // unset, a runtime error is dropped entirely (not just logged
+    // differently), so the verb silently continues past the failure.
+    let verbPermsWidget, _, currentVerbPerms =
+        mkPermsWidget
+            [ "Read", "r", "Other players' code can read this verb's source."
+              "Write", "w", "Other players' code can modify this verb's source."
+              "Exec", "x", "Other players' code can call this verb."
+              "Debug",
+              "d",
+              "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed." ]
+            "rx"
+            (fun () -> ())
 
     // "this none this" - a normal command verb takes its own object as
     // dobj/iobj by default (per the review note); prep defaults to "none".
@@ -2082,10 +2321,12 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addVerbRow.setAttribute ("style", "display:none")
     verbsTable.appendChild addVerbRow |> ignore
 
+    let verbsAddTargets = if verbs.Length = 0 then [ verbsHeaderRow; addVerbRow ] else [ addVerbRow ]
+
     let verbsTitleRow = document.createElement ("div")
     verbsTitleRow.classList.add "inspector-section-title-row"
     verbsTitleRow.appendChild verbsTitle |> ignore
-    verbsTitleRow.appendChild (mkAddTrigger "Add verb" addVerbRow) |> ignore
+    verbsTitleRow.appendChild (mkAddTrigger "Add verb" verbsAddTargets) |> ignore
 
     verbsSection.appendChild verbsTitleRow |> ignore
     verbsSection.appendChild verbsTable |> ignore
@@ -2881,7 +3122,16 @@ ws.onmessage <-
 
                             previewTab <- Some(objRef, verb)
 
+                        // Mirrors `switchToTab`'s own history push - this
+                        // handler can't just call `switchToTab` itself
+                        // (the content here is fresh off the wire, already
+                        // set into the editor above; `switchToTab`'s
+                        // `VerbTab` branch would immediately overwrite it
+                        // again from the stale `tabContent` map entry that
+                        // existed before the `Map.add` a few lines up).
+                        tabHistory <- activeTab :: (tabHistory |> List.filter (fun t -> t <> activeTab))
                         activeTab <- VerbTab(objRef, verb)
+                        showingVerbHistory <- false
                         showPaneFor activeTab
                         renderTabs ()
                         // Refresh the tree's highlight to follow whatever
@@ -2991,8 +3241,11 @@ ws.onmessage <-
                 || header.StartsWith("moodev-parent-remove-result")
                 || header.StartsWith("moodev-name-set-result")
                 || header.StartsWith("moodev-child-add-result")
+                || header.StartsWith("moodev-prop-info-set-result")
+                || header.StartsWith("moodev-verb-info-set-result")
+                || header.StartsWith("moodev-verb-args-set-result")
             then
-                // All six share the exact same "full inspector refresh on
+                // All nine share the exact same "full inspector refresh on
                 // success, diagnostics on failure" shape as every other
                 // mutating inspector action.
                 match headerField "object: #" header with

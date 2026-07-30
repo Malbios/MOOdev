@@ -331,6 +331,110 @@ let addVerb
                 ct
     }
 
+/// Changes any/all of an *existing* verb's names, owner, and perms in one
+/// call - `set_verb_info(obj, verb-desc, {owner, perms, names})` (confirmed
+/// against `ToastStunt/src/verbs.cc`'s `bf_set_verb_info`). `verbName` is
+/// resolved to a 1-based index the same way `deleteVerb`/`fetchVerb` do
+/// (matching whichever alias is currently displayed), not passed as a raw
+/// name string - same alias-matching bug class `FORMAT.md` §4 documents.
+/// Callers always resubmit all three fields, only one of which actually
+/// changed - mirrors `setPropertyInfo`'s own shape.
+let setVerbInfo
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (verbName: string)
+    (newNames: string)
+    (ownerExpr: string)
+    (perms: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let verbLit = quote verbName
+        let newNamesLit = quote newNames
+        let permsLit = quote perms
+        let ownerLit = quote ownerExpr
+
+        let statements =
+            resolveVerbIndexStatements o verbLit
+            + $""" ok = 0; errtext = ""; if (idx == 0) errtext = "verb not found"; else try ownerResult = eval("return " + {ownerLit} + ";"); if (ownerResult[1]) try set_verb_info({o}, idx, {{ownerResult[2], {permsLit}, {newNamesLit}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error (owner)"; endif except err (ANY) errtext = tostr(err[2]); endtry endif;"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-verb-info-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Changes an *existing* verb's dobj/prep/iobj arg-spec -
+/// `set_verb_args(obj, verb-desc, {dobj, prep, iobj})` (confirmed against
+/// `ToastStunt/src/verbs.cc`'s `bf_set_verb_args`). No object-expression
+/// eval needed here - all three are plain arg-spec/preposition strings, not
+/// object references. Same resolve-by-alias and resubmit-all-three shape
+/// as `setVerbInfo`.
+let setVerbArgs
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (verbName: string)
+    (dobj: string)
+    (prep: string)
+    (iobj: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let verbLit = quote verbName
+        let dobjLit = quote dobj
+        let prepLit = quote prep
+        let iobjLit = quote iobj
+
+        let statements =
+            resolveVerbIndexStatements o verbLit
+            + $""" ok = 0; errtext = ""; if (idx == 0) errtext = "verb not found"; else try set_verb_args({o}, idx, {{{dobjLit}, {prepLit}, {iobjLit}}}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry endif;"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-verb-args-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// `ide_get_properties(objRef)` replacement. `properties(obj)` already
 /// only lists properties *defined* on `obj` (confirmed against
 /// `property.cc:bf_properties`, see `Importer.fs`'s own note on this) -
@@ -447,6 +551,57 @@ let addProperty
             sendWire
                 webSocket
                 (sprintf "moodev-prop-add-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Changes any/all of an *existing* property's name, owner, and perms in
+/// one call - `set_property_info(obj, pname, {owner, perms, new-name})`
+/// (confirmed against `ToastStunt/src/property.cc`'s `bf_set_prop_info`).
+/// The inspector's per-field pencils each only change one of the three,
+/// but the builtin always wants all three together, so callers always pass
+/// the other two unchanged - same "resubmit the full triple" shape
+/// `addVerb`'s sibling `setVerbInfo` uses for verbs.
+let setPropertyInfo
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (pname: string)
+    (newName: string)
+    (ownerExpr: string)
+    (perms: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let pnameLit = quote pname
+        let newNameLit = quote newName
+        let permsLit = quote perms
+        let ownerLit = quote ownerExpr
+
+        let statements =
+            $"""ok = 0; errtext = ""; try ownerResult = eval("return " + {ownerLit} + ";"); if (ownerResult[1]) try set_property_info({o}, {pnameLit}, {{ownerResult[2], {permsLit}, {newNameLit}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error (owner)"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-prop-info-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
                 diagnostics
                 ct
     }
@@ -1185,7 +1340,15 @@ endif"""
                          let vOwnerName = v.GetProperty("ownername").GetString()
 
                          {| name = firstAlias (v.GetProperty("names").GetString())
+                            // The complete, un-truncated name-spec (e.g.
+                            // "look l") - unlike `name` above (first alias
+                            // only, kept as-is since resolve-by-alias call
+                            // sites depend on it), the rename editor needs
+                            // the whole thing to prefill, or renaming would
+                            // silently drop every alias but the first.
+                            fullNames = v.GetProperty("names").GetString()
                             owner = formatLiveName corponymsByObjnum vOwnerRef vOwnerName
+                            ownerRef = vOwnerRef
                             perms = v.GetProperty("perms").GetString()
                             dobj = v.GetProperty("dobj").GetString()
                             prep = v.GetProperty("prep").GetString()
@@ -1199,6 +1362,7 @@ endif"""
 
                          {| name = p.GetProperty("name").GetString()
                             owner = formatLiveName corponymsByObjnum ownerRef ownerName
+                            ownerRef = ownerRef
                             perms = p.GetProperty("perms").GetString() |})
                      |> Array.ofSeq |}
 

@@ -548,7 +548,7 @@ html, body {
 
 .inspector-header {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 0.5em;
   font-size: 1.2em;
   font-weight: bold;
@@ -663,6 +663,7 @@ html, body {
   text-align: left;
   padding: 0.25em 0.6em;
   border-bottom: 1px solid #333;
+  vertical-align: middle;
 }
 
 .inspector-table th {
@@ -707,6 +708,20 @@ html, body {
 
 .inspector-add-property-btn:hover {
   color: #7d7;
+}
+
+.inspector-add-property-btn.inspector-remove-trigger {
+  color: #a55;
+}
+
+.inspector-add-property-btn.inspector-remove-trigger:hover {
+  color: #f77;
+}
+
+.inspector-inline-edit-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3em;
 }
 
 .inspector-recycle-btn {

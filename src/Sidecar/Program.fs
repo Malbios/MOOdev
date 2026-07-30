@@ -369,6 +369,48 @@ let private buildTryDispatch
                 | "add-child" ->
                     do! IdeActions.addChild config session webSocket (getObj ()) (getStr "childExpr") ct
                     return true
+                | "set-property-info" ->
+                    do!
+                        IdeActions.setPropertyInfo
+                            config
+                            session
+                            webSocket
+                            (getObj ())
+                            (getStr "name")
+                            (getStr "newName")
+                            (getStr "ownerExpr")
+                            (getStr "perms")
+                            ct
+
+                    return true
+                | "set-verb-info" ->
+                    do!
+                        IdeActions.setVerbInfo
+                            config
+                            session
+                            webSocket
+                            (getObj ())
+                            (getStr "verb")
+                            (getStr "newNames")
+                            (getStr "ownerExpr")
+                            (getStr "perms")
+                            ct
+
+                    return true
+                | "set-verb-args" ->
+                    do!
+                        IdeActions.setVerbArgs
+                            config
+                            session
+                            webSocket
+                            (getObj ())
+                            (getStr "verb")
+                            (getStr "dobj")
+                            (getStr "prep")
+                            (getStr "iobj")
+                            ct
+
+                    return true
                 | "get-live-children" ->
                     do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
                     return true
