@@ -969,16 +969,45 @@ let private mergeLiveChildren
     | Some parentNode ->
         treeNodes <- Map.add parentRef { parentNode with Children = children |> Array.map (fun (r, _, _, _, _) -> r) } treeNodes
 
-/// The removal-side counterpart to `mergeLiveChildren` above, for a recycled
-/// object: drops it from `treeNodes` entirely and scrubs it out of every
-/// remaining node's `Children` list (it may appear under more than one
-/// parent, same DAG reasoning as `ancestorsOf`), rather than waiting for a
-/// stale entry to self-heal on that parent's next expand.
+/// Folds a `get-live-roots` response into `treeNodes`/`rootRefs` - the
+/// top-level counterpart to `mergeLiveChildren` above. `rootRefs` is
+/// otherwise only ever computed once, from the static corponym export
+/// (`buildTree`), so a parentless live object (confirmed live: the LSP's own
+/// `#4`/`#5` bootstrap objects) would never have any discovery path at all
+/// without this - unlike a live child, there's no "already-known parent" to
+/// have expanded to reveal it. Adds any not-yet-known object exactly like
+/// `mergeLiveChildren` does, then unions every returned ref into `rootRefs`
+/// (deduplicated - repeat calls, e.g. on every login, are idempotent).
+let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[]) : unit =
+    for objRef, name, parents, verbs, properties in roots do
+        if not (Map.containsKey objRef treeNodes) then
+            treeNodes <-
+                Map.add
+                    objRef
+                    { ObjRef = objRef
+                      Name = name
+                      Parents = parents
+                      Children = [||]
+                      Verbs = verbs
+                      Properties = properties }
+                    treeNodes
+
+    rootRefs <- Array.append rootRefs (roots |> Array.map (fun (r, _, _, _, _) -> r)) |> Array.distinct
+
+/// The removal-side counterpart to `mergeLiveChildren`/`mergeLiveRoots`
+/// above, for a recycled object: drops it from `treeNodes` entirely, scrubs
+/// it out of every remaining node's `Children` list (it may appear under
+/// more than one parent, same DAG reasoning as `ancestorsOf`), and prunes it
+/// from `rootRefs` if it was a top-level entry - rather than waiting for a
+/// stale entry to self-heal on that parent's next expand (roots have no
+/// "next expand" to self-heal from, so this is the only cleanup they get).
 let private removeLiveNode (objRef: int64) : unit =
     treeNodes <-
         treeNodes
         |> Map.remove objRef
         |> Map.map (fun _ node -> { node with Children = node.Children |> Array.filter ((<>) objRef) })
+
+    rootRefs <- rootRefs |> Array.filter ((<>) objRef)
 
 /// The tree's own `Verbs`/`Properties` arrays (static preload, or the
 /// live-children fetch) are a separate, independently-cached copy from what
@@ -3225,6 +3254,14 @@ ws.onmessage <-
                         renderTree ()
                     }
                     |> Async.StartImmediate
+
+                    // Parentless live objects (e.g. the LSP's own `#4`/`#5`
+                    // bootstrap objects) have no discovery path via the
+                    // static preload above or an expand click - see
+                    // `mergeLiveRoots`'s own comment - so this is fetched
+                    // once per login, the only trigger point with no
+                    // equivalent user gesture to hang it off of.
+                    sendAction [ "action" ==> "get-live-roots" ]
             elif header.StartsWith("moodev-prop-content") then
                 // Each line is "propname<TAB>literal" (see
                 // `$vcs:ide_get_properties` - a real tab character, not
@@ -3402,6 +3439,15 @@ ws.onmessage <-
                             // useful for it.
                             expandedRefs <- Set.add parentRef expandedRefs
                             sendAction [ "action" ==> "get-live-children"; "obj" ==> int parentRef ]
+                            // Covers creating a parentless object (e.g.
+                            // parent `#-1`) - `parentRef` above would be
+                            // invalid and `get-live-children` a no-op, so
+                            // this is the only way such a new object ever
+                            // joins `rootRefs` (see `mergeLiveRoots`'s own
+                            // comment). Cheap and idempotent to just always
+                            // re-fetch rather than branching on whether the
+                            // parent was actually valid.
+                            sendAction [ "action" ==> "get-live-roots" ]
                             openOrSwitchToInspector newObj
                         | _ -> ()
                     | _ -> ()
@@ -3443,6 +3489,29 @@ ws.onmessage <-
                         renderTree ()
                     | _ -> ()
                 | None -> ()
+            elif header.StartsWith("moodev-live-roots") then
+                // Folds parentless live objects into `treeNodes`/`rootRefs` -
+                // see `mergeLiveRoots`'s own comment. Same per-line JSON
+                // shape as `moodev-live-children` above, just with no
+                // `object: #` header field (there's no single parent this
+                // response is "for").
+                let roots =
+                    lines
+                    |> Array.map (fun line ->
+                        let o: obj = JS.JSON.parse line
+
+                        int64 (o?objRef: float),
+                        (o?name: string),
+                        ((o?parents: float[]) |> Array.map int64),
+                        ((o?verbs: obj[])
+                         |> Array.map (fun v ->
+                             { Name = v?name; Perms = v?perms; Dobj = v?dobj; Prep = v?prep; Iobj = v?iobj }
+                             : LspClient.TreeVerb)),
+                        ((o?properties: obj[])
+                         |> Array.map (fun p -> { Name = p?name; Perms = p?perms }: LspClient.TreeProperty)))
+
+                mergeLiveRoots roots
+                renderTree ()
             elif header.StartsWith("moodev-live-info") then
                 // Inspector fallback for an object the static graph never
                 // heard of (see `loadInspector`'s `None` arm) - same

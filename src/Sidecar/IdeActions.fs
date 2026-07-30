@@ -1209,6 +1209,100 @@ endif"""
                     ct
     }
 
+/// Same cap reasoning as `maxLiveChildren` - a sane bound on the *result*,
+/// not on the scan itself (the scan below must walk every valid object
+/// number up to `max_object()` to find every parentless one; there's no way
+/// to shortcut that in a `parent(o)`-per-object data model like MOO's).
+let private maxLiveRoots = 500
+
+/// `get-live-roots` - the counterpart to `getLiveChildren` for the tree's
+/// *top level*. `rootRefs` (the client's set of tree entry points) is
+/// computed once from the static corponym export at load time, and the only
+/// way a live object ever joins the tree afterward is by being discovered as
+/// a child of an already-known node (`getLiveChildren`, on an expand click).
+/// A parentless live object (confirmed live: the LSP's own dedicated `#4`/
+/// `#5` bootstrap objects, see moo-dev/CLAUDE.md's "LSP service character +
+/// listener" section) has no such node to be discovered from - not because
+/// of anything special about its object number, but because nothing in the
+/// tree's design ever asks "what else has no parent?" after the initial
+/// load. This does exactly that: scans every valid object number for
+/// `length(parents(o)) == 0`, and returns the same per-object structural
+/// summary `getLiveChildren` already builds for a single object's children.
+let getLiveRoots (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+
+        let statements =
+            $"""total = 0;
+out = {{}};
+for i in [0..toint(max_object())]
+  o = toobj(i);
+  if (valid(o) && length(parents(o)) == 0)
+    total = total + 1;
+    if (total <= {maxLiveRoots})
+      oname = typeof(o.name) == STR ? o.name | "";
+      overbs = {{}};
+      vlist = verbs(o);
+      for j in [1..length(vlist)]
+        vi = verb_info(o, j);
+        va = verb_args(o, j);
+        overbs = {{@overbs, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
+      endfor
+      oprops = {{}};
+      for pn in (properties(o))
+        pi = property_info(o, pn);
+        oprops = {{@oprops, ["name" -> pn, "perms" -> pi[2]]}};
+      endfor
+      out = {{@out, ["objref" -> tostr(o), "name" -> oname, "verbs" -> overbs, "properties" -> oprops]}};
+    endif
+  endif
+endfor
+result = ["roots" -> out, "truncated" -> ((total > {maxLiveRoots}) ? 1 | 0)];"""
+
+        let! json = evalRunner statements "result" ct
+        let root = json.RootElement
+        let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+        let truncated = root.GetProperty("truncated").GetInt32() = 1
+
+        let firstAlias (nameSpec: string) =
+            nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
+
+        let lines =
+            root.GetProperty("roots").EnumerateArray()
+            |> Seq.map (fun r ->
+                let rObjRef = int64 (r.GetProperty("objref").GetString().TrimStart('#'))
+                let liveName = r.GetProperty("name").GetString()
+                let displayName = formatLiveName corponymsByObjnum rObjRef liveName
+
+                let verbs =
+                    r.GetProperty("verbs").EnumerateArray()
+                    |> Seq.map (fun v ->
+                        {| name = firstAlias (v.GetProperty("names").GetString())
+                           perms = v.GetProperty("perms").GetString()
+                           dobj = v.GetProperty("dobj").GetString()
+                           prep = v.GetProperty("prep").GetString()
+                           iobj = v.GetProperty("iobj").GetString() |})
+                    |> Array.ofSeq
+
+                let properties =
+                    r.GetProperty("properties").EnumerateArray()
+                    |> Seq.map (fun p ->
+                        {| name = p.GetProperty("name").GetString()
+                           perms = p.GetProperty("perms").GetString() |})
+                    |> Array.ofSeq
+
+                JsonSerializer.Serialize(
+                    {| objRef = rObjRef
+                       name = displayName
+                       parents = Array.empty<int64>
+                       verbs = verbs
+                       properties = properties |}
+                ))
+            |> List.ofSeq
+
+        do! sendWire webSocket (sprintf "moodev-live-roots truncated: %d" (if truncated then 1 else 0)) lines ct
+    }
+
 /// The inspector's sole source of structural data (owner, flags,
 /// parents/children, verbs, properties) - always live, never a static
 /// export, so it reflects edits made moments ago. Owner/parent/child refs

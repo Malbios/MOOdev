@@ -414,6 +414,9 @@ let private buildTryDispatch
                 | "get-live-children" ->
                     do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
                     return true
+                | "get-live-roots" ->
+                    do! IdeActions.getLiveRoots config session webSocket ct
+                    return true
                 | "get-live-info" ->
                     do! IdeActions.getLiveInfo config session webSocket (getObj ()) ct
                     return true
