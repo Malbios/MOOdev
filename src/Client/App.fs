@@ -449,17 +449,23 @@ document.onclick <-
 
 Settings.init ()
 
-/// Which "tab" is showing in the main area - the game terminal, or one of
-/// the open verbs. Game is a permanent, non-closable, always-first tab
-/// (rendered as the static `#tab-game` button); every verb ever opened this
-/// session gets its own closable tab alongside it in `#verb-tabs`, VS
-/// Code-style. This is the single source of truth for both "which tab is
-/// highlighted" and "what's loaded in the editor" - earlier versions of
-/// this file kept a separate `currentDocument` in sync by hand; folding it
-/// into this type removes that duplication.
+/// Which "tab" is showing in the main area - the game terminal, one of the
+/// open verbs, or the object inspector. Game is a permanent, non-closable,
+/// always-first tab (rendered as the static `#tab-game` button); every verb
+/// ever opened this session gets its own closable tab alongside it in
+/// `#verb-tabs`, VS Code-style. `InspectorTab` is different from both:
+/// it's never rendered as a tab button at all (never added to `tabOrder`) -
+/// selecting an object in the tree switches the main area to it directly,
+/// taking over the same space Game/verb tabs use, with no separate
+/// tab-strip entry to click back onto (switching to Game or a verb tab is
+/// the only way back). This is still the single source of truth for both
+/// "which tab is highlighted" and "what's loaded in the editor" - earlier
+/// versions of this file kept a separate `currentDocument` in sync by
+/// hand; folding it into this type removes that duplication.
 type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
+    | InspectorTab of objRef: int64
 
 let mutable private activeTab: OpenTab = GameTab
 
@@ -484,11 +490,14 @@ let mutable private activeSidebarView: SidebarView = TreeView
 /// `renderInspectorStructure` to scroll to and flash that property's row.
 let mutable private activeInspectorProp: (int64 * string) option = None
 
-/// The object row most recently clicked in the tree - the sole source of
-/// truth for which object the (tab-less, always-visible) inspector panel
-/// currently shows. Read by `renderTreeRows` to highlight that row, and by
-/// every `ws.onmessage` inspector handler to decide whether an incoming
-/// response is still for the object currently being looked at.
+/// Which object the inspector currently shows (or last showed) - set
+/// alongside `activeTab` by `openOrSwitchToInspectorWith`, whether reached
+/// via a tree click or an owner/parent/child link inside the inspector
+/// itself, so the tree's own highlight always follows wherever the
+/// inspector is actually pointed. Kept independent of `activeTab` itself so
+/// the highlight survives switching the main pane away to Game or a verb
+/// tab, instead of disappearing the moment the inspector isn't the active
+/// tab. Read by `renderTreeRows` to highlight this object's row.
 let mutable private selectedObjRef: int64 option = None
 
 /// Whether the currently-active `VerbTab`'s editor pane is showing its
@@ -533,11 +542,6 @@ let mutable private errorLog: (System.DateTime * string * string list) list = []
 /// itself; `closeTab` consumes it via `isTabStillOpen` when picking a
 /// fallback.
 let mutable private tabHistory: OpenTab list = []
-
-let private isTabStillOpen (tab: OpenTab) : bool =
-    match tab with
-    | GameTab -> true
-    | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
 
 /// Each currently-rendered inspector's property `<input>` elements, by
 /// property name - populated by `renderInspectorStructure`, then read both
@@ -585,7 +589,8 @@ let mutable private previewTab: (int64 * string) option = None
 let private currentVerbDoc () : (int64 * string) option =
     match activeTab with
     | VerbTab(o, v) -> Some(o, v)
-    | GameTab -> None
+    | GameTab
+    | InspectorTab _ -> None
 
 /// Sends a Phase 4 structured IDE-action envelope (`{"action": ..., ...}`)
 /// over the main WebSocket - the sidecar's `Program.buildTryDispatch` parses
@@ -684,11 +689,11 @@ editor.onDidChangeCursorPosition (fun ev ->
 setDirty false
 statusPositionEl.textContent <- "Ln 1, Col 1"
 
-/// All three mutually-exclusive panes under `#main-pane` - `showPaneFor`
+/// All four mutually-exclusive panes under `#main-pane` - `showPaneFor`
 /// activates exactly one (or, for a `VerbTab` in history mode, two: the
 /// verb-history pane replaces the plain editor pane, everything else stays
 /// hidden the same way).
-let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl ]
+let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl ]
 
 let private activateOnly (paneEl: HTMLElement) : unit =
     for p in allPanes do
@@ -708,6 +713,7 @@ let private showPaneFor (tab: OpenTab) : unit =
         // re-measure rather than rely on ResizeObserver picking this up.
         editor.layout ()
         editor.focus ()
+    | InspectorTab _ -> activateOnly inspectorPaneEl
 
 /// The five mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
@@ -782,7 +788,8 @@ verbHistoryRestoreBtn.onclick <-
 let private cacheCurrentEditorContent () : unit =
     match activeTab with
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
-    | GameTab -> ()
+    | GameTab
+    | InspectorTab _ -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -1023,7 +1030,8 @@ let rec private switchToTab (tab: OpenTab) : unit =
         showingVerbHistory <- false
 
         match tab with
-        | GameTab -> ()
+        | GameTab
+        | InspectorTab _ -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -1033,6 +1041,15 @@ let rec private switchToTab (tab: OpenTab) : unit =
         showPaneFor tab
         renderTabs ()
         renderTree ()
+
+/// No "open inspector tabs" registry (see `OpenTab`'s own comment) - an
+/// inspector fallback is "still open" exactly as long as the object it was
+/// for still exists.
+and private isTabStillOpen (tab: OpenTab) : bool =
+    match tab with
+    | GameTab -> true
+    | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
+    | InspectorTab o -> Map.containsKey o treeNodes
 
 /// Opens `(objRef, verbName)` - switches instantly from the client-side
 /// cache if it's already an open tab, otherwise fetches it from the server
@@ -1073,18 +1090,19 @@ and private closeTab (objRef: int64, verbName: string) : unit =
         renderTabs ()
         renderTree ()
 
-/// Selects `objRef` for the (tab-less, always-visible) inspector panel and
-/// *always* kicks off a fresh load (structural info + live property
-/// values), even when it was already the selected object. Used by the
-/// tree's object rows and every clickable owner/parent/child link inside
-/// the inspector itself - all funnel through here so "always fresh" is
-/// handled in exactly one place. `highlightProp`, when `Some`, is
-/// forwarded to `loadInspector` to scroll to and flash that property's row
-/// once the table renders.
+/// Switches the main area to `objRef`'s inspector (see `OpenTab`'s own
+/// comment - no tab button, just takes over the same space Game/verb tabs
+/// use) and *always* kicks off a fresh load (structural info + live
+/// property values), even when it was already the selected object. Used by
+/// the tree's object rows and every clickable owner/parent/child link
+/// inside the inspector itself - all funnel through here so "always
+/// fresh" is handled in exactly one place. `highlightProp`, when `Some`,
+/// is forwarded to `loadInspector` to scroll to and flash that property's
+/// row once the table renders.
 and private openOrSwitchToInspectorWith (objRef: int64) (highlightProp: string option) : unit =
     selectedObjRef <- Some objRef
     activeInspectorProp <- highlightProp |> Option.map (fun p -> (objRef, p))
-    renderTree ()
+    switchToTab (InspectorTab objRef)
     loadInspector objRef highlightProp
 
 /// `openOrSwitchToInspectorWith objRef None` - every existing call site
@@ -1112,12 +1130,6 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
     sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
 
     sendAction [ "action" ==> "get-properties"; "obj" ==> int objRef ]
-
-/// Shown when nothing is selected in the tree - at startup, and after the
-/// currently-inspected object is recycled out from under the inspector.
-and private showInspectorEmptyState () : unit =
-    inspectorDiagnosticsEl.textContent <- ""
-    inspectorContentEl.textContent <- "Select an object in the tree to inspect it."
 
 /// A "type anything, or click a quick-fill button" widget - the shared shape
 /// behind every owner picker (You/This object -> player/#N) and the verb
@@ -2589,9 +2601,12 @@ and private renderTabs () : unit =
                             renderTabs ()
 
                 fun () -> closeTab (objRef, verbName)
-            | GameTab ->
-                // Never appears in `tabOrder` - Game is a static button
-                // outside the draggable strip.
+            | GameTab
+            | InspectorTab _ ->
+                // Neither ever appears in `tabOrder` - Game is a static
+                // button outside the draggable strip, and the inspector is
+                // never rendered as a tab at all (see `OpenTab`'s own
+                // comment) - this arm only exists to satisfy the match.
                 fun () -> ()
 
         let closeBtn = document.createElement ("button")
@@ -2974,7 +2989,6 @@ treeFilterHideEmptyLeavesEl.onchange <-
 // Starts out showing its empty-state placeholder - populated for real once
 // `moodev-login-result` confirms a login (see below).
 renderTree ()
-showInspectorEmptyState ()
 
 ws.onopen <-
     fun _ ->
@@ -3159,7 +3173,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         for line in lines do
                             let tabIdx = line.IndexOf('\t')
 
@@ -3189,7 +3203,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         let ok = headerField "ok: " header = Some "1"
                         inspectorDiagnosticsEl.textContent <- (if ok then "" else String.concat "\n" lines)
                     | _ -> ()
@@ -3202,7 +3216,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3216,7 +3230,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3240,7 +3254,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3259,9 +3273,9 @@ ws.onmessage <-
                             if openVerbTabs |> List.contains (objRef, verb) then
                                 closeTab (objRef, verb)
 
-                            if selectedObjRef = Some objRef then
+                            if activeTab = InspectorTab objRef then
                                 loadInspector objRef None
-                        elif selectedObjRef = Some objRef then
+                        elif activeTab = InspectorTab objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | _ -> ()
@@ -3271,9 +3285,9 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            if selectedObjRef = Some objRef then
+                            if activeTab = InspectorTab objRef then
                                 loadInspector objRef None
-                        elif selectedObjRef = Some objRef then
+                        elif activeTab = InspectorTab objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | _ -> ()
@@ -3293,11 +3307,24 @@ ws.onmessage <-
                             if selectedObjRef = Some objRef then
                                 selectedObjRef <- None
                                 activeInspectorProp <- None
-                                showInspectorEmptyState ()
+
+                            // If its inspector is the main area's current
+                            // tab, fall back the same way closing a verb
+                            // tab does (`tabHistory`, or Game if nothing
+                            // valid is left) - re-loading fresh if the
+                            // fallback is itself another inspector, per
+                            // `loadInspector`'s "always fresh" rule.
+                            if activeTab = InspectorTab objRef then
+                                let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
+
+                                match fallback with
+                                | InspectorTab o -> openOrSwitchToInspectorWith o None
+                                | GameTab
+                                | VerbTab _ -> switchToTab fallback
 
                             removeLiveNode objRef
                             renderTree ()
-                        elif selectedObjRef = Some objRef then
+                        elif activeTab = InspectorTab objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | None -> ()
@@ -3397,7 +3424,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when selectedObjRef = Some objRef ->
+                    | true, objRef when activeTab = InspectorTab objRef ->
                         match Array.tryHead lines with
                         | Some line ->
                             let info: obj = JS.JSON.parse line

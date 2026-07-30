@@ -205,22 +205,6 @@ html, body {
   display: flex;
 }
 
-/* The Tree view splits its own space between the tree list and the object
-   inspector (no longer a main-pane tab - see `#inspector-pane` below) -
-   each gets half, independently scrollable. */
-#sidebar-view-tree #tree-list {
-  flex: 1 1 50%;
-  min-height: 0;
-}
-
-#inspector-pane {
-  flex: 1 1 50%;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid #444;
-}
-
 #sidebar.visible {
   display: flex;
 }
@@ -475,7 +459,8 @@ html, body {
 
 #editor-pane,
 #terminal-pane,
-#verb-history-pane {
+#verb-history-pane,
+#inspector-pane {
   flex: 1;
   min-height: 0;
   display: none;
@@ -484,7 +469,8 @@ html, body {
 
 #editor-pane.active,
 #terminal-pane.active,
-#verb-history-pane.active {
+#verb-history-pane.active,
+#inspector-pane.active {
   display: flex;
 }
 
