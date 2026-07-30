@@ -34,40 +34,68 @@
   </div>
 
   <div id="layout">
+    <div id="activity-bar">
+      <button id="view-tree" class="activity-btn" title="Object tree" aria-label="Object tree">◇</button>
+      <button id="view-history" class="activity-btn" title="History" aria-label="History">🕐</button>
+      <button id="view-tasks" class="activity-btn" title="Tasks" aria-label="Tasks">▶</button>
+      <button id="view-errors" class="activity-btn" title="Errors" aria-label="Errors">⚠</button>
+      <button id="view-dead-verbs" class="activity-btn" title="Find dead verbs" aria-label="Find dead verbs">🔎</button>
+    </div>
     <div id="sidebar">
-      <div class="sidebar-filter-wrap">
-        <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." title="Prefix with obj:, verb:, or prop: to search only objects, only verbs, or only properties" autocomplete="off" spellcheck="false" />
-        <button id="tree-filter-clear" class="sidebar-filter-clear" title="Clear filter" aria-label="Clear filter">×</button>
-        <button id="tree-new-object-btn" class="sidebar-filter-settings-btn" title="New object" aria-label="New object">＋</button>
-        <div id="tree-new-object-popover" class="tree-filter-settings-popover">
-          <label class="settings-row">
-            Parent (MOO expression)
-            <input type="text" id="tree-new-object-parent" placeholder="#5 or $room" autocomplete="off" spellcheck="false" />
-          </label>
-          <button id="tree-new-object-create-btn" class="pane-action-btn">Create</button>
+      <div id="sidebar-view-tree" class="sidebar-view">
+        <div class="sidebar-filter-wrap">
+          <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." title="Prefix with obj:, verb:, or prop: to search only objects, only verbs, or only properties" autocomplete="off" spellcheck="false" />
+          <button id="tree-filter-clear" class="sidebar-filter-clear" title="Clear filter" aria-label="Clear filter">×</button>
+          <button id="tree-new-object-btn" class="sidebar-filter-settings-btn" title="New object" aria-label="New object">＋</button>
+          <div id="tree-new-object-popover" class="tree-filter-settings-popover">
+            <label class="settings-row">
+              Parent (MOO expression)
+              <input type="text" id="tree-new-object-parent" placeholder="#5 or $room" autocomplete="off" spellcheck="false" />
+            </label>
+            <button id="tree-new-object-create-btn" class="pane-action-btn">Create</button>
+          </div>
+          <button id="tree-filter-settings" class="sidebar-filter-settings-btn" title="Tree display options" aria-label="Tree display options">⚙</button>
+          <div id="tree-filter-settings-popover" class="tree-filter-settings-popover">
+            <label class="settings-row">
+              <input type="checkbox" id="tree-filter-show-properties" />
+              Show properties
+            </label>
+            <label class="settings-row">
+              <input type="checkbox" id="tree-filter-show-verbs" />
+              Show verbs
+            </label>
+            <label class="settings-row">
+              <input type="checkbox" id="tree-filter-hide-empty-leaves" />
+              Hide empty leaf objects
+            </label>
+          </div>
         </div>
-        <button id="tree-filter-settings" class="sidebar-filter-settings-btn" title="Tree display options" aria-label="Tree display options">⚙</button>
-        <div id="tree-filter-settings-popover" class="tree-filter-settings-popover">
-          <label class="settings-row">
-            <input type="checkbox" id="tree-filter-show-properties" />
-            Show properties
-          </label>
-          <label class="settings-row">
-            <input type="checkbox" id="tree-filter-show-verbs" />
-            Show verbs
-          </label>
-          <label class="settings-row">
-            <input type="checkbox" id="tree-filter-hide-empty-leaves" />
-            Hide empty leaf objects
-          </label>
+        <ul id="tree-list" class="picker-list"></ul>
+      </div>
+      <div id="sidebar-view-history" class="sidebar-view">
+        <div id="history-search-section">
+          <input id="history-search-input" type="text" class="sidebar-filter" placeholder="search history..." autocomplete="off" spellcheck="false" />
+          <ul id="history-search-results" class="picker-list"></ul>
         </div>
-        <button id="tree-dead-verbs-btn" class="sidebar-filter-settings-btn" title="Find dead verbs" aria-label="Find dead verbs">🔎</button>
-        <div id="tree-dead-verbs-popover" class="tree-filter-settings-popover">
-          <div id="tree-dead-verbs-summary"></div>
-          <ul id="tree-dead-verbs-list" class="picker-list"></ul>
+        <div id="corponym-history-section">
+          <div class="sidebar-header">Corponym history</div>
+          <ul id="corponym-history-list" class="picker-list"></ul>
         </div>
       </div>
-      <ul id="tree-list" class="picker-list"></ul>
+      <div id="sidebar-view-tasks" class="sidebar-view">
+        <ul id="tasks-list" class="picker-list"></ul>
+      </div>
+      <div id="sidebar-view-errors" class="sidebar-view">
+        <div class="sidebar-header">
+          Errors
+          <button id="errors-clear-btn" class="pane-action-btn">Clear</button>
+        </div>
+        <ul id="errors-list" class="picker-list"></ul>
+      </div>
+      <div id="sidebar-view-dead-verbs" class="sidebar-view">
+        <div id="tree-dead-verbs-summary"></div>
+        <ul id="tree-dead-verbs-list" class="picker-list"></ul>
+      </div>
     </div>
     <div id="sidebar-resizer" class="resizer resizer-leftright">
       <button id="sidebar-toggle" class="sidebar-toggle-btn" title="Hide sidebar">◀</button>
@@ -75,9 +103,6 @@
     <div id="main-pane">
       <div id="main-tabs">
         <button id="tab-game" class="main-tab pinned">Game</button>
-        <button id="tab-history" class="main-tab pinned">History</button>
-        <button id="tab-tasks" class="main-tab pinned">Tasks</button>
-        <button id="tab-errors" class="main-tab pinned">Errors</button>
         <div id="verb-tabs"></div>
       </div>
       <div id="editor-pane">
@@ -101,26 +126,6 @@
       <div id="inspector-pane">
         <pre id="inspector-diagnostics"></pre>
         <div id="inspector-content"></div>
-      </div>
-      <div id="history-pane">
-        <div id="history-search-section">
-          <input id="history-search-input" type="text" class="sidebar-filter" placeholder="search history..." autocomplete="off" spellcheck="false" />
-          <ul id="history-search-results" class="picker-list"></ul>
-        </div>
-        <div id="corponym-history-section">
-          <div class="sidebar-header">Corponym history</div>
-          <ul id="corponym-history-list" class="picker-list"></ul>
-        </div>
-      </div>
-      <div id="tasks-pane">
-        <ul id="tasks-list" class="picker-list"></ul>
-      </div>
-      <div id="errors-pane">
-        <div class="sidebar-header">
-          Errors
-          <button id="errors-clear-btn" class="pane-action-btn">Clear</button>
-        </div>
-        <ul id="errors-list" class="picker-list"></ul>
       </div>
       <div id="terminal-pane">
         <div id="login-pane">

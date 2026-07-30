@@ -56,7 +56,15 @@ let private settingForgetLoginStatusEl = document.getElementById ("setting-forge
 
 let private layoutEl = document.getElementById ("layout")
 
+let private activityBarEl = document.getElementById ("activity-bar")
+let private viewTreeBtn = document.getElementById ("view-tree")
+let private viewHistoryBtn = document.getElementById ("view-history")
+let private viewTasksBtn = document.getElementById ("view-tasks")
+let private viewErrorsBtn = document.getElementById ("view-errors")
+let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
+
 let private sidebarEl = document.getElementById ("sidebar")
+let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
 let private treeFilterEl = document.getElementById ("tree-filter") :?> HTMLInputElement
 let private treeFilterClearEl = document.getElementById ("tree-filter-clear")
 let private treeFilterSettingsBtn = document.getElementById ("tree-filter-settings")
@@ -94,20 +102,16 @@ let private verbHistoryPaneEl = document.getElementById ("verb-history-pane")
 let private verbHistoryListEl = document.getElementById ("verb-history-list")
 let private verbHistoryDiffEditorEl = document.getElementById ("verb-history-diff-editor")
 let private verbHistoryRestoreBtn = document.getElementById ("verb-history-restore-btn")
-let private tabHistoryBtn = document.getElementById ("tab-history")
-let private historyPaneEl = document.getElementById ("history-pane")
+let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
 let private corponymHistoryListEl = document.getElementById ("corponym-history-list")
-let private tabTasksBtn = document.getElementById ("tab-tasks")
-let private tasksPaneEl = document.getElementById ("tasks-pane")
+let private sidebarViewTasksEl = document.getElementById ("sidebar-view-tasks")
 let private tasksListEl = document.getElementById ("tasks-list")
-let private tabErrorsBtn = document.getElementById ("tab-errors")
-let private errorsPaneEl = document.getElementById ("errors-pane")
+let private sidebarViewErrorsEl = document.getElementById ("sidebar-view-errors")
 let private errorsListEl = document.getElementById ("errors-list")
 let private errorsClearBtn = document.getElementById ("errors-clear-btn")
-let private treeDeadVerbsBtn = document.getElementById ("tree-dead-verbs-btn")
-let private treeDeadVerbsPopoverEl = document.getElementById ("tree-dead-verbs-popover")
+let private sidebarViewDeadVerbsEl = document.getElementById ("sidebar-view-dead-verbs")
 let private treeDeadVerbsSummaryEl = document.getElementById ("tree-dead-verbs-summary")
 let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list")
 
@@ -449,29 +453,21 @@ treeFilterSettingsBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
         treeNewObjectPopoverEl.classList.remove "visible"
-        treeDeadVerbsPopoverEl.classList.remove "visible"
         treeFilterSettingsPopoverEl.classList.toggle "visible" |> ignore
 
 treeNewObjectBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
         treeFilterSettingsPopoverEl.classList.remove "visible"
-        treeDeadVerbsPopoverEl.classList.remove "visible"
         treeNewObjectPopoverEl.classList.toggle "visible" |> ignore
-
-// `treeDeadVerbsBtn.onclick` itself is wired further down, alongside
-// `tabTasksBtn`/`tabErrorsBtn` - it needs `renderDeadVerbsResults`, part of
-// the big mutually-recursive function group defined later in this file.
 
 treeFilterSettingsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 treeNewObjectPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
-treeDeadVerbsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 
 document.onclick <-
     fun _ ->
         treeFilterSettingsPopoverEl.classList.remove "visible"
         treeNewObjectPopoverEl.classList.remove "visible"
-        treeDeadVerbsPopoverEl.classList.remove "visible"
 
 Settings.init ()
 
@@ -487,11 +483,22 @@ type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
     | InspectorTab of objRef: int64
-    | HistoryTab
-    | TasksTab
-    | ErrorsTab
 
 let mutable private activeTab: OpenTab = GameTab
+
+/// Which view is showing in the sidebar - independent of `activeTab`/the
+/// main pane, VS-Code-Explorer-style: switching views here never touches
+/// what's open in the editor, and switching editor tabs never touches this.
+/// Tree is the default, always-available view; the other four only ever
+/// show real content once `isLoggedIn`.
+type private SidebarView =
+    | TreeView
+    | HistoryView
+    | TasksView
+    | ErrorsView
+    | DeadVerbsView
+
+let mutable private activeSidebarView: SidebarView = TreeView
 
 /// Which property, if any, is the specific sub-focus within the currently
 /// active `InspectorTab` - set alongside `activeTab` whenever
@@ -565,10 +572,7 @@ let mutable private tabHistory: OpenTab list = []
 
 let private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
-    | GameTab
-    | HistoryTab
-    | TasksTab
-    | ErrorsTab -> true
+    | GameTab -> true
     | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
     | InspectorTab o -> openInspectorTabs |> List.contains o
 
@@ -628,10 +632,7 @@ let private currentVerbDoc () : (int64 * string) option =
     match activeTab with
     | VerbTab(o, v) -> Some(o, v)
     | GameTab
-    | InspectorTab _
-    | HistoryTab
-    | TasksTab
-    | ErrorsTab -> None
+    | InspectorTab _ -> None
 
 /// Sends a Phase 4 structured IDE-action envelope (`{"action": ..., ...}`)
 /// over the main WebSocket - the sidecar's `Program.buildTryDispatch` parses
@@ -730,12 +731,11 @@ editor.onDidChangeCursorPosition (fun ev ->
 setDirty false
 statusPositionEl.textContent <- "Ln 1, Col 1"
 
-/// All six mutually-exclusive panes under `#main-pane` - `showPaneFor`
+/// All four mutually-exclusive panes under `#main-pane` - `showPaneFor`
 /// activates exactly one (or, for a `VerbTab` in history mode, two: the
 /// verb-history pane replaces the plain editor pane, everything else stays
 /// hidden the same way).
-let private allPanes =
-    [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl; historyPaneEl; tasksPaneEl; errorsPaneEl ]
+let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl ]
 
 let private activateOnly (paneEl: HTMLElement) : unit =
     for p in allPanes do
@@ -756,9 +756,15 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.layout ()
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
-    | HistoryTab -> activateOnly historyPaneEl
-    | TasksTab -> activateOnly tasksPaneEl
-    | ErrorsTab -> activateOnly errorsPaneEl
+
+/// The five mutually-exclusive views under `#sidebar` - same `activateOnly`
+/// pattern as `allPanes`/`showPaneFor` above, one level down.
+let private allSidebarViews =
+    [ sidebarViewTreeEl; sidebarViewHistoryEl; sidebarViewTasksEl; sidebarViewErrorsEl; sidebarViewDeadVerbsEl ]
+
+let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
+    for v in allSidebarViews do
+        if v = viewEl then v.classList.add "active" else v.classList.remove "active"
 
 /// The historical code currently shown in the verb-history diff view's
 /// "original" side - what "Restore this version" writes into the live
@@ -825,10 +831,7 @@ let private cacheCurrentEditorContent () : unit =
     match activeTab with
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
     | GameTab
-    | InspectorTab _
-    | HistoryTab
-    | TasksTab
-    | ErrorsTab -> ()
+    | InspectorTab _ -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -1172,10 +1175,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
 
         match tab with
         | GameTab
-        | InspectorTab _
-        | HistoryTab
-        | TasksTab
-        | ErrorsTab -> ()
+        | InspectorTab _ -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -1250,10 +1250,7 @@ and private closeInspectorTab (objRef: int64) : unit =
         match fallback with
         | InspectorTab o -> loadInspector o None
         | GameTab
-        | VerbTab _
-        | HistoryTab
-        | TasksTab
-        | ErrorsTab -> ()
+        | VerbTab _ -> ()
     else
         renderTabs ()
         renderTree ()
@@ -2436,17 +2433,50 @@ and private loadCorponymHistory () : unit =
     corponymHistoryListEl.innerHTML <- "Loading..."
     sendAction [ "action" ==> "corponym-history" ]
 
-/// Switches to the History tab and refreshes its corponym-history section
-/// (the search section stays whatever it last showed - search is explicit,
-/// user-triggered via Enter, not something to unconditionally re-run).
-and private openOrSwitchToHistory () : unit =
-    switchToTab HistoryTab
+/// Switches the sidebar to `view` - activating its container and triggering
+/// that view's own "always fresh" load, exactly the convention
+/// `loadCorponymHistory`/`loadTasks` already followed as main-pane tabs.
+/// Entirely independent of `activeTab`/the main pane (see `SidebarView`'s
+/// own comment) - unlike `switchToTab`, this always re-runs the view's load
+/// even if it's already the active view, matching every one of these views'
+/// existing "always fresh" behavior.
+and private switchToSidebarView (view: SidebarView) : unit =
+    activeSidebarView <- view
 
-    if isLoggedIn then
-        loadCorponymHistory ()
-    else
-        corponymHistoryListEl.innerHTML <- ""
-        historySearchResultsEl.innerHTML <- ""
+    match view with
+    | TreeView -> activateOnlySidebarView sidebarViewTreeEl
+    | HistoryView ->
+        activateOnlySidebarView sidebarViewHistoryEl
+
+        if isLoggedIn then
+            loadCorponymHistory ()
+        else
+            corponymHistoryListEl.innerHTML <- ""
+            historySearchResultsEl.innerHTML <- ""
+    | TasksView ->
+        activateOnlySidebarView sidebarViewTasksEl
+        if isLoggedIn then loadTasks () else tasksListEl.innerHTML <- ""
+    | ErrorsView ->
+        activateOnlySidebarView sidebarViewErrorsEl
+        renderErrorsList ()
+    | DeadVerbsView ->
+        activateOnlySidebarView sidebarViewDeadVerbsEl
+        treeDeadVerbsSummaryEl.textContent <- "Scanning..."
+        treeDeadVerbsListEl.innerHTML <- ""
+
+        async {
+            let! results = LspClient.findDeadVerbsAsync ()
+            renderDeadVerbsResults results
+        }
+        |> Async.StartImmediate
+
+    for btn, v in
+        [ viewTreeBtn, TreeView
+          viewHistoryBtn, HistoryView
+          viewTasksBtn, TasksView
+          viewErrorsBtn, ErrorsView
+          viewDeadVerbsBtn, DeadVerbsView ] do
+        if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
 /// a live objnum; see `IdeActions.searchHistory`'s own comment on why an
@@ -2495,16 +2525,11 @@ and private renderCorponymHistoryList (entries: (string * int64 * string * strin
             li.textContent <- sprintf "%s  %s $%s: %s" (date.ToString("yyyy-MM-dd HH:mm")) kind name detail
             corponymHistoryListEl.appendChild li |> ignore
 
-/// Refreshes the Tasks tab - always, same "always fresh" convention
+/// Refreshes the Tasks view - always, same "always fresh" convention
 /// `loadCorponymHistory` uses, since the queue changes constantly.
 and private loadTasks () : unit =
     tasksListEl.innerHTML <- "Loading..."
     sendAction [ "action" ==> "get-tasks" ]
-
-/// Switches to the Tasks tab and refreshes it.
-and private openOrSwitchToTasks () : unit =
-    switchToTab TasksTab
-    if isLoggedIn then loadTasks () else tasksListEl.innerHTML <- ""
 
 /// Renders `get-tasks`'s results - `queued_tasks()` minus its two obsolete
 /// tick/seconds-placeholder fields (see `IdeActions.getTasks`'s own
@@ -2588,17 +2613,12 @@ and private renderTasksList
             li.appendChild killBtn |> ignore
             tasksListEl.appendChild li |> ignore
 
-/// Switches to the Errors tab - unlike Tasks/History, there's no server
-/// round trip to refresh (errors only ever arrive as unsolicited
-/// `moodev-error` pushes, never fetched), so this just shows whatever's
-/// already in `errorLog`.
-and private openOrSwitchToErrors () : unit =
-    switchToTab ErrorsTab
-    renderErrorsList ()
-
-/// Rebuilds the Errors tab's list from `errorLog`. Traceback lines are
+/// Rebuilds the Errors view's list from `errorLog`. Traceback lines are
 /// plain text, not structured per-frame data yet - no click-to-jump in this
-/// pass (an explicit non-goal, not forgotten).
+/// pass (an explicit non-goal, not forgotten). There's no server round trip
+/// to refresh here (errors only ever arrive as unsolicited `moodev-error`
+/// pushes, never fetched) - this just re-shows whatever's already in
+/// `errorLog`.
 and private renderErrorsList () : unit =
     errorsListEl.innerHTML <- ""
 
@@ -2699,12 +2719,9 @@ and private renderTabs () : unit =
                             renderTabs ()
 
                 fun () -> closeInspectorTab objRef
-            | GameTab
-            | HistoryTab
-            | TasksTab
-            | ErrorsTab ->
-                // Never appear in `tabOrder` - Game/History/Tasks/Errors are
-                // static buttons outside the draggable strip.
+            | GameTab ->
+                // Never appears in `tabOrder` - Game is a static button
+                // outside the draggable strip.
                 fun () -> ()
 
         let closeBtn = document.createElement ("button")
@@ -2779,11 +2796,6 @@ and private renderTabs () : unit =
         tabGameBtn.classList.add "active"
     else
         tabGameBtn.classList.remove "active"
-
-    if activeTab = HistoryTab then
-        tabHistoryBtn.classList.add "active"
-    else
-        tabHistoryBtn.classList.remove "active"
 
 /// True if `node` itself is a filter match, respecting the filter's scope.
 /// "prop:" is exclusive - a property match never falls through to also
@@ -3231,31 +3243,17 @@ outputEl.onclick <-
             inputEl.focus ()
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
-tabHistoryBtn.onclick <- fun _ -> openOrSwitchToHistory ()
-tabTasksBtn.onclick <- fun _ -> openOrSwitchToTasks ()
-tabErrorsBtn.onclick <- fun _ -> openOrSwitchToErrors ()
+
+viewTreeBtn.onclick <- fun _ -> switchToSidebarView TreeView
+viewHistoryBtn.onclick <- fun _ -> switchToSidebarView HistoryView
+viewTasksBtn.onclick <- fun _ -> switchToSidebarView TasksView
+viewErrorsBtn.onclick <- fun _ -> switchToSidebarView ErrorsView
+viewDeadVerbsBtn.onclick <- fun _ -> switchToSidebarView DeadVerbsView
 
 errorsClearBtn.onclick <-
     fun _ ->
         errorLog <- []
         renderErrorsList ()
-
-treeDeadVerbsBtn.onclick <-
-    fun ev ->
-        ev.stopPropagation () |> ignore
-        treeFilterSettingsPopoverEl.classList.remove "visible"
-        treeNewObjectPopoverEl.classList.remove "visible"
-        treeDeadVerbsPopoverEl.classList.toggle "visible" |> ignore
-
-        if treeDeadVerbsPopoverEl.classList.contains "visible" then
-            treeDeadVerbsSummaryEl.textContent <- "Scanning..."
-            treeDeadVerbsListEl.innerHTML <- ""
-
-            async {
-                let! results = LspClient.findDeadVerbsAsync ()
-                renderDeadVerbsResults results
-            }
-            |> Async.StartImmediate
 
 historySearchInputEl.onkeydown <-
     fun ev ->
@@ -3323,7 +3321,9 @@ ws.onopen <-
         // MOO login succeeds, since the metadata graph it's drawn from has
         // nothing to do with which (if any) account this session is using.
         sidebarEl.classList.add ("visible")
+        activityBarEl.classList.add ("visible")
         mainTabsEl.classList.add ("visible")
+        switchToSidebarView TreeView
         PaneResizer.init PaneResizer.LeftRight "moodev-sidebar-width-pct" layoutEl sidebarResizerEl sidebarEl
         Sidebar.init ()
         Login.init (fun cmd -> ws.send cmd)
@@ -3802,7 +3802,7 @@ ws.onmessage <-
                     | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-search-result") then
-                if activeTab = HistoryTab then
+                if activeSidebarView = HistoryView then
                     let results =
                         lines
                         |> Array.choose (fun line ->
@@ -3824,7 +3824,7 @@ ws.onmessage <-
 
                     renderSearchResults results
             elif header.StartsWith("moodev-corponym-history") then
-                if activeTab = HistoryTab then
+                if activeSidebarView = HistoryView then
                     let entries =
                         lines
                         |> Array.choose (fun line ->
@@ -3840,7 +3840,7 @@ ws.onmessage <-
 
                     renderCorponymHistoryList entries
             elif header.StartsWith("moodev-tasks") then
-                if activeTab = TasksTab then
+                if activeSidebarView = TasksView then
                     let tasks =
                         lines
                         |> Array.map (fun line ->
@@ -3863,19 +3863,19 @@ ws.onmessage <-
                 let ok = headerField "ok: " header = Some "1"
 
                 if ok then
-                    if activeTab = TasksTab then loadTasks ()
+                    if activeSidebarView = TasksView then loadTasks ()
                 elif not (Array.isEmpty lines) then
                     window.alert (String.concat "\n" lines)
             elif header.StartsWith("moodev-error") then
                 // Unsolicited push from `#0:handle_uncaught_error`/
                 // `handle_task_timeout` (see moo-dev/CLAUDE.md's bootstrap
                 // verbs) - can arrive at any time, not just while the Errors
-                // tab is open, so this always logs it; `renderErrorsList`
-                // only actually touches the DOM when that tab is active.
+                // view is open, so this always logs it; `renderErrorsList`
+                // only actually touches the DOM when that view is active.
                 let kind = headerField "kind: " header |> Option.defaultValue "error"
                 errorLog <- (System.DateTime.Now, kind, lines |> List.ofArray) :: errorLog
 
-                if activeTab = ErrorsTab then
+                if activeSidebarView = ErrorsView then
                     renderErrorsList ()
         else
             let text = decoder.decode (ev.data: obj)

@@ -145,7 +145,46 @@ html, body {
   cursor: row-resize;
 }
 
-/* --- Sidebar (object/verb tree) --------------------------------------- */
+/* --- Activity bar (Tree/History/Tasks/Errors/Dead-verbs view switcher) -
+   Always visible once connected, independent of the sidebar's own collapse
+   state - same as VS Code's own activity bar. -------------------------- */
+
+#activity-bar {
+  flex: none;
+  display: none;
+  flex-direction: column;
+  width: 2.4em;
+  background: #161616;
+  border-right: 1px solid #444;
+}
+
+#activity-bar.visible {
+  display: flex;
+}
+
+.activity-btn {
+  background: none;
+  border: none;
+  border-left: 2px solid transparent;
+  color: #888;
+  cursor: pointer;
+  padding: 0.6em 0;
+  font-family: inherit;
+  font-size: 1.2em;
+  line-height: 1;
+}
+
+.activity-btn:hover {
+  color: #ddd;
+}
+
+.activity-btn.active {
+  color: #fff;
+  border-left-color: #6cf;
+  background: #1e1e1e;
+}
+
+/* --- Sidebar (tree/history/tasks/errors/dead-verbs views) ------------- */
 
 #sidebar {
   flex: 0 0 22%;
@@ -153,6 +192,17 @@ html, body {
   display: none; /* shown once connected, same gating as #editor-pane */
   flex-direction: column;
   border-right: 1px solid #444;
+}
+
+.sidebar-view {
+  flex: 1;
+  min-height: 0;
+  display: none;
+  flex-direction: column;
+}
+
+.sidebar-view.active {
+  display: flex;
 }
 
 #sidebar.visible {
@@ -174,7 +224,7 @@ html, body {
   display: block;
   width: 100%;
   box-sizing: border-box;
-  padding: 0.3em 7em 0.3em 0.6em;
+  padding: 0.3em 5.4em 0.3em 0.6em;
   background: #222;
   color: #ddd;
   border: none;
@@ -215,10 +265,6 @@ html, body {
   right: 1.8em;
 }
 
-#tree-dead-verbs-btn {
-  right: 5.4em;
-}
-
 .sidebar-filter-clear:hover,
 .sidebar-filter-settings-btn:hover {
   color: #6cf;
@@ -235,23 +281,6 @@ html, body {
   border-radius: 4px;
   padding: 0.3em 0.6em;
   white-space: nowrap;
-}
-
-/* Unlike the settings/new-object popovers (short, fixed labels), this one's
-   content (a verb-name list) is unpredictably wide - constrain it and wrap
-   instead of letting `white-space: nowrap` push the right-anchored box past
-   the sidebar's own left edge, off-screen. */
-#tree-dead-verbs-popover {
-  width: 22em;
-  max-width: 90vw;
-  max-height: 60vh;
-  overflow-y: auto;
-  white-space: normal;
-}
-
-#tree-dead-verbs-list li {
-  white-space: normal;
-  word-break: break-word;
 }
 
 .tree-filter-settings-popover.visible {
@@ -455,10 +484,7 @@ html, body {
 #editor-pane,
 #terminal-pane,
 #inspector-pane,
-#verb-history-pane,
-#history-pane,
-#tasks-pane,
-#errors-pane {
+#verb-history-pane {
   flex: 1;
   min-height: 0;
   display: none;
@@ -468,10 +494,7 @@ html, body {
 #editor-pane.active,
 #terminal-pane.active,
 #inspector-pane.active,
-#verb-history-pane.active,
-#history-pane.active,
-#tasks-pane.active,
-#errors-pane.active {
+#verb-history-pane.active {
   display: flex;
 }
 
@@ -526,9 +549,9 @@ html, body {
   align-self: flex-start;
 }
 
-/* --- Global history tab (content search + corponym history) ----------- */
+/* --- History view (content search + corponym history) ----------------- */
 
-#history-pane {
+#sidebar-view-history {
   overflow-y: auto;
   padding: 0.8em 1em;
   gap: 1em;
@@ -547,9 +570,9 @@ html, body {
   overflow-y: auto;
 }
 
-/* --- Tasks tab ---------------------------------------------------------- */
+/* --- Tasks view ----------------------------------------------------------- */
 
-#tasks-pane {
+#sidebar-view-tasks {
   overflow-y: auto;
   padding: 0.8em 1em;
 }
@@ -560,9 +583,9 @@ html, body {
   gap: 0.3em;
 }
 
-/* --- Errors tab --------------------------------------------------------- */
+/* --- Errors view ----------------------------------------------------------- */
 
-#errors-pane {
+#sidebar-view-errors {
   overflow-y: auto;
   padding: 0.8em 1em;
 }
@@ -571,6 +594,18 @@ html, body {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* --- Dead-verbs view -------------------------------------------------- */
+
+#sidebar-view-dead-verbs {
+  overflow-y: auto;
+  padding: 0.8em 1em;
+}
+
+#tree-dead-verbs-summary {
+  color: #999;
+  margin-bottom: 0.6em;
 }
 
 /* --- Object inspector ------------------------------------------------- */
