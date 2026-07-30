@@ -818,6 +818,51 @@ let removeParent
                 ct
     }
 
+/// Adds `objRef` as one more parent of some *other* object - the same
+/// `chparents` operation `addParent` performs, just initiated from this
+/// object's own inspector instead of the child's. `childExpr` is evaluated
+/// the same "any expression resolving to a valid object" way every other
+/// object-expression field already is. Re-exports the *child*, not
+/// `objRef` - the child's `object.moo` is what actually changed - so the
+/// resolved child ref is threaded back out of the eval result first.
+let addChild
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (childExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let exprLit = "\"" + childExpr.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; child = #-1; try childResult = eval("return " + {exprLit} + ";"); if (childResult[1]) child = childResult[2]; try curr = parents(child); chparents(child, {{@curr, {o}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext, "child" -> tostr(child)]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let childRef = int64 (root.GetProperty("child").GetString().TrimStart('#'))
+                    let! gitError = exportAndCommitObject config session childRef "parents" GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-child-add-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// Creates a new object - `create(parent, player)`. `parentExpr` is an
 /// arbitrary MOO expression (`#5`, `$room`, ...) evaluated server-side, the
 /// same "type a real MOO expression" convention `setProperty`'s value
@@ -1115,6 +1160,7 @@ endif"""
                    // `.name`, not a display string like `"#6 (#6)"`.
                    rawName = root.GetProperty("name").GetString()
                    owner = refOf (root.GetProperty("owner").GetString()) (root.GetProperty("ownername").GetString())
+                   connectedPlayerRef = connectedPlayerRef
                    connectedPlayerDisplay = connectedPlayerDisplay
                    aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> Array.ofSeq
                    player = flag "player"

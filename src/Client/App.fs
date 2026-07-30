@@ -1270,48 +1270,51 @@ and private mkQuickFillInput
 
     group, input
 
-/// Wraps an already-built "Add ..." `<tr>` so it starts collapsed behind a
-/// small "+" trigger row, only revealing the real fields once clicked - the
-/// same reveal-on-click convention the header's owner/rename pencils use,
-/// just shaped for a table row instead of an inline group. `colspan` must
-/// match the table's real column count so the trigger's single cell spans
-/// the same width as the rows above it. Returns the trigger row - caller
-/// appends both it and `fullRow` to the table, in that order.
-and private mkCollapsedAddRow (colspan: int) (label: string) (fullRow: HTMLElement) : HTMLElement =
-    let triggerRow = document.createElement ("tr")
-    let triggerTd = document.createElement ("td")
-    triggerTd.setAttribute ("colspan", string colspan)
-
+/// A small "+" trigger that reveals an already-built (currently hidden)
+/// element on click, then hides itself - the same reveal-on-click
+/// convention the header's owner/rename pencils use. `target` should
+/// already be `display:none`; this only wires the toggle, it doesn't set
+/// the initial hidden state (callers do that themselves, since some also
+/// need to seed default field values first).
+and private mkAddTrigger (label: string) (target: HTMLElement) : HTMLElement =
     let triggerBtn = document.createElement ("button")
     triggerBtn.classList.add "inspector-add-property-btn"
     triggerBtn.textContent <- "+"
     triggerBtn.title <- label
 
-    fullRow.setAttribute ("style", "display:none")
-
     triggerBtn.onclick <-
         fun _ ->
-            triggerRow.setAttribute ("style", "display:none")
-            fullRow.setAttribute ("style", "")
+            triggerBtn.setAttribute ("style", "display:none")
+            target.setAttribute ("style", "")
 
-    triggerTd.appendChild triggerBtn |> ignore
-    triggerRow.appendChild triggerTd |> ignore
-    triggerRow
+    triggerBtn
 
 /// Renders a titled list of clickable object links into `container` - shared
 /// by the inspector pane's Parents/Children sections. Each entry opens that
-/// object's own inspector on click.
+/// object's own inspector on click. `onAdd`, when `Some (singular label,
+/// callback)`, puts a "+" trigger inline with the section title (e.g.
+/// "Parents (2) [+]") - clicking it reveals an add-field appended as the
+/// list's own last item (a real new line in the same list, not a separate
+/// control floating below it), matching "new line after the last existing
+/// item, or first if none" for the empty case too, since it's simply the
+/// last child of a container that otherwise only holds existing items.
 and private renderObjRefList
     (container: HTMLElement)
     (title: string)
     (refs: (int64 * string) list)
     (onRemove: (int64 -> unit) option)
+    (onAdd: (string * (string -> unit)) option)
     : unit =
-    let section = document.createElement ("div")
+    let titleRow = document.createElement ("div")
+    titleRow.classList.add "inspector-section-title-row"
+
     let titleEl = document.createElement ("div")
     titleEl.classList.add "inspector-section-title"
     titleEl.textContent <- sprintf "%s (%d)" title refs.Length
-    section.appendChild titleEl |> ignore
+    titleRow.appendChild titleEl |> ignore
+
+    let section = document.createElement ("div")
+    section.appendChild titleRow |> ignore
 
     let list = document.createElement ("div")
     list.classList.add "inspector-refs"
@@ -1338,6 +1341,33 @@ and private renderObjRefList
 
         list.appendChild item |> ignore
 
+    match onAdd with
+    | Some(label, addFn) ->
+        let addItem = document.createElement ("span")
+        addItem.classList.add "inspector-add-parent"
+        addItem.setAttribute ("style", "display:none")
+
+        let addInput = document.createElement ("input") :?> HTMLInputElement
+        addInput.classList.add "inspector-property-value"
+        addInput.placeholder <- "#5, $room, ... (MOO expr)"
+
+        let addBtn = document.createElement ("button")
+        addBtn.classList.add "inspector-add-property-btn"
+        addBtn.textContent <- "+"
+        addBtn.title <- sprintf "Add %s" label
+
+        addBtn.onclick <-
+            fun _ ->
+                let expr = addInput.value.Trim()
+                if expr <> "" then addFn expr
+
+        addItem.appendChild addInput |> ignore
+        addItem.appendChild addBtn |> ignore
+        list.appendChild addItem |> ignore
+
+        titleRow.appendChild (mkAddTrigger (sprintf "Add %s" label) addItem) |> ignore
+    | None -> ()
+
     section.appendChild list |> ignore
     container.appendChild section |> ignore
 
@@ -1359,17 +1389,34 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     inspectorPropertyLastValues <- Map.empty
     inspectorPropertyPreviews <- Map.empty
 
-    // "player" (the MOO expression every owner-picker's quick-fill button
-    // sends) always means whoever is connected on *this* session - shown
-    // here so the button reads e.g. "You (Wizard (#3))" instead of a bare
-    // "You" that doesn't say what it actually resolves to right now.
+    // Whoever is connected on *this* session - shown in the "You" button's
+    // own label (e.g. "You (Wizard (#3))") and used as its actual quick-fill
+    // value (a real resolved objref, not the bare "player" expression - it
+    // used to send that literal keyword, but a resolved ref is what was
+    // asked for).
     let connectedPlayerDisplay: obj = info?connectedPlayerDisplay
+
+    let connectedPlayerRef: int64 option =
+        let raw: obj = info?connectedPlayerRef
+        if isNullOrUndefined raw then None else Some(int64 (unbox<float> raw))
 
     let youLabel =
         if isNullOrUndefined connectedPlayerDisplay then
             "You"
         else
             sprintf "You (%s)" (unbox<string> connectedPlayerDisplay)
+
+    // Shared by every owner picker in this pane (property-add, verb-add,
+    // header owner-edit) - "This object" is only offered when it wouldn't
+    // just duplicate "You" (i.e. the connected player isn't already the
+    // object being edited).
+    let ownerQuickFills: (string * string) list =
+        let youValue = connectedPlayerRef |> Option.map (sprintf "#%d") |> Option.defaultValue "player"
+
+        if connectedPlayerRef = Some objRef then
+            [ youLabel, youValue ]
+        else
+            [ youLabel, youValue; "This object", sprintf "#%d" objRef ]
 
     let header = document.createElement ("div")
     header.classList.add "inspector-header"
@@ -1482,11 +1529,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         editBtn.title <- "Change owner"
 
         let editGroup, ownerEditInput =
-            mkQuickFillInput
-                "player, #5, or $room"
-                (sprintf "#%d" ownerRef)
-                [ youLabel, "player"; "This object", sprintf "#%d" objRef ]
-                true
+            mkQuickFillInput "player, #5, or $room" (sprintf "#%d" ownerRef) ownerQuickFills true
 
         editGroup.setAttribute ("style", "display:none")
 
@@ -1568,55 +1611,23 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         "Parents"
         (toRefList (unbox info?parents))
         (Some(fun parentRef -> sendAction [ "action" ==> "remove-parent"; "obj" ==> int objRef; "parent" ==> int parentRef ]))
+        (Some("parent", fun expr -> sendAction [ "action" ==> "add-parent"; "obj" ==> int objRef; "parentExpr" ==> expr ]))
 
-    renderObjRefList inspectorContentEl "Children" (toRefList (unbox info?children)) None
-
-    // Only parent is editable here - children are out of scope, and adding
-    // one is just `chparents` on the *child*, already covered by this same
-    // Add-parent widget from the other side. Collapsed behind a trigger
-    // until clicked, same reveal-on-click convention as the header's
-    // owner/rename pencils.
-    let addParentRow = document.createElement ("div")
-    addParentRow.classList.add "inspector-add-parent"
-    addParentRow.setAttribute ("style", "display:none")
-
-    let addParentInput = document.createElement ("input") :?> HTMLInputElement
-    addParentInput.classList.add "inspector-property-value"
-    addParentInput.placeholder <- "#5, $room, ... (MOO expr)"
-
-    let addParentBtn = document.createElement ("button")
-    addParentBtn.classList.add "inspector-add-property-btn"
-    addParentBtn.textContent <- "+"
-    addParentBtn.title <- "Add parent"
-
-    addParentBtn.onclick <-
-        fun _ ->
-            let expr = addParentInput.value.Trim()
-            if expr <> "" then
-                sendAction [ "action" ==> "add-parent"; "obj" ==> int objRef; "parentExpr" ==> expr ]
-
-    addParentRow.appendChild addParentInput |> ignore
-    addParentRow.appendChild addParentBtn |> ignore
-
-    let addParentTriggerBtn = document.createElement ("button")
-    addParentTriggerBtn.classList.add "inspector-add-property-btn"
-    addParentTriggerBtn.textContent <- "+"
-    addParentTriggerBtn.title <- "Add parent"
-
-    addParentTriggerBtn.onclick <-
-        fun _ ->
-            addParentTriggerBtn.setAttribute ("style", "display:none")
-            addParentRow.setAttribute ("style", "")
-
-    inspectorContentEl.appendChild addParentTriggerBtn |> ignore
-    inspectorContentEl.appendChild addParentRow |> ignore
+    // No per-item removal here - removing a child is already possible from
+    // *that* child's own Parents section (removing this object from its
+    // parent list), so it isn't duplicated on this side.
+    renderObjRefList
+        inspectorContentEl
+        "Children"
+        (toRefList (unbox info?children))
+        None
+        (Some("child", fun expr -> sendAction [ "action" ==> "add-child"; "obj" ==> int objRef; "childExpr" ==> expr ]))
 
     let propsSection = document.createElement ("div")
     let propsTitle = document.createElement ("div")
     propsTitle.classList.add "inspector-section-title"
     let props: obj[] = unbox info?properties
     propsTitle.textContent <- sprintf "Properties (%d)" props.Length
-    propsSection.appendChild propsTitle |> ignore
 
     let propsTable = document.createElement ("table")
     propsTable.classList.add "inspector-table"
@@ -1791,7 +1802,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     ownerWidget.classList.add "inspector-owner-widget"
 
     let ownerEditGroup, addOwnerInput =
-        mkQuickFillInput "player, #5, or $room" "player" [ youLabel, "player"; "This object", sprintf "#%d" objRef ] false
+        mkQuickFillInput "player, #5, or $room" "player" ownerQuickFills false
 
     // The object's own current owner - reuses `ownerVal`, already fetched
     // above for the header's "Owner:" row - as both the auto-label's text
@@ -1861,9 +1872,15 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addPropRow.appendChild (mkCell permsWidget) |> ignore
     addPropRow.appendChild (mkCell addValueInput) |> ignore
     addPropRow.appendChild (mkCell addBtn) |> ignore
-    propsTable.appendChild (mkCollapsedAddRow 5 "Add property" addPropRow) |> ignore
+    addPropRow.setAttribute ("style", "display:none")
     propsTable.appendChild addPropRow |> ignore
 
+    let propsTitleRow = document.createElement ("div")
+    propsTitleRow.classList.add "inspector-section-title-row"
+    propsTitleRow.appendChild propsTitle |> ignore
+    propsTitleRow.appendChild (mkAddTrigger "Add property" addPropRow) |> ignore
+
+    propsSection.appendChild propsTitleRow |> ignore
     propsSection.appendChild propsTable |> ignore
 
     inspectorContentEl.appendChild propsSection |> ignore
@@ -1873,7 +1890,6 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     verbsTitle.classList.add "inspector-section-title"
     let verbs: obj[] = unbox info?verbs
     verbsTitle.textContent <- sprintf "Verbs (%d)" verbs.Length
-    verbsSection.appendChild verbsTitle |> ignore
 
     let verbsTable = document.createElement ("table")
     verbsTable.classList.add "inspector-table"
@@ -1935,7 +1951,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     // Same shared widget the property-owner picker uses above - literally
     // the same component, per the review note asking for consistency.
     let addVerbOwnerGroup, addVerbOwnerInput =
-        mkQuickFillInput "player, #5, or $room" "player" [ youLabel, "player"; "This object", sprintf "#%d" objRef ] false
+        mkQuickFillInput "player, #5, or $room" "player" ownerQuickFills false
 
     // Verbs only ever have four permission bits - r/w/x/d (Read/Write/Exec/
     // Debug) - confirmed against `ToastStunt/src/verbs.cc`'s
@@ -2063,9 +2079,15 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addVerbRow.appendChild (mkVerbCell prepGroup) |> ignore
     addVerbRow.appendChild (mkVerbCell iobjSelect) |> ignore
     addVerbRow.appendChild (mkVerbCell addVerbBtn) |> ignore
-    verbsTable.appendChild (mkCollapsedAddRow 7 "Add verb" addVerbRow) |> ignore
+    addVerbRow.setAttribute ("style", "display:none")
     verbsTable.appendChild addVerbRow |> ignore
 
+    let verbsTitleRow = document.createElement ("div")
+    verbsTitleRow.classList.add "inspector-section-title-row"
+    verbsTitleRow.appendChild verbsTitle |> ignore
+    verbsTitleRow.appendChild (mkAddTrigger "Add verb" addVerbRow) |> ignore
+
+    verbsSection.appendChild verbsTitleRow |> ignore
     verbsSection.appendChild verbsTable |> ignore
     inspectorContentEl.appendChild verbsSection |> ignore
 
@@ -2355,9 +2377,8 @@ and private flattenVisibleRows
     roots |> Array.sort |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
 
 /// Renders the currently-visible tree into `#tree-list` - reuses
-/// `renderList`'s old DOM idiom (`.picker-row`/`.picker-row-icon`/
-/// `.selected`/`.placeholder`), plus depth indentation and an expand
-/// chevron on object rows.
+/// `renderList`'s old DOM idiom (`.picker-row`/`.selected`/`.placeholder`),
+/// plus depth indentation and an expand chevron on object rows.
 and private renderTreeRows (rows: TreeRow list) : unit =
     treeListEl.innerHTML <- ""
 
@@ -2397,22 +2418,6 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
                 li.appendChild labelSpan |> ignore
 
-                let iconBtn = document.createElement ("button")
-                iconBtn.classList.add "picker-row-icon"
-                iconBtn.textContent <- "ⓘ"
-                iconBtn.title <- "Open inspector"
-                iconBtn.onclick <-
-                    fun ev ->
-                        ev.stopPropagation () |> ignore
-
-                        if treeFilterText.Trim() <> "" then
-                            lastFilterSelectedObjRef <- Some objRef
-
-                        selectedObjRef <- Some objRef
-                        openOrSwitchToInspector objRef
-
-                li.appendChild iconBtn |> ignore
-
                 if activeTab = InspectorTab objRef || selectedObjRef = Some objRef then
                     li.classList.add "selected"
 
@@ -2428,6 +2433,10 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                         // clicking a verb row already highlights it - doesn't
                         // require the inspector to be open.
                         selectedObjRef <- Some objRef
+
+                        // Opens/switches to this object's inspector directly -
+                        // there's no separate "ⓘ" button for this anymore.
+                        openOrSwitchToInspector objRef
 
                         if isExpandable then
                             let wasExpanded = Set.contains objRef expandedRefs
@@ -2981,8 +2990,9 @@ ws.onmessage <-
                 || header.StartsWith("moodev-parent-add-result")
                 || header.StartsWith("moodev-parent-remove-result")
                 || header.StartsWith("moodev-name-set-result")
+                || header.StartsWith("moodev-child-add-result")
             then
-                // All five share the exact same "full inspector refresh on
+                // All six share the exact same "full inspector refresh on
                 // success, diagnostics on failure" shape as every other
                 // mutating inspector action.
                 match headerField "object: #" header with

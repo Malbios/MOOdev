@@ -278,23 +278,6 @@ html, body {
   gap: 0.4em;
 }
 
-.picker-row-icon {
-  flex: none;
-  margin-left: auto;
-  background: none;
-  border: none;
-  color: #777;
-  cursor: pointer;
-  padding: 0 0.3em;
-  font-family: inherit;
-  font-size: 0.95em;
-  line-height: 1;
-}
-
-.picker-row-icon:hover {
-  color: #6cf;
-}
-
 .tree-row {
   display: flex;
   align-items: center;
@@ -618,6 +601,16 @@ html, body {
   margin-bottom: 0.3em;
 }
 
+.inspector-section-title-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+}
+
+.inspector-section-title-row .inspector-section-title {
+  margin-bottom: 0;
+}
+
 .inspector-refs {
   display: flex;
   flex-direction: column;
@@ -649,6 +642,10 @@ html, body {
   padding: 0 0.3em;
   font-size: 1.1em;
   line-height: 1;
+  /* Pencil glyph direction is font-dependent and unreliable across
+     platforms - flip whatever renders so the tip reliably points
+     lower-left, instead of chasing a different Unicode character again. */
+  transform: scaleX(-1);
 }
 
 .inspector-owner-edit-btn:hover {

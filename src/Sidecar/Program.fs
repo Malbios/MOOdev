@@ -366,6 +366,9 @@ let private buildTryDispatch
                 | "remove-parent" ->
                     do! IdeActions.removeParent config session webSocket (getObj ()) (root.GetProperty("parent").GetInt64()) ct
                     return true
+                | "add-child" ->
+                    do! IdeActions.addChild config session webSocket (getObj ()) (getStr "childExpr") ct
+                    return true
                 | "get-live-children" ->
                     do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
                     return true
