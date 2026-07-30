@@ -958,12 +958,6 @@ let private removeLiveNode (objRef: int64) : unit =
 /// for" on demand.
 let mutable private expandedRefs: Set<int64> = Set.empty
 
-/// Which objects have their "Children" virtual group node expanded, by
-/// objRef - child *objects* live behind this gate, not directly under their
-/// parent's own row, so revealing a deeply-nested object needs every
-/// ancestor's children group opened, not just its own row.
-let mutable private expandedChildGroups: Set<int64> = Set.empty
-
 /// Objects whose live children have been asked for at least once (a
 /// `get-live-children` round trip has landed, whether or not it turned up
 /// anything new) - lets `isExpandable` show a chevron before the first ask
@@ -1000,32 +994,26 @@ let rec private ancestorsOf (visited: Set<int64>) (objRef: int64) : Set<int64> =
 
 /// Reveals `lastFilterSelectedObjRef` (if anything was selected while
 /// filtering) by merging its own ancestor path into the persistent
-/// `expandedRefs`/`expandedChildGroups` - the same two sets a plain click on
-/// an already-visible object would touch, just computed for the whole path
-/// at once instead of one click per level. A no-op if nothing was selected
-/// (e.g. the user typed a search and cleared it without ever clicking a
-/// result) - there's nothing to preserve in that case, which is the point:
-/// only an explicit selection survives the clear, not every match.
+/// `expandedRefs` - the same set a plain click on an already-visible object
+/// would touch, just computed for the whole path at once instead of one
+/// click per level. A no-op if nothing was selected (e.g. the user typed a
+/// search and cleared it without ever clicking a result) - there's nothing
+/// to preserve in that case, which is the point: only an explicit selection
+/// survives the clear, not every match.
 let private promoteFilterExpansionIfAny () : unit =
     match lastFilterSelectedObjRef with
     | None -> ()
-    | Some objRef ->
-        let path = Set.add objRef (ancestorsOf Set.empty objRef)
-        expandedRefs <- Set.union expandedRefs path
-        expandedChildGroups <- Set.union expandedChildGroups path
+    | Some objRef -> expandedRefs <- Set.union expandedRefs (Set.add objRef (ancestorsOf Set.empty objRef))
 
 /// Live filter text, updated on every keystroke in the tree's filter box -
 /// see the `oninput` wiring below.
 let mutable private treeFilterText = ""
 
-/// One row of the flattened, currently-visible tree. `ChildGroupRow` is a
-/// virtual node - not a real MOO object - representing an object's
-/// collapsible "Children" bucket, so it can be hidden independently of the
-/// object row itself. Its contents are just more `ObjectRow`s, one depth
-/// deeper.
-type private TreeRow =
-    | ObjectRow of objRef: int64 * depth: int * isExpandable: bool
-    | ChildGroupRow of objRef: int64 * depth: int * count: int
+/// One row of the flattened, currently-visible tree: an object, its depth,
+/// and whether it has anything to expand into. Children sit directly under
+/// their parent, one depth deeper, once it's expanded - no separate
+/// "Children" grouping node.
+type private TreeRow = int64 * int * bool
 
 /// Switches the main area to `tab`, caching whatever was showing before the
 /// switch. A no-op if `tab` is already active (e.g. clicking the tab you're
@@ -2711,14 +2699,13 @@ and private ancestorExpansionSet (filterText: string) : Set<int64> =
     |> Seq.map (fun n -> n.ObjRef)
     |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
 
-/// One row of the flattened, currently-*visible* tree - either an object
-/// (with its depth and whether it has anything to expand into), the
-/// virtual "Children" group node for an expanded object that has any, or
-/// (once that group is itself expanded) one of its actual child objects.
+/// One row of the flattened, currently-*visible* tree - an object, with its
+/// depth and whether it has anything to expand into. Children render
+/// directly under their expanded parent, one depth deeper - no separate
+/// "Children" grouping node to open first.
 and private flattenVisibleRows
     (hideEmptyLeaves: bool)
     (expanded: Set<int64>)
-    (expandedChildGroups: Set<int64>)
     (liveChildrenChecked: Set<int64>)
     (roots: int64[])
     : TreeRow list =
@@ -2745,7 +2732,7 @@ and private flattenVisibleRows
         match Map.tryFind objRef treeNodes with
         | None -> []
         | Some _ when Set.contains objRef visited ->
-            [ ObjectRow(objRef, depth, false) ] // cycle guard: render once, never recurse again
+            [ objRef, depth, false ] // cycle guard: render once, never recurse again
         | Some node ->
             let visited = Set.add objRef visited
             let visibleChildren = childrenOf node
@@ -2754,27 +2741,16 @@ and private flattenVisibleRows
                 not (Array.isEmpty visibleChildren)
                 || not (Set.contains objRef liveChildrenChecked) // unknown - assume yes until asked once
 
-            let selfRow = ObjectRow(objRef, depth, isExpandable)
+            let selfRow: TreeRow = objRef, depth, isExpandable
 
             if not (Set.contains objRef expanded) then
                 [ selfRow ]
             else
-                let childGroupRows =
-                    if Array.isEmpty visibleChildren then
-                        []
-                    else
-                        let groupRow = ChildGroupRow(objRef, depth + 1, visibleChildren.Length)
-
-                        if Set.contains objRef expandedChildGroups then
-                            groupRow
-                            :: (visibleChildren
-                                |> Array.sort
-                                |> Array.collect (fun r -> go visited (depth + 2) r |> Array.ofList)
-                                |> List.ofArray)
-                        else
-                            [ groupRow ]
-
-                selfRow :: childGroupRows
+                selfRow
+                :: (visibleChildren
+                    |> Array.sort
+                    |> Array.collect (fun r -> go visited (depth + 1) r |> Array.ofList)
+                    |> List.ofArray)
 
     roots
     |> Array.filter (fun r -> not hideEmptyLeaves || not (isEmptyLeaf r))
@@ -2794,87 +2770,64 @@ and private renderTreeRows (rows: TreeRow list) : unit =
         li.classList.add "placeholder"
         treeListEl.appendChild li |> ignore
     else
-        for row in rows do
+        for objRef, depth, isExpandable in rows do
             let li = document.createElement ("li")
             li.classList.add "picker-row"
             li.classList.add "tree-row"
+            li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
 
-            match row with
-            | ObjectRow(objRef, depth, isExpandable) ->
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
+            let chevron = document.createElement ("span")
+            chevron.classList.add "tree-chevron"
 
-                let chevron = document.createElement ("span")
-                chevron.classList.add "tree-chevron"
+            if isExpandable then
+                chevron.textContent <- (if Set.contains objRef expandedRefs then "▾" else "▸")
 
-                if isExpandable then
-                    chevron.textContent <- (if Set.contains objRef expandedRefs then "▾" else "▸")
+            li.appendChild chevron |> ignore
 
-                li.appendChild chevron |> ignore
+            let kindIcon = document.createElement ("span")
+            kindIcon.classList.add "tree-icon"
+            kindIcon.classList.add "tree-icon-object"
+            kindIcon.textContent <- "◇"
+            li.appendChild kindIcon |> ignore
 
-                let kindIcon = document.createElement ("span")
-                kindIcon.classList.add "tree-icon"
-                kindIcon.classList.add "tree-icon-object"
-                kindIcon.textContent <- "◇"
-                li.appendChild kindIcon |> ignore
+            let labelSpan = document.createElement ("span")
 
-                let labelSpan = document.createElement ("span")
+            labelSpan.textContent <-
+                (Map.tryFind objRef treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" objRef))
 
-                labelSpan.textContent <-
-                    (Map.tryFind objRef treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" objRef))
+            li.appendChild labelSpan |> ignore
 
-                li.appendChild labelSpan |> ignore
+            if selectedObjRef = Some objRef then
+                li.classList.add "selected"
 
-                if selectedObjRef = Some objRef then
-                    li.classList.add "selected"
+            li.onclick <-
+                fun _ ->
+                    // Remember this as "the one" while a filter's active,
+                    // so clearing it (`promoteFilterExpansionIfAny`) keeps
+                    // this object in view - not every other match too.
+                    if treeFilterText.Trim() <> "" then
+                        lastFilterSelectedObjRef <- Some objRef
 
-                li.onclick <-
-                    fun _ ->
-                        // Remember this as "the one" while a filter's active,
-                        // so clearing it (`promoteFilterExpansionIfAny`) keeps
-                        // this object in view - not every other match too.
-                        if treeFilterText.Trim() <> "" then
-                            lastFilterSelectedObjRef <- Some objRef
+                    // Selects and loads this object's inspector - always
+                    // fresh, and highlights the row immediately
+                    // (`openOrSwitchToInspector` sets `selectedObjRef`
+                    // itself).
+                    openOrSwitchToInspector objRef
 
-                        // Selects and loads this object's inspector - always
-                        // fresh, and highlights the row immediately
-                        // (`openOrSwitchToInspector` sets `selectedObjRef`
-                        // itself).
-                        openOrSwitchToInspector objRef
+                    if isExpandable then
+                        let wasExpanded = Set.contains objRef expandedRefs
 
-                        if isExpandable then
-                            let wasExpanded = Set.contains objRef expandedRefs
+                        expandedRefs <- if wasExpanded then Set.remove objRef expandedRefs else Set.add objRef expandedRefs
 
-                            expandedRefs <- if wasExpanded then Set.remove objRef expandedRefs else Set.add objRef expandedRefs
+                        // Every expand asks live, unconditionally - there's no
+                        // reliable client-side signal for "this corponym'd
+                        // object might have live-only children" without
+                        // asking, and the response is a cheap no-op merge
+                        // when nothing new turns up.
+                        if not wasExpanded then
+                            sendAction [ "action" ==> "get-live-children"; "obj" ==> int objRef ]
 
-                            // Every expand asks live, unconditionally - there's no
-                            // reliable client-side signal for "this corponym'd
-                            // object might have live-only children" without
-                            // asking, and the response is a cheap no-op merge
-                            // when nothing new turns up.
-                            if not wasExpanded then
-                                sendAction [ "action" ==> "get-live-children"; "obj" ==> int objRef ]
-
-                        renderTree ()
-            | ChildGroupRow(objRef, depth, count) ->
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
-                li.classList.add "tree-child-group"
-
-                let chevron = document.createElement ("span")
-                chevron.classList.add "tree-chevron"
-                chevron.textContent <- (if Set.contains objRef expandedChildGroups then "▾" else "▸")
-                li.appendChild chevron |> ignore
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- sprintf "Children (%d)" count
-                li.appendChild labelSpan |> ignore
-
-                li.onclick <-
-                    fun _ ->
-                        expandedChildGroups <-
-                            if Set.contains objRef expandedChildGroups then Set.remove objRef expandedChildGroups
-                            else Set.add objRef expandedChildGroups
-
-                        renderTree ()
+                    renderTree ()
 
             treeListEl.appendChild li |> ignore
 
@@ -2887,45 +2840,25 @@ and private renderTree () : unit =
     let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
 
     if treeFilterText.Trim() = "" then
-        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs expandedChildGroups liveChildrenChecked rootRefs)
+        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs liveChildrenChecked rootRefs)
     else
         let ancestorRefs = ancestorExpansionSet treeFilterText
         let expanded = Set.union expandedRefs ancestorRefs
+        let allRows = flattenVisibleRows hideEmptyLeaves expanded liveChildrenChecked rootRefs
 
-        // A matching child subtree can hide a match arbitrarily deep -
-        // every ancestor-of-a-match needs its children group force-open
-        // too, or the match is unreachable regardless of `expanded`, same
-        // reasoning as `expanded` itself one level up.
-        let expandedChildGroups = Set.union expandedChildGroups ancestorRefs
-
-        let allRows =
-            flattenVisibleRows hideEmptyLeaves expanded expandedChildGroups liveChildrenChecked rootRefs
-
-        // Keep a row if it's itself a match, or an ancestor object-row on
-        // the way to one - the children group survives on the same
-        // `ancestorRefs` test as `ObjectRow` - a forced-open group whose
-        // children don't lead anywhere gets built into `allRows` but its
-        // non-matching child `ObjectRow`s are dropped right below by that
-        // same arm.
+        // Keep a row if it's itself a match, or an ancestor on the way to
+        // one - expansion only ever reveals a path *down* to a match.
         allRows
-        |> List.filter (fun row ->
-            match row with
-            | ObjectRow(objRef, _, _) ->
-                Set.contains objRef ancestorRefs
-                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false)
-            | ChildGroupRow(objRef, _, _) -> Set.contains objRef ancestorRefs)
+        |> List.filter (fun (objRef, _, _) ->
+            Set.contains objRef ancestorRefs
+            || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false))
         |> renderTreeRows
 
 /// Reveals `objRef` in the tree (expanding every ancestor path to it) and
 /// opens `verbName` directly - used by go-to-definition, which already
-/// knows exactly which verb it wants open. Every ancestor's children group
-/// needs opening too, not just its row-level expand flag - child objects
-/// live behind that group gate, so without this the path down to `objRef`
-/// would stay hidden even though each ancestor's chevron looks expanded.
+/// knows exactly which verb it wants open.
 and private revealAndOpenVerb (objRef: int64) (verbName: string) : unit =
-    let ancestorPath = Set.add objRef (ancestorsOf Set.empty objRef)
-    expandedRefs <- Set.union expandedRefs ancestorPath
-    expandedChildGroups <- Set.union expandedChildGroups ancestorPath
+    expandedRefs <- Set.union expandedRefs (Set.add objRef (ancestorsOf Set.empty objRef))
     renderTree ()
     openOrSwitchToVerb objRef verbName
 
