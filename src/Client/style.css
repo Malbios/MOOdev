@@ -591,11 +591,18 @@ html, body {
 }
 
 .inspector-flag {
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
   border: 1px solid #444;
   border-radius: 3px;
   padding: 0.15em 0.5em;
   font-size: 0.85em;
   color: #777;
+}
+
+.inspector-flag:hover {
+  border-color: #6cf;
 }
 
 .inspector-flag.set {
@@ -615,6 +622,37 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   gap: 0.6em;
+}
+
+.inspector-ref-item {
+  display: flex;
+  align-items: center;
+  gap: 0.15em;
+}
+
+.inspector-add-parent {
+  display: flex;
+  gap: 0.4em;
+  margin-top: 0.4em;
+}
+
+.inspector-add-parent input {
+  flex: 1;
+  min-width: 0;
+}
+
+.inspector-owner-edit-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 0 0.3em;
+  font-size: 0.85em;
+  line-height: 1;
+}
+
+.inspector-owner-edit-btn:hover {
+  color: #6cf;
 }
 
 .inspector-table {

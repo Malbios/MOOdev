@@ -335,6 +335,34 @@ let private buildTryDispatch
                 | "create-object" ->
                     do! IdeActions.createObject config session webSocket (getStr "parentExpr") ct
                     return true
+                | "add-verb" ->
+                    do!
+                        IdeActions.addVerb
+                            config
+                            session
+                            webSocket
+                            (getObj ())
+                            (getStr "name")
+                            (getStr "ownerExpr")
+                            (getStr "perms")
+                            (getStr "dobj")
+                            (getStr "prep")
+                            (getStr "iobj")
+                            ct
+
+                    return true
+                | "set-owner" ->
+                    do! IdeActions.setOwner config session webSocket (getObj ()) (getStr "ownerExpr") ct
+                    return true
+                | "set-flag" ->
+                    do! IdeActions.setFlag config session webSocket (getObj ()) (getStr "flag") (root.GetProperty("value").GetInt32() = 1) ct
+                    return true
+                | "add-parent" ->
+                    do! IdeActions.addParent config session webSocket (getObj ()) (getStr "parentExpr") ct
+                    return true
+                | "remove-parent" ->
+                    do! IdeActions.removeParent config session webSocket (getObj ()) (root.GetProperty("parent").GetInt64()) ct
+                    return true
                 | "get-location" ->
                     do! IdeActions.getLocation config session webSocket ct
                     return true

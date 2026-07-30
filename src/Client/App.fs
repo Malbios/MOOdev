@@ -1242,7 +1242,12 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
 /// Renders a titled list of clickable object links into `container` - shared
 /// by the inspector pane's Parents/Children sections. Each entry opens that
 /// object's own inspector on click.
-and private renderObjRefList (container: HTMLElement) (title: string) (refs: (int64 * string) list) : unit =
+and private renderObjRefList
+    (container: HTMLElement)
+    (title: string)
+    (refs: (int64 * string) list)
+    (onRemove: (int64 -> unit) option)
+    : unit =
     let section = document.createElement ("div")
     let titleEl = document.createElement ("div")
     titleEl.classList.add "inspector-section-title"
@@ -1252,12 +1257,27 @@ and private renderObjRefList (container: HTMLElement) (title: string) (refs: (in
     let list = document.createElement ("div")
     list.classList.add "inspector-refs"
 
-    for objRef, name in refs do
+    for refObj, name in refs do
+        let item = document.createElement ("span")
+        item.classList.add "inspector-ref-item"
+
         let link = document.createElement ("span")
         link.classList.add "inspector-link"
         link.textContent <- name
-        link.onclick <- fun _ -> openOrSwitchToInspector objRef
-        list.appendChild link |> ignore
+        link.onclick <- fun _ -> openOrSwitchToInspector refObj
+        item.appendChild link |> ignore
+
+        match onRemove with
+        | Some remove ->
+            let removeBtn = document.createElement ("button")
+            removeBtn.classList.add "inspector-row-delete-btn"
+            removeBtn.textContent <- "🗑"
+            removeBtn.title <- sprintf "Remove %s as a parent" name
+            removeBtn.onclick <- fun _ -> remove refObj
+            item.appendChild removeBtn |> ignore
+        | None -> ()
+
+        list.appendChild item |> ignore
 
     section.appendChild list |> ignore
     container.appendChild section |> ignore
@@ -1348,6 +1368,58 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         link.onclick <- fun _ -> openOrSwitchToInspector ownerRef
         ownerRow.appendChild link |> ignore
 
+        // Editing is opt-in via this pencil - the link above stays a plain
+        // navigation click, same as it always has. `.owner = ` is
+        // wizard-only unconditionally (confirmed against
+        // `ToastStunt/src/execute.cc`'s `OP_PUT_PROP` handling of
+        // `BP_OWNER`), and the sidecar's connection always is one, so this
+        // is never actually blocked - failures here are user-input errors
+        // (a bad expression), not permission errors.
+        let editBtn = document.createElement ("button")
+        editBtn.classList.add "inspector-owner-edit-btn"
+        editBtn.textContent <- "✏"
+        editBtn.title <- "Change owner"
+
+        let editGroup = document.createElement ("span")
+        editGroup.classList.add "inspector-owner-edit-group"
+        editGroup.setAttribute ("style", "display:none")
+
+        let ownerEditInput = document.createElement ("input") :?> HTMLInputElement
+        ownerEditInput.classList.add "inspector-property-value"
+        ownerEditInput.placeholder <- "player, #5, or $room"
+        ownerEditInput.value <- sprintf "#%d" ownerRef
+
+        let ownerEditYouBtn = document.createElement ("button")
+        ownerEditYouBtn.classList.add "inspector-owner-quick-btn"
+        ownerEditYouBtn.textContent <- "You"
+        ownerEditYouBtn.onclick <- fun _ -> ownerEditInput.value <- "player"
+
+        let ownerEditSelfBtn = document.createElement ("button")
+        ownerEditSelfBtn.classList.add "inspector-owner-quick-btn"
+        ownerEditSelfBtn.textContent <- "This object"
+        ownerEditSelfBtn.onclick <- fun _ -> ownerEditInput.value <- sprintf "#%d" objRef
+
+        let ownerConfirmBtn = document.createElement ("button")
+        ownerConfirmBtn.classList.add "inspector-add-property-btn"
+        ownerConfirmBtn.textContent <- "✓"
+        ownerConfirmBtn.title <- "Confirm"
+
+        ownerConfirmBtn.onclick <-
+            fun _ ->
+                let expr = ownerEditInput.value.Trim()
+                if expr <> "" then
+                    sendAction [ "action" ==> "set-owner"; "obj" ==> int objRef; "ownerExpr" ==> expr ]
+
+        editGroup.appendChild ownerEditInput |> ignore
+        editGroup.appendChild ownerEditYouBtn |> ignore
+        editGroup.appendChild ownerEditSelfBtn |> ignore
+        editGroup.appendChild ownerConfirmBtn |> ignore
+
+        editBtn.onclick <- fun _ -> editGroup.setAttribute ("style", "")
+
+        ownerRow.appendChild editBtn |> ignore
+        ownerRow.appendChild editGroup |> ignore
+
     inspectorContentEl.appendChild ownerRow |> ignore
 
     // Only shown when the object actually has aliases - absent entirely for
@@ -1375,10 +1447,25 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
           "a", (info?anonymous: bool) ]
 
     for flagName, isSet in flags do
-        let badge = document.createElement ("span")
+        // Immediate toggle-on-click, no separate confirm step - same
+        // convention the property value inputs already use (autosave on
+        // blur). `flagName` here is always one of these seven hardcoded
+        // literals, never user-typed, so the sidecar's `setFlag` can splice
+        // it directly into the generated MOO statement safely.
+        let badge = document.createElement ("button")
         badge.classList.add "inspector-flag"
         if isSet then badge.classList.add "set"
         badge.textContent <- flagName
+        badge.title <- sprintf "Click to %s %s" (if isSet then "clear" else "set") flagName
+
+        badge.onclick <-
+            fun _ ->
+                sendAction
+                    [ "action" ==> "set-flag"
+                      "obj" ==> int objRef
+                      "flag" ==> flagName
+                      "value" ==> (if isSet then 0 else 1) ]
+
         flagsRow.appendChild badge |> ignore
 
     inspectorContentEl.appendChild flagsRow |> ignore
@@ -1388,8 +1475,38 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let toRefList (refs: obj[]) : (int64 * string) list =
         refs |> Array.map (fun r -> int64 (r?objRef: float), (r?name: string)) |> Array.toList
 
-    renderObjRefList inspectorContentEl "Parents" (toRefList (unbox info?parents))
-    renderObjRefList inspectorContentEl "Children" (toRefList (unbox info?children))
+    renderObjRefList
+        inspectorContentEl
+        "Parents"
+        (toRefList (unbox info?parents))
+        (Some(fun parentRef -> sendAction [ "action" ==> "remove-parent"; "obj" ==> int objRef; "parent" ==> int parentRef ]))
+
+    renderObjRefList inspectorContentEl "Children" (toRefList (unbox info?children)) None
+
+    // Only parent is editable here - children are out of scope, and adding
+    // one is just `chparents` on the *child*, already covered by this same
+    // Add-parent widget from the other side.
+    let addParentRow = document.createElement ("div")
+    addParentRow.classList.add "inspector-add-parent"
+
+    let addParentInput = document.createElement ("input") :?> HTMLInputElement
+    addParentInput.classList.add "inspector-property-value"
+    addParentInput.placeholder <- "#5, $room, ... (MOO expr)"
+
+    let addParentBtn = document.createElement ("button")
+    addParentBtn.classList.add "inspector-add-property-btn"
+    addParentBtn.textContent <- "+"
+    addParentBtn.title <- "Add parent"
+
+    addParentBtn.onclick <-
+        fun _ ->
+            let expr = addParentInput.value.Trim()
+            if expr <> "" then
+                sendAction [ "action" ==> "add-parent"; "obj" ==> int objRef; "parentExpr" ==> expr ]
+
+    addParentRow.appendChild addParentInput |> ignore
+    addParentRow.appendChild addParentBtn |> ignore
+    inspectorContentEl.appendChild addParentRow |> ignore
 
     let propsSection = document.createElement ("div")
     let propsTitle = document.createElement ("div")
@@ -1673,7 +1790,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     verbsTable.classList.add "inspector-table"
     let verbsHeaderRow = document.createElement ("tr")
 
-    for h in [ "Name"; "Perms"; "Dobj"; "Prep"; "Iobj"; "" ] do
+    for h in [ "Name"; "Owner"; "Perms"; "Dobj"; "Prep"; "Iobj"; "" ] do
         let th = document.createElement ("th")
         th.textContent <- h
         verbsHeaderRow.appendChild th |> ignore
@@ -1686,7 +1803,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let verbName: string = v?name
         tr.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
 
-        for cellText in [ v?name; v?perms; v?dobj; v?prep; v?iobj ] do
+        for cellText in [ v?name; v?owner; v?perms; v?dobj; v?prep; v?iobj ] do
             let td = document.createElement ("td")
             td.textContent <- (cellText: string)
             tr.appendChild td |> ignore
@@ -1711,6 +1828,178 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         tr.appendChild deleteTd |> ignore
 
         verbsTable.appendChild tr |> ignore
+
+    // Same real-`<tr>`-in-the-same-`<table>` shape as the properties table's
+    // own add row, so the Name/Owner/Perms/Dobj/Prep/Iobj columns above
+    // line up with the fields below.
+    let addVerbRow = document.createElement ("tr")
+    addVerbRow.classList.add "inspector-add-property"
+
+    let addVerbNameInput = document.createElement ("input") :?> HTMLInputElement
+    addVerbNameInput.classList.add "inspector-property-value"
+    addVerbNameInput.placeholder <- "name alias2 ..."
+
+    // Unlike a property's owner, a verb's owner has no chown-style
+    // auto-override (confirmed against `ToastStunt/src/db_verbs.cc` - no
+    // analog to `db_properties.cc`'s `insert_prop2` exists there), so this
+    // is always a plain editable field - no conditional hide/show needed.
+    let addVerbOwnerGroup = document.createElement ("span")
+    addVerbOwnerGroup.classList.add "inspector-owner-edit-group"
+
+    let addVerbOwnerInput = document.createElement ("input") :?> HTMLInputElement
+    addVerbOwnerInput.classList.add "inspector-property-value"
+    addVerbOwnerInput.placeholder <- "player, #5, or $room"
+    addVerbOwnerInput.value <- "player"
+
+    let addVerbOwnerYouBtn = document.createElement ("button")
+    addVerbOwnerYouBtn.classList.add "inspector-owner-quick-btn"
+    addVerbOwnerYouBtn.textContent <- "You"
+    addVerbOwnerYouBtn.title <- "Owned by the connected player"
+    addVerbOwnerYouBtn.onclick <- fun _ -> addVerbOwnerInput.value <- "player"
+
+    let addVerbOwnerThisBtn = document.createElement ("button")
+    addVerbOwnerThisBtn.classList.add "inspector-owner-quick-btn"
+    addVerbOwnerThisBtn.textContent <- "This object"
+    addVerbOwnerThisBtn.title <- "Owned by this object"
+    addVerbOwnerThisBtn.onclick <- fun _ -> addVerbOwnerInput.value <- sprintf "#%d" objRef
+
+    addVerbOwnerGroup.appendChild addVerbOwnerInput |> ignore
+    addVerbOwnerGroup.appendChild addVerbOwnerYouBtn |> ignore
+    addVerbOwnerGroup.appendChild addVerbOwnerThisBtn |> ignore
+
+    // Verbs only ever have four permission bits - r/w/x/d (Read/Write/Exec/
+    // Debug) - confirmed against `ToastStunt/src/verbs.cc`'s
+    // `validate_verb_info`; properties' `c` (Chown) doesn't apply here.
+    // Same popover pattern the properties table's own perms widget uses.
+    let verbPermsWidget = document.createElement ("div")
+    verbPermsWidget.classList.add "inspector-perms-widget"
+
+    let verbPermsToggleBtn = document.createElement ("button")
+    verbPermsToggleBtn.classList.add "pane-action-btn"
+    verbPermsToggleBtn.title <- "Permissions"
+
+    let verbPermsPopover = document.createElement ("div")
+    verbPermsPopover.classList.add "tree-filter-settings-popover"
+    verbPermsPopover.onclick <- fun ev -> ev.stopPropagation () |> ignore
+
+    let mkVerbPermCheckbox (label: string) (isChecked: bool) : HTMLInputElement =
+        let row = document.createElement ("label")
+        row.classList.add "settings-row"
+
+        let cb = document.createElement ("input") :?> HTMLInputElement
+        cb.setAttribute ("type", "checkbox")
+        cb.``checked`` <- isChecked
+
+        row.appendChild cb |> ignore
+        row.appendChild (document.createTextNode label) |> ignore
+        verbPermsPopover.appendChild row |> ignore
+        cb
+
+    // Read+Exec checked by default - a normal callable command verb; Write
+    // and Debug off, matching the properties widget's own "least-surprising
+    // default" convention.
+    let verbReadCb = mkVerbPermCheckbox "Read" true
+    let verbWriteCb = mkVerbPermCheckbox "Write" false
+    let verbExecCb = mkVerbPermCheckbox "Exec" true
+    let verbDebugCb = mkVerbPermCheckbox "Debug" false
+
+    let currentVerbPerms () : string =
+        [ verbReadCb, "r"; verbWriteCb, "w"; verbExecCb, "x"; verbDebugCb, "d" ]
+        |> List.filter (fun (cb, _) -> cb.``checked``)
+        |> List.map snd
+        |> String.concat ""
+
+    let refreshVerbPermsLabel () =
+        let s = currentVerbPerms ()
+        verbPermsToggleBtn.textContent <- (if s = "" then "(none)" else s)
+
+    refreshVerbPermsLabel ()
+
+    verbPermsToggleBtn.onclick <-
+        fun ev ->
+            ev.stopPropagation () |> ignore
+            verbPermsPopover.classList.toggle "visible" |> ignore
+
+    for cb in [ verbReadCb; verbWriteCb; verbExecCb; verbDebugCb ] do
+        cb.onchange <- fun _ -> refreshVerbPermsLabel ()
+
+    verbPermsWidget.appendChild verbPermsToggleBtn |> ignore
+    verbPermsWidget.appendChild verbPermsPopover |> ignore
+
+    let mkArgSpecSelect (options: string list) (defaultValue: string) : HTMLSelectElement =
+        let select = document.createElement ("select") :?> HTMLSelectElement
+
+        for opt in options do
+            let optionEl = document.createElement ("option") :?> HTMLOptionElement
+            optionEl.value <- opt
+            optionEl.textContent <- opt
+            select.appendChild optionEl |> ignore
+
+        select.value <- defaultValue
+        select
+
+    let dobjSelect = mkArgSpecSelect [ "none"; "any"; "this" ] "this"
+    let iobjSelect = mkArgSpecSelect [ "none"; "any"; "this" ] "none"
+
+    // The exact, fixed preposition table ToastStunt stores raw indices for
+    // (confirmed against `ToastStunt/src/db_verbs.cc`'s `prep_list` - these
+    // canonical slash-joined strings are stable and never reordered, per
+    // that file's own "never remove/reorder" comment) - not a guess.
+    let prepSelect =
+        mkArgSpecSelect
+            [ "none"
+              "any"
+              "with/using"
+              "at/to"
+              "in front of"
+              "in/inside/into"
+              "on top of/on/onto/upon"
+              "out of/from inside/from"
+              "over"
+              "through"
+              "under/underneath/beneath"
+              "behind"
+              "beside"
+              "for/about"
+              "is"
+              "as"
+              "off/off of" ]
+            "none"
+
+    let addVerbBtn = document.createElement ("button")
+    addVerbBtn.classList.add "inspector-add-property-btn"
+    addVerbBtn.textContent <- "+"
+    addVerbBtn.title <- "Add verb"
+
+    addVerbBtn.onclick <-
+        fun _ ->
+            let names = addVerbNameInput.value.Trim()
+            let ownerExpr = addVerbOwnerInput.value.Trim()
+
+            if names <> "" && ownerExpr <> "" then
+                sendAction
+                    [ "action" ==> "add-verb"
+                      "obj" ==> int objRef
+                      "name" ==> names
+                      "ownerExpr" ==> ownerExpr
+                      "perms" ==> currentVerbPerms ()
+                      "dobj" ==> dobjSelect.value
+                      "prep" ==> prepSelect.value
+                      "iobj" ==> iobjSelect.value ]
+
+    let mkVerbCell (child: HTMLElement) : HTMLElement =
+        let td = document.createElement ("td")
+        td.appendChild child |> ignore
+        td
+
+    addVerbRow.appendChild (mkVerbCell addVerbNameInput) |> ignore
+    addVerbRow.appendChild (mkVerbCell addVerbOwnerGroup) |> ignore
+    addVerbRow.appendChild (mkVerbCell verbPermsWidget) |> ignore
+    addVerbRow.appendChild (mkVerbCell dobjSelect) |> ignore
+    addVerbRow.appendChild (mkVerbCell prepSelect) |> ignore
+    addVerbRow.appendChild (mkVerbCell iobjSelect) |> ignore
+    addVerbRow.appendChild (mkVerbCell addVerbBtn) |> ignore
+    verbsTable.appendChild addVerbRow |> ignore
 
     verbsSection.appendChild verbsTable |> ignore
     inspectorContentEl.appendChild verbsSection |> ignore
@@ -2597,6 +2886,39 @@ ws.onmessage <-
                 // row now exists) rather than just clearing diagnostics -
                 // `loadInspector`'s own "always fresh" round-trip already
                 // covers that, same as every other inspector action.
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            loadInspector objRef None
+                        else
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            elif header.StartsWith("moodev-verb-add-result") then
+                // Same shape as `moodev-prop-add-result` above - a
+                // successful add needs a full inspector refresh (the new
+                // verb row now exists).
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            loadInspector objRef None
+                        else
+                            inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                    | _ -> ()
+                | None -> ()
+            elif
+                header.StartsWith("moodev-owner-set-result")
+                || header.StartsWith("moodev-flag-set-result")
+                || header.StartsWith("moodev-parent-add-result")
+                || header.StartsWith("moodev-parent-remove-result")
+            then
+                // All four share the exact same "full inspector refresh on
+                // success, diagnostics on failure" shape as every other
+                // mutating inspector action.
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with

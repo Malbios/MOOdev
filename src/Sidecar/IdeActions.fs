@@ -275,6 +275,62 @@ let deleteVerb
                 ct
     }
 
+/// Creates a *new* verb - `add_verb(obj, {owner, perms, names}, {dobj, prep,
+/// iobj})`. `ownerExpr` is evaluated the same "any expression resolving to a
+/// valid object" way `addProperty`'s owner is - unlike a property, a verb's
+/// owner has no chown-style auto-override (confirmed against
+/// `ToastStunt/src/db_verbs.cc` - no analog to `db_properties.cc`'s
+/// `insert_prop2` owner override exists there), so this is a plain pass-
+/// through, no special-casing needed. The new verb starts with empty code;
+/// the caller opens it via the normal verb-editor flow afterward.
+let addVerb
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (names: string)
+    (ownerExpr: string)
+    (perms: string)
+    (dobj: string)
+    (prep: string)
+    (iobj: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let namesLit = quote names
+        let ownerLit = quote ownerExpr
+        let permsLit = quote perms
+        let dobjLit = quote dobj
+        let prepLit = quote prep
+        let iobjLit = quote iobj
+
+        let statements =
+            $"""ok = 0; errtext = ""; try ownerResult = eval("return " + {ownerLit} + ";"); if (ownerResult[1]) try add_verb({o}, {{ownerResult[2], {permsLit}, {namesLit}}}, {{{dobjLit}, {prepLit}, {iobjLit}}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error (owner)"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef names GitStore.Added ct
+                    return gitError |> Option.map (fun m -> [ "(added, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-verb-add-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// `ide_get_properties(objRef)` replacement. `properties(obj)` already
 /// only lists properties *defined* on `obj` (confirmed against
 /// `property.cc:bf_properties`, see `Importer.fs`'s own note on this) -
@@ -532,6 +588,192 @@ let recycleObject
                 ct
     }
 
+/// Reassigns an object's owner - `.owner = newOwner`, a direct dot-
+/// assignable pseudo-property (confirmed against `ToastStunt/src/execute.cc`'s
+/// `OP_PUT_PROP` handling of `BP_OWNER` - wizard-only, unconditionally, no
+/// owner-of-object exception). `ownerExpr` is evaluated the same "any
+/// expression resolving to a valid object" way every other owner-taking
+/// action already does. `owner:` is a real field in `object.moo`
+/// (`FORMAT.md` §3), so this re-exports on success like any other
+/// structural change, not a live-only mutation.
+let setOwner
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (ownerExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let ownerLit = "\"" + ownerExpr.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; try ownerResult = eval("return " + {ownerLit} + ";"); if (ownerResult[1]) try {o}.owner = ownerResult[2]; ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef "owner" GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-owner-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Toggles one of the inspector's flag badges. `flagName` is never
+/// user-typed - it only ever arrives as one of seven fixed button labels
+/// the client itself defines - so splicing it directly into the generated
+/// statement is safe here the same way `setProperty`'s bare `.{pname}`
+/// splice already relies on trusted input shape, not a new injection
+/// surface. `.player` is *not* a dot-assignable built-in property
+/// (confirmed against `execute.cc`'s built-in-property table, `db.h`) -
+/// it's set via the dedicated `set_player_flag(obj, value)` builtin
+/// instead, hence the one special case below. `flags:` is a real field in
+/// `object.moo` (`FORMAT.md` §3), so this re-exports on success.
+let setFlag
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (flagName: string)
+    (value: bool)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let valueInt = if value then 1 else 0
+
+        let assign =
+            match flagName with
+            | "player" -> $"""set_player_flag({o}, {valueInt})"""
+            | _ -> $"""{o}.{flagName} = {valueInt}"""
+
+        let statements = $"""ok = 0; errtext = ""; try {assign}; ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef flagName GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-flag-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Adds one parent to an object without disturbing its existing others -
+/// this fork supports true multiple inheritance (`parents()`/`chparents()`,
+/// confirmed against `ToastStunt/src/objects.cc`), but `chparents` always
+/// takes the *complete* desired list, so this re-fetches the object's
+/// current parents live and appends to them in the same eval rather than
+/// trusting a possibly-stale client-side copy. `parentExpr` is evaluated
+/// the same "any expression resolving to a valid object" way every other
+/// object-expression field already is; `chparents` itself raises E_RECMOVE
+/// on a cycle and E_INVARG on a property/verb name collision, both caught
+/// below like any other failure. `parents:` is a real field in
+/// `object.moo` (`FORMAT.md` §3), so this re-exports on success.
+let addParent
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (parentExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let exprLit = "\"" + parentExpr.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; try presult = eval("return " + {exprLit} + ";"); if (presult[1]) try curr = parents({o}); chparents({o}, {{@curr, presult[2]}}); ok = 1; except err2 (ANY) errtext = tostr(err2[2]); endtry else errtext = "parse error"; endif except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-parent-add-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
+/// Removes exactly one parent, leaving the object's other parents intact -
+/// same "re-fetch the live list, compute the new one, `chparents` the
+/// whole thing" approach as `addParent`, just filtering `parentRef` out
+/// instead of appending.
+let removeParent
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (parentRef: int64)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let p = sprintf "#%d" parentRef
+
+        let statements =
+            $"""ok = 0; errtext = ""; try curr = parents({o}); newlist = {{}}; for x in (curr) if (x != {p}) newlist = {{@newlist, x}}; endif endfor chparents({o}, newlist); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-parent-remove-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// Creates a new object - `create(parent, player)`. `parentExpr` is an
 /// arbitrary MOO expression (`#5`, `$room`, ...) evaluated server-side, the
 /// same "type a real MOO expression" convention `setProperty`'s value
@@ -767,7 +1009,9 @@ else
   for i in [1..length(vlist)]
     vi = verb_info({o}, i);
     va = verb_args({o}, i);
-    verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
+    vowner = vi[1];
+    vownername = valid(vowner) ? (typeof(vowner.name) == STR ? vowner.name | "") | "";
+    verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "owner" -> tostr(vowner), "ownername" -> vownername, "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
   endfor
   props_out = {{}};
   for pn in (properties({o}))
@@ -833,7 +1077,11 @@ endif"""
                    verbs =
                      root.GetProperty("verbs").EnumerateArray()
                      |> Seq.map (fun v ->
+                         let vOwnerRef = int64 (v.GetProperty("owner").GetString().TrimStart('#'))
+                         let vOwnerName = v.GetProperty("ownername").GetString()
+
                          {| name = firstAlias (v.GetProperty("names").GetString())
+                            owner = formatLiveName corponymsByObjnum vOwnerRef vOwnerName
                             perms = v.GetProperty("perms").GetString()
                             dobj = v.GetProperty("dobj").GetString()
                             prep = v.GetProperty("prep").GetString()
