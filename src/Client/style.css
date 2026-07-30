@@ -205,6 +205,22 @@ html, body {
   display: flex;
 }
 
+/* The Tree view splits its own space between the tree list and the object
+   inspector (no longer a main-pane tab - see `#inspector-pane` below) -
+   each gets half, independently scrollable. */
+#sidebar-view-tree #tree-list {
+  flex: 1 1 50%;
+  min-height: 0;
+}
+
+#inspector-pane {
+  flex: 1 1 50%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid #444;
+}
+
 #sidebar.visible {
   display: flex;
 }
@@ -334,26 +350,12 @@ html, body {
   gap: 0.3em;
 }
 
-/* Only verb/property rows carry a `.tree-row-meta` second line - object
-   rows (and the group-header rows) stay strictly single-line so the "ⓘ"
-   button's `margin-left: auto` keeps landing at the true far right rather
-   than wrapping onto its own line for a long object name. */
-.tree-row-wrap {
-  flex-wrap: wrap;
-}
-
 .tree-chevron {
   display: inline-block;
   width: 1em;
   text-align: center;
   color: #777;
   flex: none;
-}
-
-.tree-row-meta {
-  color: #777;
-  flex-basis: 100%;
-  margin-left: 1.4em;
 }
 
 .tree-icon {
@@ -367,16 +369,6 @@ html, body {
   color: #6cf;
 }
 
-.tree-icon-verb {
-  color: #c9a0ff;
-}
-
-.tree-icon-prop {
-  color: #9fd08a;
-}
-
-.tree-verb-group,
-.tree-prop-group,
 .tree-child-group {
   color: #888;
   font-style: italic;
@@ -483,7 +475,6 @@ html, body {
 
 #editor-pane,
 #terminal-pane,
-#inspector-pane,
 #verb-history-pane {
   flex: 1;
   min-height: 0;
@@ -493,7 +484,6 @@ html, body {
 
 #editor-pane.active,
 #terminal-pane.active,
-#inspector-pane.active,
 #verb-history-pane.active {
   display: flex;
 }
@@ -782,6 +772,17 @@ html, body {
 
 .inspector-row-delete-btn:hover {
   color: #f77;
+}
+
+/* Inherited verb/property rows - read-only summaries dimmed relative to
+   the object's own (fully editable) rows above/below them. */
+.inspector-row-inherited {
+  color: #888;
+  font-style: italic;
+}
+
+.inspector-definer-link {
+  font-style: normal;
 }
 
 .inspector-add-property-btn {

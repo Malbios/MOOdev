@@ -74,11 +74,6 @@ let private treeNewObjectPopoverEl = document.getElementById ("tree-new-object-p
 let private treeNewObjectParentEl = document.getElementById ("tree-new-object-parent") :?> HTMLInputElement
 let private treeNewObjectCreateBtn = document.getElementById ("tree-new-object-create-btn")
 
-let private treeFilterShowPropertiesEl =
-    document.getElementById ("tree-filter-show-properties") :?> HTMLInputElement
-
-let private treeFilterShowVerbsEl = document.getElementById ("tree-filter-show-verbs") :?> HTMLInputElement
-
 let private treeFilterHideEmptyLeavesEl =
     document.getElementById ("tree-filter-hide-empty-leaves") :?> HTMLInputElement
 
@@ -337,8 +332,6 @@ module private Settings =
     let private fontSizeKey = "moodev-fontsize" // stringified int
     let private minimapKey = "moodev-minimap" // "on" | "off"
     let private hideEmptyLeavesKey = "moodev-hide-empty-leaves" // "on" | "off"
-    let private showPropertiesKey = "moodev-show-properties" // "on" | "off"
-    let private showVerbsKey = "moodev-show-verbs" // "on" | "off"
 
     let private loadString (key: string) (fallback: string) : string =
         match window.localStorage.getItem key with
@@ -347,29 +340,16 @@ module private Settings =
 
     /// Default ON: once the tree includes the full object universe (not
     /// just verb-owners, like the old flat list), pure dead-ends (no
-    /// children, no verbs of their own - stray/leftover objects) are almost
-    /// always noise for day-to-day editing. Hiding them by default keeps
-    /// the common case at least as compact as the old, familiar list; the
-    /// checkbox lets a rarer "audit the whole database" session turn them
-    /// back on. Read directly (not cached) since it only needs checking
-    /// once per tree render, not on any hot path.
+    /// children - stray/leftover objects) are almost always noise for
+    /// day-to-day editing. Hiding them by default keeps the common case at
+    /// least as compact as the old, familiar list; the checkbox lets a
+    /// rarer "audit the whole database" session turn them back on. Read
+    /// directly (not cached) since it only needs checking once per tree
+    /// render, not on any hot path.
     let hideEmptyLeavesEnabled () : bool = loadString hideEmptyLeavesKey "on" = "on"
 
     let setHideEmptyLeaves (enabled: bool) : unit =
         window.localStorage.setItem (hideEmptyLeavesKey, (if enabled then "on" else "off"))
-
-    /// Properties default OFF - noisy for day-to-day editing (most objects
-    /// have far more properties than verbs), so they're opt-in via the tree
-    /// filter's settings popover. Verbs stay default ON, matching today's
-    /// always-shown behavior.
-    let showPropertiesEnabled () : bool = loadString showPropertiesKey "off" = "on"
-    let showVerbsEnabled () : bool = loadString showVerbsKey "on" = "on"
-
-    let setShowProperties (enabled: bool) : unit =
-        window.localStorage.setItem (showPropertiesKey, (if enabled then "on" else "off"))
-
-    let setShowVerbs (enabled: bool) : unit =
-        window.localStorage.setItem (showVerbsKey, (if enabled then "on" else "off"))
 
     let private apply (wordWrap: string) (fontSize: int) (minimap: bool) : unit =
         editor.updateOptions (
@@ -415,17 +395,15 @@ module private Settings =
         settingWordWrapEl.``checked`` <- (wordWrap = "on")
         settingFontSizeEl.value <- string fontSize
         settingMinimapEl.``checked`` <- minimap
-        treeFilterShowPropertiesEl.``checked`` <- showPropertiesEnabled ()
-        treeFilterShowVerbsEl.``checked`` <- showVerbsEnabled ()
         treeFilterHideEmptyLeavesEl.``checked`` <- hideEmptyLeavesEnabled ()
 
         settingWordWrapEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingFontSizeEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingMinimapEl.onchange <- fun _ -> applyAndSaveFromControls ()
-        // The hide-empty-leaves/show-properties/show-verbs checkboxes' onchange
-        // redraws the tree, not just Monaco (unlike the three above) - wired
-        // separately, later in this file, once `renderTree` exists (this
-        // module is defined before it).
+        // The hide-empty-leaves checkbox's onchange redraws the tree, not
+        // just Monaco (unlike the three above) - wired separately, later in
+        // this file, once `renderTree` exists (this module is defined
+        // before it).
 
         settingForgetLoginBtn.onclick <-
             fun _ ->
@@ -482,7 +460,6 @@ Settings.init ()
 type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
-    | InspectorTab of objRef: int64
 
 let mutable private activeTab: OpenTab = GameTab
 
@@ -501,24 +478,17 @@ type private SidebarView =
 let mutable private activeSidebarView: SidebarView = TreeView
 
 /// Which property, if any, is the specific sub-focus within the currently
-/// active `InspectorTab` - set alongside `activeTab` whenever
-/// `revealPropertyInInspector` (the tree's `PropRow` click) requests one,
-/// cleared (`None`) by any plain `openOrSwitchToInspector` that didn't ask
-/// for a specific property. Read by `renderTreeRows` (always paired with an
-/// `activeTab = InspectorTab objRef` check, same as the object/verb row
-/// highlighting already does) to highlight that property's own row in the
-/// sidebar - `activeTab` alone can't do it, since it only ever names an
-/// object or verb, never a property within one.
+/// shown inspector - set alongside `selectedObjRef` whenever a caller asks
+/// to land on a specific property row, cleared (`None`) by any plain
+/// `openOrSwitchToInspector` that didn't ask for one. Read by
+/// `renderInspectorStructure` to scroll to and flash that property's row.
 let mutable private activeInspectorProp: (int64 * string) option = None
 
-/// The object row most recently clicked in the tree (to expand/collapse it,
-/// or via its "ⓘ" button) - kept independent of `activeTab` so an object
-/// highlights the moment it's clicked, the same way a verb row already
-/// highlights the moment it's opened, without requiring its own Inspector
-/// tab to be the active one. Read by `renderTreeRows` alongside the
-/// existing `activeTab = InspectorTab objRef` check - either one alone is
-/// enough to highlight an object row, so an object can stay visibly
-/// "selected" even after the main pane has moved on to a different tab.
+/// The object row most recently clicked in the tree - the sole source of
+/// truth for which object the (tab-less, always-visible) inspector panel
+/// currently shows. Read by `renderTreeRows` to highlight that row, and by
+/// every `ws.onmessage` inspector handler to decide whether an incoming
+/// response is still for the object currently being looked at.
 let mutable private selectedObjRef: int64 option = None
 
 /// Whether the currently-active `VerbTab`'s editor pane is showing its
@@ -538,19 +508,13 @@ let mutable private isLoggedIn = false
 /// it's permanent and rendered separately.
 let mutable private openVerbTabs: (int64 * string) list = []
 
-/// Open inspector tabs, in the order they were opened - parallel to
-/// `openVerbTabs`, including the same preview-tab mechanic (see
-/// `previewInspectorTab`). Unlike verb tabs, content is never cached
-/// client-side - see `loadInspector`'s own comment for why.
-let mutable private openInspectorTabs: int64 list = []
-
-/// Render order for the tab strip (verb + inspector tabs, drag-reorderable) -
-/// a view-order overlay on top of `openVerbTabs`/`openInspectorTabs`, which
-/// remain the source of truth for membership and preview-tab bookkeeping.
-/// Game/History are never in here - they're static buttons outside the
-/// draggable strip. Mirrors every append/replace/remove those two lists
-/// already go through, in the same 4 spots (`renderTabs`' drag handlers are
-/// the only place this is reordered arbitrarily).
+/// Render order for the tab strip (verb tabs, drag-reorderable) - a
+/// view-order overlay on top of `openVerbTabs`, which remains the source of
+/// truth for membership and preview-tab bookkeeping. Game is never in here -
+/// it's a static button outside the draggable strip. Mirrors every
+/// append/replace/remove `openVerbTabs` already goes through
+/// (`renderTabs`' drag handlers are the only place this is reordered
+/// arbitrarily).
 let mutable private tabOrder: OpenTab list = []
 
 /// The tab currently mid-drag (`renderTabs`' drag-and-drop handlers), or
@@ -563,18 +527,17 @@ let mutable private draggedTab: OpenTab option = None
 let mutable private errorLog: (System.DateTime * string * string list) list = []
 
 /// Most-recently-active-first history of tabs actually switched away from
-/// (across every kind - Game/History/Verb/Inspector), so closing a tab can
-/// fall back to whatever was genuinely active right before it, not just
-/// "the next one over" in that tab's own kind-specific list. Pushed to by
-/// `switchToTab` itself; `closeTab`/`closeInspectorTab` consume it via
-/// `isTabStillOpen` when picking a fallback.
+/// (across every kind - Game/Verb), so closing a tab can fall back to
+/// whatever was genuinely active right before it, not just "the next one
+/// over" in that tab's own kind-specific list. Pushed to by `switchToTab`
+/// itself; `closeTab` consumes it via `isTabStillOpen` when picking a
+/// fallback.
 let mutable private tabHistory: OpenTab list = []
 
 let private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
     | GameTab -> true
     | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
-    | InspectorTab o -> openInspectorTabs |> List.contains o
 
 /// Each currently-rendered inspector's property `<input>` elements, by
 /// property name - populated by `renderInspectorStructure`, then read both
@@ -616,23 +579,13 @@ let mutable private tabContent: Map<int64 * string, string> = Map.empty
 /// something *not yet open* does.
 let mutable private previewTab: (int64 * string) option = None
 
-/// Same "preview tab" mechanic as `previewTab`, for inspector tabs: at most
-/// one open inspector tab is a preview at a time (shown in italics via the
-/// same `.preview` CSS class). Opening a brand-new inspector while a preview
-/// exists replaces it in place rather than piling up tabs - useful since
-/// clicking through owner/parent/child/verb-object links tends to hop
-/// between objects quickly. Double-clicking pins it. Switching to an
-/// already-open tab (preview or pinned) never touches this.
-let mutable private previewInspectorTab: int64 option = None
-
 /// The `(objRef, verb) option` shape a couple of call sites still need
 /// (`saveIfDirty`, `Monaco.wireLsp`'s hover/definition callback) - derived
 /// from `activeTab` rather than tracked separately.
 let private currentVerbDoc () : (int64 * string) option =
     match activeTab with
     | VerbTab(o, v) -> Some(o, v)
-    | GameTab
-    | InspectorTab _ -> None
+    | GameTab -> None
 
 /// Sends a Phase 4 structured IDE-action envelope (`{"action": ..., ...}`)
 /// over the main WebSocket - the sidecar's `Program.buildTryDispatch` parses
@@ -731,11 +684,11 @@ editor.onDidChangeCursorPosition (fun ev ->
 setDirty false
 statusPositionEl.textContent <- "Ln 1, Col 1"
 
-/// All four mutually-exclusive panes under `#main-pane` - `showPaneFor`
+/// All three mutually-exclusive panes under `#main-pane` - `showPaneFor`
 /// activates exactly one (or, for a `VerbTab` in history mode, two: the
 /// verb-history pane replaces the plain editor pane, everything else stays
 /// hidden the same way).
-let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl ]
+let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl ]
 
 let private activateOnly (paneEl: HTMLElement) : unit =
     for p in allPanes do
@@ -755,7 +708,6 @@ let private showPaneFor (tab: OpenTab) : unit =
         // re-measure rather than rely on ResizeObserver picking this up.
         editor.layout ()
         editor.focus ()
-    | InspectorTab _ -> activateOnly inspectorPaneEl
 
 /// The five mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
@@ -830,8 +782,7 @@ verbHistoryRestoreBtn.onclick <-
 let private cacheCurrentEditorContent () : unit =
     match activeTab with
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
-    | GameTab
-    | InspectorTab _ -> ()
+    | GameTab -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -869,79 +820,16 @@ let private parseErrorLine (line: string) : (int * string) option =
 let private matchesFilter (filterText: string) (label: string) : bool =
     filterText = "" || label.ToLowerInvariant().Contains(filterText.ToLowerInvariant())
 
-/// `dobj`/`iobj` are always exactly one of these three (confirmed against
-/// `toaststunt/src/verbs.cc`'s `unparse_arg_spec` - `ASPEC_NONE`/`ASPEC_ANY`/
-/// `ASPEC_THIS`, nothing else), so the `'?'` fallback should never actually
-/// show up in practice.
-let private argSpecChar (spec: string) : char =
-    match spec with
-    | "this" -> 't'
-    | "any" -> 'a'
-    | "none" -> 'n'
-    | _ -> '?'
-
-/// `prep` also has `none`/`any`, but otherwise resolves to one of the
-/// server's 15 fixed preposition groups (`toaststunt/src/db_verbs.cc`'s
-/// `db_unparse_prep`) - collapsed to a generic `*` here rather than picking
-/// an arbitrary single letter for 15 different values. The Inspector's own
-/// Prep column still shows the real preposition.
-let private prepChar (prep: string) : char =
-    match prep with
-    | "none" -> 'n'
-    | "any" -> 'a'
-    | _ -> '*'
-
-/// The tree's compact 3-char dobj/prep/iobj summary, e.g. `tnt` for
-/// `this none this`, `n*n` for `none <some preposition> none`.
-let private verbArgsCode (v: LspClient.TreeVerb) : string =
-    sprintf "%c%c%c" (argSpecChar v.Dobj) (prepChar v.Prep) (argSpecChar v.Iobj)
-
-/// The tree filter box's search scope - unrestricted by default, or
-/// narrowed to just object names/numbers, just verb names, or just property
-/// names via an "obj:"/"verb:"/"prop:" prefix (see `parseFilter`). Lets a
-/// search like "look" find only the verb, not also every object whose
-/// description happens to contain "look". Unlike verbs, properties never
-/// participate in the unprefixed `AnyKind` search - only "prop:" ever
-/// searches them - so turning this on can't change what an existing plain
-/// search already finds.
-type private FilterKind =
-    | AnyKind
-    | ObjectOnly
-    | VerbOnly
-    | PropertyOnly
-
-type private ParsedFilter = { Kind: FilterKind; Text: string }
-
-/// Splits the raw filter box text into a scope + the actual search text -
-/// "obj:foo"/"verb:foo"/"prop:foo" (prefix case-insensitive, whitespace
-/// around the colon tolerated) restrict the scope; anything else searches
-/// objects and verbs both.
-let private parseFilter (rawText: string) : ParsedFilter =
-    let trimmed = rawText.Trim()
-    let lower = trimmed.ToLowerInvariant()
-
-    if lower.StartsWith("obj:") then
-        { Kind = ObjectOnly; Text = trimmed.Substring(4).Trim() }
-    elif lower.StartsWith("verb:") then
-        { Kind = VerbOnly; Text = trimmed.Substring(5).Trim() }
-    elif lower.StartsWith("prop:") then
-        { Kind = PropertyOnly; Text = trimmed.Substring(5).Trim() }
-    else
-        { Kind = AnyKind; Text = trimmed }
-
 /// One in-memory node per object, built once from `LspClient.getObjectTreeAsync`'s
 /// flat response at login - keyed by objRef (`treeNodes`) so parent/child
-/// lookups don't re-scan the array. `Verbs`/`Properties` are this object's
-/// own verbs/properties only (already filtered server-side), in the
-/// server's declaration order - never re-fetched per click, unlike the old
-/// per-selection `listVerbsAsync` round-trip.
+/// lookups don't re-scan the array. The tree itself only ever displays
+/// objects (verbs/properties live in the object inspector instead - see
+/// `loadInspector`), so this only tracks the structural shape.
 type private TreeNode =
     { ObjRef: int64
       Name: string
       Parents: int64[]
-      Children: int64[]
-      Verbs: LspClient.TreeVerb[]
-      Properties: LspClient.TreeProperty[] }
+      Children: int64[] }
 
 let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
 
@@ -954,16 +842,17 @@ let mutable private rootRefs: int64[] = [||]
 let private buildTree
     (nodes: (int64 * string * int64[] * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[])
     : unit =
+    // Verbs/properties are still part of the wire shape (the tree's own
+    // login-time fetch is shared with other consumers), but the tree itself
+    // no longer displays them - see `TreeNode`'s own comment.
     treeNodes <-
         nodes
-        |> Array.map (fun (objRef, name, parents, children, verbs, properties) ->
+        |> Array.map (fun (objRef, name, parents, children, _verbs, _properties) ->
             objRef,
             { ObjRef = objRef
               Name = name
               Parents = parents
-              Children = children
-              Verbs = verbs
-              Properties = properties })
+              Children = children })
         |> Map.ofArray
 
     rootRefs <-
@@ -988,7 +877,7 @@ let private mergeLiveChildren
     (parentRef: int64)
     (children: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[])
     : unit =
-    for objRef, name, parents, verbs, properties in children do
+    for objRef, name, parents, _verbs, _properties in children do
         if not (Map.containsKey objRef treeNodes) then
             treeNodes <-
                 Map.add
@@ -996,9 +885,7 @@ let private mergeLiveChildren
                     { ObjRef = objRef
                       Name = name
                       Parents = parents
-                      Children = [||]
-                      Verbs = verbs
-                      Properties = properties }
+                      Children = [||] }
                     treeNodes
 
     match Map.tryFind parentRef treeNodes with
@@ -1016,7 +903,7 @@ let private mergeLiveChildren
 /// `mergeLiveChildren` does, then unions every returned ref into `rootRefs`
 /// (deduplicated - repeat calls, e.g. on every login, are idempotent).
 let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[]) : unit =
-    for objRef, name, parents, verbs, properties in roots do
+    for objRef, name, parents, _verbs, _properties in roots do
         if not (Map.containsKey objRef treeNodes) then
             treeNodes <-
                 Map.add
@@ -1024,9 +911,7 @@ let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVer
                     { ObjRef = objRef
                       Name = name
                       Parents = parents
-                      Children = [||]
-                      Verbs = verbs
-                      Properties = properties }
+                      Children = [||] }
                     treeNodes
 
     rootRefs <- Array.append rootRefs (roots |> Array.map (fun (r, _, _, _, _) -> r)) |> Array.distinct
@@ -1046,26 +931,6 @@ let private removeLiveNode (objRef: int64) : unit =
 
     rootRefs <- rootRefs |> Array.filter ((<>) objRef)
 
-/// The tree's own `Verbs`/`Properties` arrays (static preload, or the
-/// live-children fetch) are a separate, independently-cached copy from what
-/// the inspector shows - a successful `delete-verb`/`delete-property`
-/// refreshes the inspector fine via `loadInspector`'s own fresh round-trip,
-/// but leaves the tree's cached copy stale (confirmed live: the deleted
-/// verb/property kept showing under the object's tree row until a full
-/// reload). `verbName`/`propName` here is the same identifier string
-/// `openOrSwitchToVerb`/the inspector's own row both already use, so it
-/// matches `TreeVerb.Name`/`TreeProperty.Name` directly with no extra
-/// resolution.
-let private removeTreeVerb (objRef: int64) (verbName: string) : unit =
-    match Map.tryFind objRef treeNodes with
-    | None -> ()
-    | Some node -> treeNodes <- Map.add objRef { node with Verbs = node.Verbs |> Array.filter (fun v -> v.Name <> verbName) } treeNodes
-
-let private removeTreeProperty (objRef: int64) (propName: string) : unit =
-    match Map.tryFind objRef treeNodes with
-    | None -> ()
-    | Some node -> treeNodes <- Map.add objRef { node with Properties = node.Properties |> Array.filter (fun p -> p.Name <> propName) } treeNodes
-
 /// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
 /// expanding #7 once should reveal its children under *every* parent it
 /// appears under (the object graph is a DAG - see the project plan's
@@ -1078,18 +943,8 @@ let private removeTreeProperty (objRef: int64) (propName: string) : unit =
 /// for" on demand.
 let mutable private expandedRefs: Set<int64> = Set.empty
 
-/// Which objects have their "Verbs" virtual group node expanded, by objRef.
-/// Separate from `expandedRefs` - expanding an object reveals its verb group
-/// and child objects, but the verbs themselves stay collapsed behind that
-/// group node until it's opened too, so a deep chain of objects can be
-/// walked without wading through every intermediate object's verb list.
-let mutable private expandedVerbGroups: Set<int64> = Set.empty
-
-/// Same idea as `expandedVerbGroups`, for the "Properties" virtual group.
-let mutable private expandedPropGroups: Set<int64> = Set.empty
-
-/// Same idea as `expandedVerbGroups`, for the "Children" virtual group -
-/// child *objects* now live behind this gate too, not directly under their
+/// Which objects have their "Children" virtual group node expanded, by
+/// objRef - child *objects* live behind this gate, not directly under their
 /// parent's own row, so revealing a deeply-nested object needs every
 /// ancestor's children group opened, not just its own row.
 let mutable private expandedChildGroups: Set<int64> = Set.empty
@@ -1148,19 +1003,13 @@ let private promoteFilterExpansionIfAny () : unit =
 /// see the `oninput` wiring below.
 let mutable private treeFilterText = ""
 
-/// One row of the flattened, currently-visible tree. `VerbGroupRow`/
-/// `PropGroupRow`/`ChildGroupRow` are virtual nodes - not real MOO objects,
-/// verbs, or properties - representing an object's collapsible
-/// "Verbs"/"Properties"/"Children" buckets, so each can be hidden
-/// independently of the others. `ChildGroupRow`'s contents are just more
-/// `ObjectRow`s (one depth deeper), unlike the flat `PropRow`/`VerbRow`
-/// leaves - a child is a full recursively-expandable node, not a leaf.
+/// One row of the flattened, currently-visible tree. `ChildGroupRow` is a
+/// virtual node - not a real MOO object - representing an object's
+/// collapsible "Children" bucket, so it can be hidden independently of the
+/// object row itself. Its contents are just more `ObjectRow`s, one depth
+/// deeper.
 type private TreeRow =
     | ObjectRow of objRef: int64 * depth: int * isExpandable: bool
-    | PropGroupRow of objRef: int64 * depth: int * count: int
-    | PropRow of objRef: int64 * prop: LspClient.TreeProperty * depth: int
-    | VerbGroupRow of objRef: int64 * depth: int * count: int
-    | VerbRow of objRef: int64 * verb: LspClient.TreeVerb * depth: int
     | ChildGroupRow of objRef: int64 * depth: int * count: int
 
 /// Switches the main area to `tab`, caching whatever was showing before the
@@ -1174,8 +1023,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
         showingVerbHistory <- false
 
         match tab with
-        | GameTab
-        | InspectorTab _ -> ()
+        | GameTab -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -1225,84 +1073,24 @@ and private closeTab (objRef: int64, verbName: string) : unit =
         renderTabs ()
         renderTree ()
 
-/// Closes an open inspector tab. If it was the active one, falls back the
-/// same way `closeTab` does (`tabHistory`, or Game if nothing valid is
-/// left) - and, per `loadInspector`'s "always fresh" rule, re-loads
-/// whichever inspector tab it falls back to rather than showing whatever
-/// that tab last happened to render.
-and private closeInspectorTab (objRef: int64) : unit =
-    let wasActive = activeTab = InspectorTab objRef
-    openInspectorTabs <- openInspectorTabs |> List.filter (fun r -> r <> objRef)
-    tabOrder <- tabOrder |> List.filter (fun t -> t <> InspectorTab objRef)
-    if previewInspectorTab = Some objRef then previewInspectorTab <- None
-
-    // The object's tree row stays "selected" independently of `activeTab`
-    // (see `selectedObjRef`'s own comment) - but with its inspector gone,
-    // there's nothing left for that selection to point at, so it shouldn't
-    // outlive the tab that justified it.
-    if selectedObjRef = Some objRef then
-        selectedObjRef <- None
-
-    if wasActive then
-        let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
-        switchToTab fallback
-
-        match fallback with
-        | InspectorTab o -> loadInspector o None
-        | GameTab
-        | VerbTab _ -> ()
-    else
-        renderTabs ()
-        renderTree ()
-
-/// Opens `objRef`'s inspector - switches instantly if it's already an open
-/// tab (adding it first if not), then *always* kicks off a fresh load
-/// (structural info + live property values), even when the tab was already
-/// open and already active. Used by the tab strip itself, the sidebar
-/// objects list's "ⓘ" icon, and every clickable owner/parent/child link
-/// inside the inspector pane - all funnel through here (via
-/// `openOrSwitchToInspector`/`revealPropertyInInspector` below) so
-/// "already open" and "always fresh" are each handled in exactly one place.
-/// `highlightProp`, when `Some`, is forwarded to `loadInspector` to scroll
-/// to and flash that property's row once the table renders - used by the
-/// tree's `PropRow` click, so landing on the inspector also lands on the
-/// specific property clicked, not just the object.
+/// Selects `objRef` for the (tab-less, always-visible) inspector panel and
+/// *always* kicks off a fresh load (structural info + live property
+/// values), even when it was already the selected object. Used by the
+/// tree's object rows and every clickable owner/parent/child link inside
+/// the inspector itself - all funnel through here so "always fresh" is
+/// handled in exactly one place. `highlightProp`, when `Some`, is
+/// forwarded to `loadInspector` to scroll to and flash that property's row
+/// once the table renders.
 and private openOrSwitchToInspectorWith (objRef: int64) (highlightProp: string option) : unit =
-    if not (openInspectorTabs |> List.contains objRef) then
-        // Same preview-tab replacement `moodev-edit-content` does for verb
-        // tabs (see `previewTab`'s own comment) - replace the current
-        // preview inspector tab in place if there is one, otherwise append.
-        match previewInspectorTab with
-        | Some oldPreview ->
-            let idx = openInspectorTabs |> List.findIndex (fun r -> r = oldPreview)
-            openInspectorTabs <- openInspectorTabs |> List.mapi (fun i r -> if i = idx then objRef else r)
-            tabOrder <- tabOrder |> List.map (fun t -> if t = InspectorTab oldPreview then InspectorTab objRef else t)
-        | None ->
-            openInspectorTabs <- openInspectorTabs @ [ objRef ]
-            tabOrder <- tabOrder @ [ InspectorTab objRef ]
-
-        previewInspectorTab <- Some objRef
-
+    selectedObjRef <- Some objRef
     activeInspectorProp <- highlightProp |> Option.map (fun p -> (objRef, p))
-    switchToTab (InspectorTab objRef)
-    // `switchToTab` only redraws the sidebar tree when the tab itself
-    // changes - clicking a different property of an *already*-open
-    // inspector doesn't, so without this the tree's highlight would stay on
-    // whichever property was selected last instead of following the new
-    // click.
     renderTree ()
     loadInspector objRef highlightProp
 
 /// `openOrSwitchToInspectorWith objRef None` - every existing call site
-/// (the "ⓘ" button, owner/parent/child links, the tab strip) goes through
-/// this, unchanged.
+/// (the tree's object rows, owner/parent/child links) goes through this,
+/// unchanged.
 and private openOrSwitchToInspector (objRef: int64) : unit = openOrSwitchToInspectorWith objRef None
-
-/// `openOrSwitchToInspectorWith objRef (Some propName)` - used by the
-/// tree's `PropRow` click to land directly on that property's row, not
-/// just the object's inspector in general.
-and private revealPropertyInInspector (objRef: int64) (propName: string) : unit =
-    openOrSwitchToInspectorWith objRef (Some propName)
 
 /// Fetches and renders `objRef`'s inspector content: structural data
 /// (`moodev/getObjectInfo`, over the LSP websocket - cheap, the graph is
@@ -1324,6 +1112,12 @@ and private loadInspector (objRef: int64) (highlightProp: string option) : unit 
     sendAction [ "action" ==> "get-live-info"; "obj" ==> int objRef ]
 
     sendAction [ "action" ==> "get-properties"; "obj" ==> int objRef ]
+
+/// Shown when nothing is selected in the tree - at startup, and after the
+/// currently-inspected object is recycled out from under the inspector.
+and private showInspectorEmptyState () : unit =
+    inspectorDiagnosticsEl.textContent <- ""
+    inspectorContentEl.textContent <- "Select an object in the tree to inspect it."
 
 /// A "type anything, or click a quick-fill button" widget - the shared shape
 /// behind every owner picker (You/This object -> player/#N) and the verb
@@ -1720,11 +1514,11 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     else
         // `?objRef` here is a value freshly parsed from the LSP's JSON
         // response - a plain JS number, not Fable's actual `int64` (a native
-        // `BigInt`, compared via `===` in `openInspectorTabs`' `List.contains`).
-        // Left as a bare dynamic cast, this silently fails to match against
-        // entries added via the sidebar's `int64 (value.TrimStart '#')`
-        // round-trip (a genuine `BigInt`), producing a duplicate tab instead
-        // of switching to the one already open - confirmed live. The
+        // `BigInt`, compared via `===` in `selectedObjRef`'s equality
+        // checks). Left as a bare dynamic cast, this silently fails to
+        // match against a ref added via the sidebar's
+        // `int64 (value.TrimStart '#')` round-trip (a genuine `BigInt`),
+        // breaking selection-highlight equality - confirmed live. The
         // explicit `int64 (... : float)` conversion below forces a real
         // `BigInt`, matching the sidebar's path.
         let ownerRef: int64 = int64 (ownerVal?objRef: float)
@@ -1883,69 +1677,100 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let pname: string = p?name
         let pPerms: string = p?perms
         let pOwnerRef: int64 = int64 (p?ownerRef: float)
+        let pDefinerRef: int64 = int64 (p?definerRef: float)
+        // Inherited (defined on an ancestor, not `objRef` itself) - shown
+        // read-only, dimmed, with a link back to the ancestor's own
+        // inspector - see this function's own module-level doc comment for
+        // why (renaming/perms/deleting only make sense at the true
+        // definer; the live *value* stays editable either way, below).
+        let pIsOwn = pDefinerRef = objRef
         let tr = document.createElement ("tr")
-
-        // Every field below resubmits the *other* two unchanged alongside
-        // whichever one this particular pencil is for - `set_property_info`
-        // always wants all three together (confirmed against
-        // `ToastStunt/src/property.cc`'s `bf_set_prop_info`), so there's no
-        // way to change just one via the builtin itself.
-        let nameInput = document.createElement ("input") :?> HTMLInputElement
-        nameInput.classList.add "inspector-property-value"
-        nameInput.value <- pname
+        if not pIsOwn then tr.classList.add "inspector-row-inherited"
 
         let nameTd =
-            mkEditableCell pname nameInput (fun () ->
-                let newName = nameInput.value.Trim()
+            if pIsOwn then
+                // Every field below resubmits the *other* two unchanged
+                // alongside whichever one this particular pencil is for -
+                // `set_property_info` always wants all three together
+                // (confirmed against `ToastStunt/src/property.cc`'s
+                // `bf_set_prop_info`), so there's no way to change just one
+                // via the builtin itself.
+                let nameInput = document.createElement ("input") :?> HTMLInputElement
+                nameInput.classList.add "inspector-property-value"
+                nameInput.value <- pname
 
-                if newName <> "" then
-                    sendAction
-                        [ "action" ==> "set-property-info"
-                          "obj" ==> int objRef
-                          "name" ==> pname
-                          "newName" ==> newName
-                          "ownerExpr" ==> sprintf "#%d" pOwnerRef
-                          "perms" ==> pPerms ])
+                mkEditableCell pname nameInput (fun () ->
+                    let newName = nameInput.value.Trim()
+
+                    if newName <> "" then
+                        sendAction
+                            [ "action" ==> "set-property-info"
+                              "obj" ==> int objRef
+                              "name" ==> pname
+                              "newName" ==> newName
+                              "ownerExpr" ==> sprintf "#%d" pOwnerRef
+                              "perms" ==> pPerms ])
+            else
+                let td = document.createElement ("td")
+                td.appendChild (document.createTextNode pname) |> ignore
+
+                let definerLink = document.createElement ("span")
+                definerLink.classList.add "inspector-link"
+                definerLink.classList.add "inspector-definer-link"
+                definerLink.textContent <- sprintf " #%d" pDefinerRef
+                definerLink.onclick <- fun _ -> openOrSwitchToInspector pDefinerRef
+                td.appendChild definerLink |> ignore
+                td
 
         tr.appendChild nameTd |> ignore
 
-        let pOwnerGroup, pOwnerInput =
-            mkQuickFillInput "player, #5, or $room" (sprintf "#%d" pOwnerRef) ownerQuickFills false
-
         let ownerTd =
-            mkEditableCell (p?owner: string) pOwnerGroup (fun () ->
-                let expr = pOwnerInput.value.Trim()
+            if pIsOwn then
+                let pOwnerGroup, pOwnerInput =
+                    mkQuickFillInput "player, #5, or $room" (sprintf "#%d" pOwnerRef) ownerQuickFills false
 
-                if expr <> "" then
+                mkEditableCell (p?owner: string) pOwnerGroup (fun () ->
+                    let expr = pOwnerInput.value.Trim()
+
+                    if expr <> "" then
+                        sendAction
+                            [ "action" ==> "set-property-info"
+                              "obj" ==> int objRef
+                              "name" ==> pname
+                              "newName" ==> pname
+                              "ownerExpr" ==> expr
+                              "perms" ==> pPerms ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- (p?owner: string)
+                td
+
+        tr.appendChild ownerTd |> ignore
+
+        let permsTd =
+            if pIsOwn then
+                let pPermsWidget, _, pCurrentPerms =
+                    mkPermsWidget
+                        [ "Read", "r", "Other players' code can read this property's value."
+                          "Write", "w", "Other players' code can set this property's value."
+                          "Chown",
+                          "c",
+                          "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick." ]
+                        pPerms
+                        (fun () -> ())
+
+                mkEditableCell pPerms pPermsWidget (fun () ->
                     sendAction
                         [ "action" ==> "set-property-info"
                           "obj" ==> int objRef
                           "name" ==> pname
                           "newName" ==> pname
-                          "ownerExpr" ==> expr
-                          "perms" ==> pPerms ])
-
-        tr.appendChild ownerTd |> ignore
-
-        let pPermsWidget, _, pCurrentPerms =
-            mkPermsWidget
-                [ "Read", "r", "Other players' code can read this property's value."
-                  "Write", "w", "Other players' code can set this property's value."
-                  "Chown",
-                  "c",
-                  "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick." ]
-                pPerms
-                (fun () -> ())
-
-        let permsTd =
-            mkEditableCell pPerms pPermsWidget (fun () ->
-                sendAction
-                    [ "action" ==> "set-property-info"
-                      "obj" ==> int objRef
-                      "name" ==> pname
-                      "newName" ==> pname
-                      "ownerExpr" ==> sprintf "#%d" pOwnerRef
-                      "perms" ==> pCurrentPerms () ])
+                          "ownerExpr" ==> sprintf "#%d" pOwnerRef
+                          "perms" ==> pCurrentPerms () ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- pPerms
+                td
 
         tr.appendChild permsTd |> ignore
 
@@ -1988,16 +1813,25 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         valueTd.appendChild preview |> ignore
         tr.appendChild valueTd |> ignore
 
+        // Deleting only makes sense at the true definer - an inherited row
+        // gets an empty cell here instead (deleting from `objRef` would be
+        // deleting an ancestor's property definition out from under every
+        // other descendant too).
         let deleteTd = document.createElement ("td")
-        let deleteBtn = document.createElement ("button")
-        deleteBtn.classList.add "inspector-row-delete-btn"
-        deleteBtn.textContent <- "🗑"
-        deleteBtn.title <- "Delete property"
-        deleteBtn.onclick <-
-            fun _ ->
-                if window.confirm (sprintf "Delete property \"%s\"?" pname) then
-                    sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
-        deleteTd.appendChild deleteBtn |> ignore
+
+        if pIsOwn then
+            let deleteBtn = document.createElement ("button")
+            deleteBtn.classList.add "inspector-row-delete-btn"
+            deleteBtn.textContent <- "🗑"
+            deleteBtn.title <- "Delete property"
+
+            deleteBtn.onclick <-
+                fun _ ->
+                    if window.confirm (sprintf "Delete property \"%s\"?" pname) then
+                        sendAction [ "action" ==> "delete-property"; "obj" ==> int objRef; "name" ==> pname ]
+
+            deleteTd.appendChild deleteBtn |> ignore
+
         tr.appendChild deleteTd |> ignore
 
         propsTable.appendChild tr |> ignore
@@ -2184,136 +2018,191 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let vPrep: string = v?prep
         let vIobj: string = v?iobj
         let vOwnerRef: int64 = int64 (v?ownerRef: float)
-        tr.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
-
-        // Every field below resubmits the verb's *other* current fields
-        // unchanged alongside whichever one this pencil is for -
-        // `set_verb_info`/`set_verb_args` always want their whole triple
-        // together (confirmed against `ToastStunt/src/verbs.cc`'s
-        // `bf_set_verb_info`/`bf_set_verb_args`), so there's no way to
-        // change just one via the builtins themselves. `verbName` (the
-        // first alias) is only ever used to *resolve* which verb this is
-        // server-side, never as the value being changed.
-        let nameInput = document.createElement ("input") :?> HTMLInputElement
-        nameInput.classList.add "inspector-property-value"
-        nameInput.value <- vFullNames
+        let vDefinerRef: int64 = int64 (v?definerRef: float)
+        // Inherited (defined on an ancestor, not `objRef` itself) - see
+        // this function's own module-level doc comment. Clicking still
+        // opens the verb for editing, just at its true definer.
+        let vIsOwn = vDefinerRef = objRef
+        if not vIsOwn then tr.classList.add "inspector-row-inherited"
+        tr.onclick <- fun _ -> openOrSwitchToVerb vDefinerRef verbName
 
         let nameTd =
-            mkEditableCell verbName nameInput (fun () ->
-                let newNames = nameInput.value.Trim()
+            if vIsOwn then
+                // Every field below resubmits the verb's *other* current
+                // fields unchanged alongside whichever one this pencil is
+                // for - `set_verb_info`/`set_verb_args` always want their
+                // whole triple together (confirmed against
+                // `ToastStunt/src/verbs.cc`'s
+                // `bf_set_verb_info`/`bf_set_verb_args`), so there's no way
+                // to change just one via the builtins themselves.
+                // `verbName` (the first alias) is only ever used to
+                // *resolve* which verb this is server-side, never as the
+                // value being changed.
+                let nameInput = document.createElement ("input") :?> HTMLInputElement
+                nameInput.classList.add "inspector-property-value"
+                nameInput.value <- vFullNames
 
-                if newNames <> "" then
-                    sendAction
-                        [ "action" ==> "set-verb-info"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "newNames" ==> newNames
-                          "ownerExpr" ==> sprintf "#%d" vOwnerRef
-                          "perms" ==> vPerms ])
+                mkEditableCell verbName nameInput (fun () ->
+                    let newNames = nameInput.value.Trim()
+
+                    if newNames <> "" then
+                        sendAction
+                            [ "action" ==> "set-verb-info"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "newNames" ==> newNames
+                              "ownerExpr" ==> sprintf "#%d" vOwnerRef
+                              "perms" ==> vPerms ])
+            else
+                let td = document.createElement ("td")
+                td.appendChild (document.createTextNode verbName) |> ignore
+
+                let definerLink = document.createElement ("span")
+                definerLink.classList.add "inspector-link"
+                definerLink.classList.add "inspector-definer-link"
+                definerLink.textContent <- sprintf " #%d" vDefinerRef
+
+                definerLink.onclick <-
+                    fun ev ->
+                        ev.stopPropagation () |> ignore // don't also open the verb via the row's own click
+                        openOrSwitchToInspector vDefinerRef
+
+                td.appendChild definerLink |> ignore
+                td
 
         tr.appendChild nameTd |> ignore
 
-        let vOwnerGroup, vOwnerInput =
-            mkQuickFillInput "player, #5, or $room" (sprintf "#%d" vOwnerRef) ownerQuickFills false
-
         let ownerTd =
-            mkEditableCell (v?owner: string) vOwnerGroup (fun () ->
-                let expr = vOwnerInput.value.Trim()
+            if vIsOwn then
+                let vOwnerGroup, vOwnerInput =
+                    mkQuickFillInput "player, #5, or $room" (sprintf "#%d" vOwnerRef) ownerQuickFills false
 
-                if expr <> "" then
+                mkEditableCell (v?owner: string) vOwnerGroup (fun () ->
+                    let expr = vOwnerInput.value.Trim()
+
+                    if expr <> "" then
+                        sendAction
+                            [ "action" ==> "set-verb-info"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "newNames" ==> vFullNames
+                              "ownerExpr" ==> expr
+                              "perms" ==> vPerms ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- (v?owner: string)
+                td
+
+        tr.appendChild ownerTd |> ignore
+
+        let permsTd =
+            if vIsOwn then
+                let vPermsWidget, _, vCurrentPerms =
+                    mkPermsWidget
+                        [ "Read", "r", "Other players' code can read this verb's source."
+                          "Write", "w", "Other players' code can modify this verb's source."
+                          "Exec", "x", "Other players' code can call this verb."
+                          "Debug",
+                          "d",
+                          "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed." ]
+                        vPerms
+                        (fun () -> ())
+
+                mkEditableCell vPerms vPermsWidget (fun () ->
                     sendAction
                         [ "action" ==> "set-verb-info"
                           "obj" ==> int objRef
                           "verb" ==> verbName
                           "newNames" ==> vFullNames
-                          "ownerExpr" ==> expr
-                          "perms" ==> vPerms ])
-
-        tr.appendChild ownerTd |> ignore
-
-        let vPermsWidget, _, vCurrentPerms =
-            mkPermsWidget
-                [ "Read", "r", "Other players' code can read this verb's source."
-                  "Write", "w", "Other players' code can modify this verb's source."
-                  "Exec", "x", "Other players' code can call this verb."
-                  "Debug",
-                  "d",
-                  "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed." ]
-                vPerms
-                (fun () -> ())
-
-        let permsTd =
-            mkEditableCell vPerms vPermsWidget (fun () ->
-                sendAction
-                    [ "action" ==> "set-verb-info"
-                      "obj" ==> int objRef
-                      "verb" ==> verbName
-                      "newNames" ==> vFullNames
-                      "ownerExpr" ==> sprintf "#%d" vOwnerRef
-                      "perms" ==> vCurrentPerms () ])
+                          "ownerExpr" ==> sprintf "#%d" vOwnerRef
+                          "perms" ==> vCurrentPerms () ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- vPerms
+                td
 
         tr.appendChild permsTd |> ignore
 
-        let dobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vDobj
-
         let dobjTd =
-            mkEditableCell vDobj dobjEditSelect (fun () ->
-                sendAction
-                    [ "action" ==> "set-verb-args"
-                      "obj" ==> int objRef
-                      "verb" ==> verbName
-                      "dobj" ==> dobjEditSelect.value
-                      "prep" ==> vPrep
-                      "iobj" ==> vIobj ])
+            if vIsOwn then
+                let dobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vDobj
+
+                mkEditableCell vDobj dobjEditSelect (fun () ->
+                    sendAction
+                        [ "action" ==> "set-verb-args"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "dobj" ==> dobjEditSelect.value
+                          "prep" ==> vPrep
+                          "iobj" ==> vIobj ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- vDobj
+                td
 
         tr.appendChild dobjTd |> ignore
 
-        let prepEditGroup, prepEditInput =
-            mkQuickFillInput "none, any, or a preposition" vPrep [ "none", "none"; "any", "any" ] false
-
         let prepTd =
-            mkEditableCell vPrep prepEditGroup (fun () ->
-                sendAction
-                    [ "action" ==> "set-verb-args"
-                      "obj" ==> int objRef
-                      "verb" ==> verbName
-                      "dobj" ==> vDobj
-                      "prep" ==> prepEditInput.value.Trim()
-                      "iobj" ==> vIobj ])
+            if vIsOwn then
+                let prepEditGroup, prepEditInput =
+                    mkQuickFillInput "none, any, or a preposition" vPrep [ "none", "none"; "any", "any" ] false
+
+                mkEditableCell vPrep prepEditGroup (fun () ->
+                    sendAction
+                        [ "action" ==> "set-verb-args"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "dobj" ==> vDobj
+                          "prep" ==> prepEditInput.value.Trim()
+                          "iobj" ==> vIobj ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- vPrep
+                td
 
         tr.appendChild prepTd |> ignore
 
-        let iobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vIobj
-
         let iobjTd =
-            mkEditableCell vIobj iobjEditSelect (fun () ->
-                sendAction
-                    [ "action" ==> "set-verb-args"
-                      "obj" ==> int objRef
-                      "verb" ==> verbName
-                      "dobj" ==> vDobj
-                      "prep" ==> vPrep
-                      "iobj" ==> iobjEditSelect.value ])
+            if vIsOwn then
+                let iobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vIobj
+
+                mkEditableCell vIobj iobjEditSelect (fun () ->
+                    sendAction
+                        [ "action" ==> "set-verb-args"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "dobj" ==> vDobj
+                          "prep" ==> vPrep
+                          "iobj" ==> iobjEditSelect.value ])
+            else
+                let td = document.createElement ("td")
+                td.textContent <- vIobj
+                td
 
         tr.appendChild iobjTd |> ignore
 
-        // Stops propagation so this doesn't also open the verb via the
-        // row's own click handler above (same idiom `renderTabs`'s
-        // close-× uses against its tab's own switch-click).
+        // Deleting only makes sense at the true definer - see the
+        // properties table's own delete-column comment above.
         let deleteTd = document.createElement ("td")
-        let deleteBtn = document.createElement ("button")
-        deleteBtn.classList.add "inspector-row-delete-btn"
-        deleteBtn.textContent <- "🗑"
-        deleteBtn.title <- "Delete verb"
 
-        deleteBtn.onclick <-
-            fun ev ->
-                ev.stopPropagation () |> ignore
+        if vIsOwn then
+            // Stops propagation so this doesn't also open the verb via the
+            // row's own click handler above (same idiom `renderTabs`'s
+            // close-× uses against its tab's own switch-click).
+            let deleteBtn = document.createElement ("button")
+            deleteBtn.classList.add "inspector-row-delete-btn"
+            deleteBtn.textContent <- "🗑"
+            deleteBtn.title <- "Delete verb"
 
-                if window.confirm (sprintf "Delete verb \"%s\"?" verbName) then
-                    sendAction [ "action" ==> "delete-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
+            deleteBtn.onclick <-
+                fun ev ->
+                    ev.stopPropagation () |> ignore
 
-        deleteTd.appendChild deleteBtn |> ignore
+                    if window.confirm (sprintf "Delete verb \"%s\"?" verbName) then
+                        sendAction [ "action" ==> "delete-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
+
+            deleteTd.appendChild deleteBtn |> ignore
+
         tr.appendChild deleteTd |> ignore
 
         verbsTable.appendChild tr |> ignore
@@ -2671,9 +2560,7 @@ and private renderDeadVerbsResults (results: (int64 * string * bool)[]) : unit =
 
 /// Rebuilds `#verb-tabs` (the dynamic, closable, drag-reorderable tabs) and
 /// the static `#tab-game` button's `.active` state. `#tab-game` itself is
-/// never recreated - only its highlight changes. Iterates `tabOrder` once
-/// (rather than `openVerbTabs`/`openInspectorTabs` separately) so both kinds
-/// can be freely interleaved by dragging.
+/// never recreated - only its highlight changes.
 and private renderTabs () : unit =
     verbTabsEl.innerHTML <- ""
 
@@ -2702,23 +2589,6 @@ and private renderTabs () : unit =
                             renderTabs ()
 
                 fun () -> closeTab (objRef, verbName)
-            | InspectorTab objRef ->
-                // Inspector tabs share the same strip as verb tabs (an "ⓘ
-                // #N" label, same close-× behavior, and the same
-                // preview-tab mechanic) - unlike verb tabs, clicking one
-                // always re-loads it fresh (`openOrSwitchToInspector`, not
-                // a bare `switchToTab`).
-                if previewInspectorTab = Some objRef then el.classList.add "preview"
-                label.textContent <- sprintf "ⓘ #%d" objRef
-                label.onclick <- fun _ -> openOrSwitchToInspector objRef
-
-                label.ondblclick <-
-                    fun _ ->
-                        if previewInspectorTab = Some objRef then
-                            previewInspectorTab <- None
-                            renderTabs ()
-
-                fun () -> closeInspectorTab objRef
             | GameTab ->
                 // Never appears in `tabOrder` - Game is a static button
                 // outside the draggable strip.
@@ -2797,53 +2667,47 @@ and private renderTabs () : unit =
     else
         tabGameBtn.classList.remove "active"
 
-/// True if `node` itself is a filter match, respecting the filter's scope.
-/// "prop:" is exclusive - a property match never falls through to also
-/// checking the name/verbs, unlike `AnyKind`'s own name-or-verb check.
-and private nodeMatches (filter: ParsedFilter) (node: TreeNode) : bool =
-    match filter.Kind with
-    | ObjectOnly -> matchesFilter filter.Text node.Name
-    | VerbOnly -> node.Verbs |> Array.exists (fun v -> matchesFilter filter.Text v.Name)
-    | PropertyOnly -> node.Properties |> Array.exists (fun p -> matchesFilter filter.Text p.Name)
-    | AnyKind -> matchesFilter filter.Text node.Name || node.Verbs |> Array.exists (fun v -> matchesFilter filter.Text v.Name)
+/// Whether `node` itself is a filter match - object name only, plain
+/// substring match (see `matchesFilter`).
+and private nodeMatches (filterText: string) (node: TreeNode) : bool = matchesFilter filterText node.Name
 
 /// Every objRef that needs to be expanded for at least one filter match to
 /// be reachable - a match's *every* parent, recursively (via `ancestorsOf`),
 /// since a DAG node can have more than one parent path to a root and each
 /// occurrence needs its own ancestor chain expanded for the match to be
 /// visible wherever it appears.
-and private ancestorExpansionSet (filter: ParsedFilter) : Set<int64> =
+and private ancestorExpansionSet (filterText: string) : Set<int64> =
     treeNodes
     |> Map.toSeq
     |> Seq.map snd
-    |> Seq.filter (nodeMatches filter)
+    |> Seq.filter (nodeMatches filterText)
     |> Seq.map (fun n -> n.ObjRef)
     |> Seq.fold (fun acc r -> Set.union acc (Set.add r (ancestorsOf Set.empty r))) Set.empty
 
 /// One row of the flattened, currently-*visible* tree - either an object
 /// (with its depth and whether it has anything to expand into), the
-/// virtual "Properties"/"Verbs"/"Children" group node for an expanded
-/// object that has any (properties, then verbs, then children), or (once
-/// that group is itself expanded) one of its actual properties/verbs/child
-/// objects.
+/// virtual "Children" group node for an expanded object that has any, or
+/// (once that group is itself expanded) one of its actual child objects.
 and private flattenVisibleRows
     (hideEmptyLeaves: bool)
-    (showProperties: bool)
-    (showVerbs: bool)
     (expanded: Set<int64>)
-    (expandedPropGroups: Set<int64>)
-    (expandedVerbGroups: Set<int64>)
     (expandedChildGroups: Set<int64>)
     (liveChildrenChecked: Set<int64>)
     (roots: int64[])
     : TreeRow list =
+    // "Empty leaf" = has no children - the tree's only remaining
+    // expandable content once verbs/properties moved to the inspector.
+    // Applied both to a parent's own children (`childrenOf`) and to the
+    // top-level `roots` just below - `#4`/`#5` (parentless, no children)
+    // previously stayed visible with this toggle on because it was only
+    // ever checked for a node's children, never for the roots themselves.
+    let isEmptyLeaf (ref: int64) : bool =
+        match Map.tryFind ref treeNodes with
+        | None -> false // unknown ref - show rather than silently drop
+        | Some n -> Array.isEmpty n.Children
+
     let childrenOf (node: TreeNode) : int64[] =
-        node.Children
-        |> Array.filter (fun childRef ->
-            not hideEmptyLeaves
-            || match Map.tryFind childRef treeNodes with
-               | None -> true // unknown ref - show rather than silently drop
-               | Some c -> not (Array.isEmpty c.Children) || not (Array.isEmpty c.Verbs) || not (Array.isEmpty c.Properties))
+        node.Children |> Array.filter (fun childRef -> not hideEmptyLeaves || not (isEmptyLeaf childRef))
 
     let rec go (visited: Set<int64>) (depth: int) (objRef: int64) : TreeRow list =
         match Map.tryFind objRef treeNodes with
@@ -2856,8 +2720,6 @@ and private flattenVisibleRows
 
             let isExpandable =
                 not (Array.isEmpty visibleChildren)
-                || (showVerbs && not (Array.isEmpty node.Verbs))
-                || (showProperties && not (Array.isEmpty node.Properties))
                 || not (Set.contains objRef liveChildrenChecked) // unknown - assume yes until asked once
 
             let selfRow = ObjectRow(objRef, depth, isExpandable)
@@ -2865,36 +2727,6 @@ and private flattenVisibleRows
             if not (Set.contains objRef expanded) then
                 [ selfRow ]
             else
-                let propGroupRows =
-                    if not showProperties || Array.isEmpty node.Properties then
-                        []
-                    else
-                        let groupRow = PropGroupRow(objRef, depth + 1, node.Properties.Length)
-
-                        if Set.contains objRef expandedPropGroups then
-                            groupRow
-                            :: (node.Properties
-                                |> Array.sortBy (fun p -> p.Name)
-                                |> Array.map (fun p -> PropRow(objRef, p, depth + 2))
-                                |> List.ofArray)
-                        else
-                            [ groupRow ]
-
-                let verbGroupRows =
-                    if not showVerbs || Array.isEmpty node.Verbs then
-                        []
-                    else
-                        let groupRow = VerbGroupRow(objRef, depth + 1, node.Verbs.Length)
-
-                        if Set.contains objRef expandedVerbGroups then
-                            groupRow
-                            :: (node.Verbs
-                                |> Array.sortBy (fun v -> v.Name)
-                                |> Array.map (fun v -> VerbRow(objRef, v, depth + 2))
-                                |> List.ofArray)
-                        else
-                            [ groupRow ]
-
                 let childGroupRows =
                     if Array.isEmpty visibleChildren then
                         []
@@ -2910,9 +2742,13 @@ and private flattenVisibleRows
                         else
                             [ groupRow ]
 
-                selfRow :: (propGroupRows @ verbGroupRows @ childGroupRows)
+                selfRow :: childGroupRows
 
-    roots |> Array.sort |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList) |> List.ofArray
+    roots
+    |> Array.filter (fun r -> not hideEmptyLeaves || not (isEmptyLeaf r))
+    |> Array.sort
+    |> Array.collect (fun r -> go Set.empty 0 r |> Array.ofList)
+    |> List.ofArray
 
 /// Renders the currently-visible tree into `#tree-list` - reuses
 /// `renderList`'s old DOM idiom (`.picker-row`/`.selected`/`.placeholder`),
@@ -2956,7 +2792,7 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
                 li.appendChild labelSpan |> ignore
 
-                if activeTab = InspectorTab objRef || selectedObjRef = Some objRef then
+                if selectedObjRef = Some objRef then
                     li.classList.add "selected"
 
                 li.onclick <-
@@ -2967,13 +2803,10 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                         if treeFilterText.Trim() <> "" then
                             lastFilterSelectedObjRef <- Some objRef
 
-                        // Highlights this row immediately, the same way
-                        // clicking a verb row already highlights it - doesn't
-                        // require the inspector to be open.
-                        selectedObjRef <- Some objRef
-
-                        // Opens/switches to this object's inspector directly -
-                        // there's no separate "ⓘ" button for this anymore.
+                        // Selects and loads this object's inspector - always
+                        // fresh, and highlights the row immediately
+                        // (`openOrSwitchToInspector` sets `selectedObjRef`
+                        // itself).
                         openOrSwitchToInspector objRef
 
                         if isExpandable then
@@ -2990,92 +2823,6 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                                 sendAction [ "action" ==> "get-live-children"; "obj" ==> int objRef ]
 
                         renderTree ()
-            | PropGroupRow(objRef, depth, count) ->
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
-                li.classList.add "tree-prop-group"
-
-                let chevron = document.createElement ("span")
-                chevron.classList.add "tree-chevron"
-                chevron.textContent <- (if Set.contains objRef expandedPropGroups then "▾" else "▸")
-                li.appendChild chevron |> ignore
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- sprintf "Properties (%d)" count
-                li.appendChild labelSpan |> ignore
-
-                li.onclick <-
-                    fun _ ->
-                        expandedPropGroups <-
-                            if Set.contains objRef expandedPropGroups then Set.remove objRef expandedPropGroups
-                            else Set.add objRef expandedPropGroups
-
-                        renderTree ()
-            | PropRow(objRef, prop, depth) ->
-                li.classList.add "tree-row-wrap"
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
-
-                let kindIcon = document.createElement ("span")
-                kindIcon.classList.add "tree-icon"
-                kindIcon.classList.add "tree-icon-prop"
-                kindIcon.textContent <- "•"
-                li.appendChild kindIcon |> ignore
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- prop.Name
-                li.appendChild labelSpan |> ignore
-
-                let metaSpan = document.createElement ("span")
-                metaSpan.classList.add "tree-row-meta"
-                metaSpan.textContent <- sprintf "[%s]" prop.Perms
-                li.appendChild metaSpan |> ignore
-
-                if activeTab = InspectorTab objRef && activeInspectorProp = Some(objRef, prop.Name) then
-                    li.classList.add "selected"
-
-                li.onclick <- fun _ -> revealPropertyInInspector objRef prop.Name
-            | VerbGroupRow(objRef, depth, count) ->
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
-                li.classList.add "tree-verb-group"
-
-                let chevron = document.createElement ("span")
-                chevron.classList.add "tree-chevron"
-                chevron.textContent <- (if Set.contains objRef expandedVerbGroups then "▾" else "▸")
-                li.appendChild chevron |> ignore
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- sprintf "Verbs (%d)" count
-                li.appendChild labelSpan |> ignore
-
-                li.onclick <-
-                    fun _ ->
-                        expandedVerbGroups <-
-                            if Set.contains objRef expandedVerbGroups then Set.remove objRef expandedVerbGroups
-                            else Set.add objRef expandedVerbGroups
-
-                        renderTree ()
-            | VerbRow(objRef, verb, depth) ->
-                li.classList.add "tree-row-wrap"
-                li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
-
-                let kindIcon = document.createElement ("span")
-                kindIcon.classList.add "tree-icon"
-                kindIcon.classList.add "tree-icon-verb"
-                kindIcon.textContent <- "ƒ"
-                li.appendChild kindIcon |> ignore
-
-                let labelSpan = document.createElement ("span")
-                labelSpan.textContent <- verb.Name
-                li.appendChild labelSpan |> ignore
-
-                let metaSpan = document.createElement ("span")
-                metaSpan.classList.add "tree-row-meta"
-                metaSpan.textContent <- sprintf "[%s] [%s]" verb.Perms (verbArgsCode verb)
-                li.appendChild metaSpan |> ignore
-
-                if activeTab = VerbTab(objRef, verb.Name) then
-                    li.classList.add "selected"
-
-                li.onclick <- fun _ -> openOrSwitchToVerb objRef verb.Name
             | ChildGroupRow(objRef, depth, count) ->
                 li.setAttribute ("style", sprintf "padding-left: %dem" (depth + 1))
                 li.classList.add "tree-child-group"
@@ -3106,117 +2853,47 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 /// incremental DOM patching" style.
 and private renderTree () : unit =
     let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
-    let showProperties = Settings.showPropertiesEnabled ()
-    let showVerbs = Settings.showVerbsEnabled ()
 
     if treeFilterText.Trim() = "" then
-        renderTreeRows (
-            flattenVisibleRows
-                hideEmptyLeaves
-                showProperties
-                showVerbs
-                expandedRefs
-                expandedPropGroups
-                expandedVerbGroups
-                expandedChildGroups
-                liveChildrenChecked
-                rootRefs
-        )
+        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs expandedChildGroups liveChildrenChecked rootRefs)
     else
-        let filter = parseFilter treeFilterText
-        let ancestorRefs = ancestorExpansionSet filter
+        let ancestorRefs = ancestorExpansionSet treeFilterText
         let expanded = Set.union expandedRefs ancestorRefs
 
-        // Objects whose own verbs (not just their name) are what matched -
-        // their "Verbs" group needs auto-expanding too, or a matching verb
-        // would stay hidden behind it. Never any, under "obj:" - verbs are
-        // out of scope for that search entirely.
-        let verbMatchOwners =
-            if filter.Kind = ObjectOnly then
-                Set.empty
-            else
-                treeNodes
-                |> Map.toSeq
-                |> Seq.map snd
-                |> Seq.filter (fun n -> n.Verbs |> Array.exists (fun v -> matchesFilter filter.Text v.Name))
-                |> Seq.map (fun n -> n.ObjRef)
-                |> Set.ofSeq
-
-        let expandedVerbGroups = Set.union expandedVerbGroups verbMatchOwners
-
-        // Objects whose own properties are what matched - only ever
-        // non-empty under "prop:" itself, unlike `verbMatchOwners` (which
-        // also fires for the unprefixed `AnyKind` search) - see
-        // `FilterKind`'s own comment for why properties don't participate
-        // in the default search the way verbs do.
-        let propMatchOwners =
-            if filter.Kind = PropertyOnly then
-                treeNodes
-                |> Map.toSeq
-                |> Seq.map snd
-                |> Seq.filter (fun n -> n.Properties |> Array.exists (fun p -> matchesFilter filter.Text p.Name))
-                |> Seq.map (fun n -> n.ObjRef)
-                |> Set.ofSeq
-            else
-                Set.empty
-
-        let expandedPropGroups = Set.union expandedPropGroups propMatchOwners
-
-        // Unlike verbs/props (flat, exact-match gated), a child subtree can
-        // hide a match arbitrarily deep - every ancestor-of-a-match needs
-        // its children group force-open too, or the match is unreachable
-        // regardless of `expanded`, same reasoning as `expanded` itself one
-        // level up.
+        // A matching child subtree can hide a match arbitrarily deep -
+        // every ancestor-of-a-match needs its children group force-open
+        // too, or the match is unreachable regardless of `expanded`, same
+        // reasoning as `expanded` itself one level up.
         let expandedChildGroups = Set.union expandedChildGroups ancestorRefs
 
         let allRows =
-            flattenVisibleRows
-                hideEmptyLeaves
-                showProperties
-                showVerbs
-                expanded
-                expandedPropGroups
-                expandedVerbGroups
-                expandedChildGroups
-                liveChildrenChecked
-                rootRefs
+            flattenVisibleRows hideEmptyLeaves expanded expandedChildGroups liveChildrenChecked rootRefs
 
         // Keep a row if it's itself a match, or an ancestor object-row on
-        // the way to one - the prop/verb group and prop/verb rows never need
-        // to survive purely as ancestors, only object rows do (expansion
-        // only ever reveals a path *down* to a match). The children group
-        // survives on the same `ancestorRefs` test as `ObjectRow` - a
-        // forced-open group whose children don't lead anywhere gets built
-        // into `allRows` but its non-matching child `ObjectRow`s are
-        // dropped right below by that same arm, same as today.
+        // the way to one - the children group survives on the same
+        // `ancestorRefs` test as `ObjectRow` - a forced-open group whose
+        // children don't lead anywhere gets built into `allRows` but its
+        // non-matching child `ObjectRow`s are dropped right below by that
+        // same arm.
         allRows
         |> List.filter (fun row ->
             match row with
             | ObjectRow(objRef, _, _) ->
                 Set.contains objRef ancestorRefs
-                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches filter) |> Option.defaultValue false)
-            | PropGroupRow(objRef, _, _) -> Set.contains objRef propMatchOwners
-            | PropRow(_, prop, _) -> filter.Kind = PropertyOnly && matchesFilter filter.Text prop.Name
-            | VerbGroupRow(objRef, _, _) -> Set.contains objRef verbMatchOwners
-            | VerbRow(_, verb, _) -> filter.Kind <> ObjectOnly && matchesFilter filter.Text verb.Name
+                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false)
             | ChildGroupRow(objRef, _, _) -> Set.contains objRef ancestorRefs)
         |> renderTreeRows
 
-/// Reveals `objRef` in the tree (expanding every ancestor path to it, and
-/// its own verb group) and opens `verbName` directly - used by
-/// go-to-definition, which already knows exactly which verb it wants open.
-/// The bulk tree has every object's own verbs in memory already, so
-/// there's nothing to wait on the way the old
-/// `selectObject`/`listVerbsAsync` round-trip did. Every ancestor's
-/// children group needs opening too, not just its row-level expand flag -
-/// child objects live behind that group gate now, so without this the path
-/// down to `objRef` would stay hidden even though each ancestor's chevron
-/// looks expanded.
+/// Reveals `objRef` in the tree (expanding every ancestor path to it) and
+/// opens `verbName` directly - used by go-to-definition, which already
+/// knows exactly which verb it wants open. Every ancestor's children group
+/// needs opening too, not just its row-level expand flag - child objects
+/// live behind that group gate, so without this the path down to `objRef`
+/// would stay hidden even though each ancestor's chevron looks expanded.
 and private revealAndOpenVerb (objRef: int64) (verbName: string) : unit =
     let ancestorPath = Set.add objRef (ancestorsOf Set.empty objRef)
     expandedRefs <- Set.union expandedRefs ancestorPath
     expandedChildGroups <- Set.union expandedChildGroups ancestorPath
-    expandedVerbGroups <- Set.add objRef expandedVerbGroups
     renderTree ()
     openOrSwitchToVerb objRef verbName
 
@@ -3286,19 +2963,9 @@ treeFilterClearEl.onclick <-
         renderTree ()
         treeFilterEl.focus ()
 
-// Persistence + each checkbox's initial `checked` state are handled inside
+// Persistence + the checkbox's initial `checked` state are handled inside
 // `Settings.init()` already (called earlier, before `renderTree` existed) -
 // this just wires the redraw, now that it's in scope.
-treeFilterShowPropertiesEl.onchange <-
-    fun _ ->
-        Settings.setShowProperties treeFilterShowPropertiesEl.``checked``
-        renderTree ()
-
-treeFilterShowVerbsEl.onchange <-
-    fun _ ->
-        Settings.setShowVerbs treeFilterShowVerbsEl.``checked``
-        renderTree ()
-
 treeFilterHideEmptyLeavesEl.onchange <-
     fun _ ->
         Settings.setHideEmptyLeaves treeFilterHideEmptyLeavesEl.``checked``
@@ -3307,6 +2974,7 @@ treeFilterHideEmptyLeavesEl.onchange <-
 // Starts out showing its empty-state placeholder - populated for real once
 // `moodev-login-result` confirms a login (see below).
 renderTree ()
+showInspectorEmptyState ()
 
 ws.onopen <-
     fun _ ->
@@ -3491,7 +3159,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         for line in lines do
                             let tabIdx = line.IndexOf('\t')
 
@@ -3521,7 +3189,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         let ok = headerField "ok: " header = Some "1"
                         inspectorDiagnosticsEl.textContent <- (if ok then "" else String.concat "\n" lines)
                     | _ -> ()
@@ -3534,7 +3202,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3548,7 +3216,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3572,7 +3240,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         if headerField "ok: " header = Some "1" then
                             loadInspector objRef None
                         else
@@ -3588,20 +3256,12 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            // The tree's own `Verbs` list is a separate cached
-                            // copy from what the inspector shows - always
-                            // scrub it, not just when this object's inspector
-                            // happens to be the active tab (see
-                            // `removeTreeVerb`'s own comment).
-                            removeTreeVerb objRef verb
-                            renderTree ()
-
                             if openVerbTabs |> List.contains (objRef, verb) then
                                 closeTab (objRef, verb)
 
-                            if activeTab = InspectorTab objRef then
+                            if selectedObjRef = Some objRef then
                                 loadInspector objRef None
-                        elif activeTab = InspectorTab objRef then
+                        elif selectedObjRef = Some objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | _ -> ()
@@ -3611,12 +3271,9 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            removeTreeProperty objRef pname
-                            renderTree ()
-
-                            if activeTab = InspectorTab objRef then
+                            if selectedObjRef = Some objRef then
                                 loadInspector objRef None
-                        elif activeTab = InspectorTab objRef then
+                        elif selectedObjRef = Some objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | _ -> ()
@@ -3626,20 +3283,21 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            // The object is gone - drop every open tab that
-                            // referenced it (a verb tab, or its own
-                            // inspector tab) and scrub it out of the tree,
-                            // rather than leaving a dangling reference an
-                            // unrelated click could still hit.
+                            // The object is gone - drop every open verb tab
+                            // that referenced it and scrub it out of the
+                            // tree, rather than leaving a dangling
+                            // reference an unrelated click could still hit.
                             for o, v in openVerbTabs |> List.filter (fun (o, _) -> o = objRef) do
                                 closeTab (o, v)
 
-                            if openInspectorTabs |> List.contains objRef then
-                                closeInspectorTab objRef
+                            if selectedObjRef = Some objRef then
+                                selectedObjRef <- None
+                                activeInspectorProp <- None
+                                showInspectorEmptyState ()
 
                             removeLiveNode objRef
                             renderTree ()
-                        elif activeTab = InspectorTab objRef then
+                        elif selectedObjRef = Some objRef then
                             inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
                     | _ -> ()
                 | None -> ()
@@ -3739,7 +3397,7 @@ ws.onmessage <-
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
-                    | true, objRef when activeTab = InspectorTab objRef ->
+                    | true, objRef when selectedObjRef = Some objRef ->
                         match Array.tryHead lines with
                         | Some line ->
                             let info: obj = JS.JSON.parse line

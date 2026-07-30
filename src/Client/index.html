@@ -44,7 +44,7 @@
     <div id="sidebar">
       <div id="sidebar-view-tree" class="sidebar-view">
         <div class="sidebar-filter-wrap">
-          <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." title="Prefix with obj:, verb:, or prop: to search only objects, only verbs, or only properties" autocomplete="off" spellcheck="false" />
+          <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />
           <button id="tree-filter-clear" class="sidebar-filter-clear" title="Clear filter" aria-label="Clear filter">×</button>
           <button id="tree-new-object-btn" class="sidebar-filter-settings-btn" title="New object" aria-label="New object">＋</button>
           <div id="tree-new-object-popover" class="tree-filter-settings-popover">
@@ -57,20 +57,16 @@
           <button id="tree-filter-settings" class="sidebar-filter-settings-btn" title="Tree display options" aria-label="Tree display options">⚙</button>
           <div id="tree-filter-settings-popover" class="tree-filter-settings-popover">
             <label class="settings-row">
-              <input type="checkbox" id="tree-filter-show-properties" />
-              Show properties
-            </label>
-            <label class="settings-row">
-              <input type="checkbox" id="tree-filter-show-verbs" />
-              Show verbs
-            </label>
-            <label class="settings-row">
               <input type="checkbox" id="tree-filter-hide-empty-leaves" />
               Hide empty leaf objects
             </label>
           </div>
         </div>
         <ul id="tree-list" class="picker-list"></ul>
+        <div id="inspector-pane">
+          <pre id="inspector-diagnostics"></pre>
+          <div id="inspector-content"></div>
+        </div>
       </div>
       <div id="sidebar-view-history" class="sidebar-view">
         <div id="history-search-section">
@@ -122,10 +118,6 @@
           <div id="verb-history-diff-editor"></div>
           <button id="verb-history-restore-btn" class="pane-action-btn" style="display:none">Restore this version</button>
         </div>
-      </div>
-      <div id="inspector-pane">
-        <pre id="inspector-diagnostics"></pre>
-        <div id="inspector-content"></div>
       </div>
       <div id="terminal-pane">
         <div id="login-pane">

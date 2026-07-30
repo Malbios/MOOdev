@@ -1383,6 +1383,19 @@ let killTask (webSocket: WebSocket) (session: Session) (taskId: int64) (ct: Canc
 /// themselves be either corponym'd or not), same `formatLiveName`
 /// convention used throughout this feature. No verb code, no property
 /// values - same reasoning as `getLiveChildren`.
+///
+/// `verbs`/`properties` include every ancestor's own entries too, not just
+/// `objRef`'s - walked breadth-first via `parents(objRef)` (a visited-list
+/// guard, since the object graph is a DAG and a shared ancestor must only
+/// be counted once), nearest ancestor first, `objRef`'s own entries last.
+/// Each entry carries `definerRef`/`definerName` - the object it's actually
+/// defined on, `objRef` itself for an "own" entry - kept distinct from the
+/// existing `ownerRef`/`ownerName` (the unrelated verb/property permission
+/// owner). Not deduplicated against MOO's real verb-dispatch precedence: a
+/// verb name shadowed by a closer definition still shows every ancestor's
+/// copy, each correctly tagged with its own definer, rather than only the
+/// one that would actually execute - replicating exact dispatch precedence
+/// is out of scope here.
 let getLiveInfo (config: Config) (session: Session) (webSocket: WebSocket) (objRef: int64) (ct: CancellationToken) : Task<unit> =
     task {
         let evalRunner = evalOnSession session
@@ -1415,21 +1428,39 @@ else
     cname = valid(c) ? (typeof(c.name) == STR ? c.name | "") | "";
     children_out = {{@children_out, ["objref" -> tostr(c), "name" -> cname]}};
   endfor
+  ancestor_visited = {{}};
+  queue = parents({o});
+  chain = {{}};
+  while (length(queue) > 0)
+    p = queue[1];
+    queue = listdelete(queue, 1);
+    if (valid(p) && !(p in ancestor_visited))
+      ancestor_visited = {{@ancestor_visited, p}};
+      chain = {{@chain, p}};
+      for gp in (parents(p))
+        queue = {{@queue, gp}};
+      endfor
+    endif
+  endwhile
+  chain = {{@chain, {o}}};
   verbs_out = {{}};
-  vlist = verbs({o});
-  for i in [1..length(vlist)]
-    vi = verb_info({o}, i);
-    va = verb_args({o}, i);
-    vowner = vi[1];
-    vownername = valid(vowner) ? (typeof(vowner.name) == STR ? vowner.name | "") | "";
-    verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "owner" -> tostr(vowner), "ownername" -> vownername, "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
-  endfor
   props_out = {{}};
-  for pn in (properties({o}))
-    pi = property_info({o}, pn);
-    powner = pi[1];
-    pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
-    props_out = {{@props_out, ["name" -> pn, "owner" -> tostr(powner), "ownername" -> pownername, "perms" -> pi[2]]}};
+  for x in (chain)
+    xname = typeof(x.name) == STR ? x.name | "";
+    vlist = verbs(x);
+    for i in [1..length(vlist)]
+      vi = verb_info(x, i);
+      va = verb_args(x, i);
+      vowner = vi[1];
+      vownername = valid(vowner) ? (typeof(vowner.name) == STR ? vowner.name | "") | "";
+      verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "owner" -> tostr(vowner), "ownername" -> vownername, "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "definer" -> tostr(x), "definername" -> xname]}};
+    endfor
+    for pn in (properties(x))
+      pi = property_info(x, pn);
+      powner = pi[1];
+      pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
+      props_out = {{@props_out, ["name" -> pn, "owner" -> tostr(powner), "ownername" -> pownername, "perms" -> pi[2], "definer" -> tostr(x), "definername" -> xname]}};
+    endfor
   endfor
   connplayername = valid(player) ? (typeof(player.name) == STR ? player.name | "") | "";
   result = ["name" -> live_name, "aliases" -> alias_list, "owner" -> tostr({o}.owner), "ownername" -> ownername,
@@ -1505,6 +1536,8 @@ endif"""
                      |> Seq.map (fun v ->
                          let vOwnerRef = int64 (v.GetProperty("owner").GetString().TrimStart('#'))
                          let vOwnerName = v.GetProperty("ownername").GetString()
+                         let definerRef = int64 (v.GetProperty("definer").GetString().TrimStart('#'))
+                         let definerName = v.GetProperty("definername").GetString()
 
                          {| name = firstAlias (v.GetProperty("names").GetString())
                             // The complete, un-truncated name-spec (e.g.
@@ -1519,16 +1552,26 @@ endif"""
                             perms = v.GetProperty("perms").GetString()
                             dobj = v.GetProperty("dobj").GetString()
                             prep = v.GetProperty("prep").GetString()
-                            iobj = v.GetProperty("iobj").GetString() |})
+                            iobj = v.GetProperty("iobj").GetString()
+                            // The object this verb is actually defined on -
+                            // `objRef` itself for an "own" verb, an
+                            // ancestor's ref otherwise (see this function's
+                            // own doc comment).
+                            definerRef = definerRef
+                            definerName = formatLiveName corponymsByObjnum definerRef definerName |})
                      |> Array.ofSeq
                    properties =
                      root.GetProperty("properties").EnumerateArray()
                      |> Seq.map (fun p ->
                          let ownerRef = int64 (p.GetProperty("owner").GetString().TrimStart('#'))
                          let ownerName = p.GetProperty("ownername").GetString()
+                         let definerRef = int64 (p.GetProperty("definer").GetString().TrimStart('#'))
+                         let definerName = p.GetProperty("definername").GetString()
 
                          {| name = p.GetProperty("name").GetString()
                             owner = formatLiveName corponymsByObjnum ownerRef ownerName
+                            definerRef = definerRef
+                            definerName = formatLiveName corponymsByObjnum definerRef definerName
                             ownerRef = ownerRef
                             perms = p.GetProperty("perms").GetString() |})
                      |> Array.ofSeq |}
