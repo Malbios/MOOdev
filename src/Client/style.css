@@ -404,6 +404,10 @@ html, body {
   border-bottom: 2px solid #6cf;
 }
 
+.main-tab.dragging {
+  opacity: 0.5;
+}
+
 .main-tab-label {
   cursor: pointer;
 }

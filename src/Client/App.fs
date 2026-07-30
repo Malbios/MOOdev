@@ -516,6 +516,19 @@ let mutable private openVerbTabs: (int64 * string) list = []
 /// client-side - see `loadInspector`'s own comment for why.
 let mutable private openInspectorTabs: int64 list = []
 
+/// Render order for the tab strip (verb + inspector tabs, drag-reorderable) -
+/// a view-order overlay on top of `openVerbTabs`/`openInspectorTabs`, which
+/// remain the source of truth for membership and preview-tab bookkeeping.
+/// Game/History are never in here - they're static buttons outside the
+/// draggable strip. Mirrors every append/replace/remove those two lists
+/// already go through, in the same 4 spots (`renderTabs`' drag handlers are
+/// the only place this is reordered arbitrarily).
+let mutable private tabOrder: OpenTab list = []
+
+/// The tab currently mid-drag (`renderTabs`' drag-and-drop handlers), or
+/// `None` when nothing is being dragged.
+let mutable private draggedTab: OpenTab option = None
+
 /// Most-recently-active-first history of tabs actually switched away from
 /// (across every kind - Game/History/Verb/Inspector), so closing a tab can
 /// fall back to whatever was genuinely active right before it, not just
@@ -1129,6 +1142,7 @@ and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
 and private closeTab (objRef: int64, verbName: string) : unit =
     let wasActive = activeTab = VerbTab(objRef, verbName)
     openVerbTabs <- openVerbTabs |> List.filter (fun t -> t <> (objRef, verbName))
+    tabOrder <- tabOrder |> List.filter (fun t -> t <> VerbTab(objRef, verbName))
     if previewTab = Some(objRef, verbName) then previewTab <- None
 
     if wasActive then
@@ -1154,6 +1168,7 @@ and private closeTab (objRef: int64, verbName: string) : unit =
 and private closeInspectorTab (objRef: int64) : unit =
     let wasActive = activeTab = InspectorTab objRef
     openInspectorTabs <- openInspectorTabs |> List.filter (fun r -> r <> objRef)
+    tabOrder <- tabOrder |> List.filter (fun t -> t <> InspectorTab objRef)
     if previewInspectorTab = Some objRef then previewInspectorTab <- None
 
     // The object's tree row stays "selected" independently of `activeTab`
@@ -1197,7 +1212,10 @@ and private openOrSwitchToInspectorWith (objRef: int64) (highlightProp: string o
         | Some oldPreview ->
             let idx = openInspectorTabs |> List.findIndex (fun r -> r = oldPreview)
             openInspectorTabs <- openInspectorTabs |> List.mapi (fun i r -> if i = idx then objRef else r)
-        | None -> openInspectorTabs <- openInspectorTabs @ [ objRef ]
+            tabOrder <- tabOrder |> List.map (fun t -> if t = InspectorTab oldPreview then InspectorTab objRef else t)
+        | None ->
+            openInspectorTabs <- openInspectorTabs @ [ objRef ]
+            tabOrder <- tabOrder @ [ InspectorTab objRef ]
 
         previewInspectorTab <- Some objRef
 
@@ -1714,16 +1732,19 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let flagsRow = document.createElement ("div")
     flagsRow.classList.add "inspector-flags"
 
+    // Tooltip text verified against `ToastStunt/src/` (`include/db.h`'s
+    // `db_object_flag` enum, gated through `db_object_allows()`) rather than
+    // assumed - MOO documentation for these bits is sparse/LambdaMOO-era.
     let flags =
-        [ "player", (info?player: bool)
-          "programmer", (info?programmer: bool)
-          "wizard", (info?wizard: bool)
-          "r", (info?read: bool)
-          "w", (info?write: bool)
-          "f", (info?fertile: bool)
-          "a", (info?anonymous: bool) ]
+        [ "player", (info?player: bool), "Marks this as a valid player object (login-eligible, appears in players()) - not the same as currently connected."
+          "programmer", (info?programmer: bool), "Lets this object's player compile and run MOO code (eval(), .program, set_verb_code())."
+          "wizard", (info?wizard: bool), "Grants this object's player unrestricted permission, bypassing every other object/verb/property check."
+          "r", (info?read: bool), "Lets other players' code list this object's verbs and properties (verbs(), properties(), respond_to())."
+          "w", (info?write: bool), "Lets other players' code add or delete this object's verbs and properties."
+          "f", (info?fertile: bool), "Lets other players use this object as a parent for new (non-anonymous) objects."
+          "a", (info?anonymous: bool), "Lets other players use this object as a parent for new anonymous objects specifically." ]
 
-    for flagName, isSet in flags do
+    for flagName, isSet, tooltip in flags do
         // Immediate toggle-on-click, no separate confirm step - same
         // convention the property value inputs already use (autosave on
         // blur). `flagName` here is always one of these seven hardcoded
@@ -1733,7 +1754,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         badge.classList.add "inspector-flag"
         if isSet then badge.classList.add "set"
         badge.textContent <- flagName
-        badge.title <- sprintf "Click to %s %s" (if isSet then "clear" else "set") flagName
+        badge.title <- tooltip
 
         badge.onclick <-
             fun _ ->
@@ -2407,88 +2428,129 @@ and private renderCorponymHistoryList (entries: (string * int64 * string * strin
             li.textContent <- sprintf "%s  %s $%s: %s" (date.ToString("yyyy-MM-dd HH:mm")) kind name detail
             corponymHistoryListEl.appendChild li |> ignore
 
-/// Rebuilds `#verb-tabs` (the dynamic, closable tabs) and the static
-/// `#tab-game` button's `.active` state. `#tab-game` itself is never
-/// recreated - only its highlight changes.
+/// Rebuilds `#verb-tabs` (the dynamic, closable, drag-reorderable tabs) and
+/// the static `#tab-game` button's `.active` state. `#tab-game` itself is
+/// never recreated - only its highlight changes. Iterates `tabOrder` once
+/// (rather than `openVerbTabs`/`openInspectorTabs` separately) so both kinds
+/// can be freely interleaved by dragging.
 and private renderTabs () : unit =
     verbTabsEl.innerHTML <- ""
 
-    for objRef, verbName in openVerbTabs do
-        let tab = document.createElement ("div")
-        tab.classList.add "main-tab"
-        if activeTab = VerbTab(objRef, verbName) then tab.classList.add "active"
-        if previewTab = Some(objRef, verbName) then tab.classList.add "preview"
+    let renderOneTab (tab: OpenTab) : HTMLElement =
+        let el = document.createElement ("div")
+        el.classList.add "main-tab"
+        el.setAttribute ("draggable", "true")
+        if activeTab = tab then el.classList.add "active"
 
         let label = document.createElement ("span")
         label.classList.add "main-tab-label"
-        label.textContent <- sprintf "%s (#%d)" verbName objRef
-        label.onclick <- fun _ -> switchToTab (VerbTab(objRef, verbName))
 
-        // Double-click "pins" a preview tab - it stops being subject to
-        // replacement by the next verb opened, same as VS Code.
-        label.ondblclick <-
-            fun _ ->
-                if previewTab = Some(objRef, verbName) then
-                    previewTab <- None
-                    renderTabs ()
+        let closeAction: unit -> unit =
+            match tab with
+            | VerbTab(objRef, verbName) ->
+                if previewTab = Some(objRef, verbName) then el.classList.add "preview"
+                label.textContent <- sprintf "%s (#%d)" verbName objRef
+                label.onclick <- fun _ -> switchToTab (VerbTab(objRef, verbName))
+
+                // Double-click "pins" a preview tab - it stops being subject
+                // to replacement by the next verb opened, same as VS Code.
+                label.ondblclick <-
+                    fun _ ->
+                        if previewTab = Some(objRef, verbName) then
+                            previewTab <- None
+                            renderTabs ()
+
+                fun () -> closeTab (objRef, verbName)
+            | InspectorTab objRef ->
+                // Inspector tabs share the same strip as verb tabs (an "ⓘ
+                // #N" label, same close-× behavior, and the same
+                // preview-tab mechanic) - unlike verb tabs, clicking one
+                // always re-loads it fresh (`openOrSwitchToInspector`, not
+                // a bare `switchToTab`).
+                if previewInspectorTab = Some objRef then el.classList.add "preview"
+                label.textContent <- sprintf "ⓘ #%d" objRef
+                label.onclick <- fun _ -> openOrSwitchToInspector objRef
+
+                label.ondblclick <-
+                    fun _ ->
+                        if previewInspectorTab = Some objRef then
+                            previewInspectorTab <- None
+                            renderTabs ()
+
+                fun () -> closeInspectorTab objRef
+            | GameTab
+            | HistoryTab ->
+                // Never appear in `tabOrder` - Game/History are static
+                // buttons outside the draggable strip.
+                fun () -> ()
 
         let closeBtn = document.createElement ("button")
         closeBtn.classList.add "main-tab-close"
         closeBtn.textContent <- "×"
-        closeBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; closeTab (objRef, verbName)
+        closeBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; closeAction ()
 
         // Middle-click anywhere on the tab closes it, matching VS Code -
         // `preventDefault` on `mousedown` (not just the `click`/`auxclick`
         // that would follow) since the middle button's default action,
         // autoscroll mode, otherwise activates before either fires.
-        tab.onmousedown <-
+        el.onmousedown <-
             fun ev ->
                 if ev.button = 1.0 then
                     ev.preventDefault ()
-                    closeTab (objRef, verbName)
+                    closeAction ()
 
-        tab.appendChild label |> ignore
-        tab.appendChild closeBtn |> ignore
-        verbTabsEl.appendChild tab |> ignore
-
-    // Inspector tabs share the same strip as verb tabs (an "ⓘ #N" label,
-    // same close-× behavior, and the same preview-tab mechanic) - unlike
-    // verb tabs, clicking one always re-loads it fresh
-    // (`openOrSwitchToInspector`, not a bare `switchToTab`).
-    for objRef in openInspectorTabs do
-        let tab = document.createElement ("div")
-        tab.classList.add "main-tab"
-        if activeTab = InspectorTab objRef then tab.classList.add "active"
-        if previewInspectorTab = Some objRef then tab.classList.add "preview"
-
-        let label = document.createElement ("span")
-        label.classList.add "main-tab-label"
-        label.textContent <- sprintf "ⓘ #%d" objRef
-        label.onclick <- fun _ -> openOrSwitchToInspector objRef
-
-        // Double-click "pins" a preview inspector tab - same mechanic as
-        // verb tabs.
-        label.ondblclick <-
+        // Drag-to-reorder: dropping onto another tab inserts the dragged
+        // tab immediately before it in `tabOrder` (identity-based, not
+        // index-arithmetic, so it can't drift out of sync with the list).
+        el.ondragstart <-
             fun _ ->
-                if previewInspectorTab = Some objRef then
-                    previewInspectorTab <- None
-                    renderTabs ()
+                draggedTab <- Some tab
+                el.classList.add "dragging"
 
-        let closeBtn = document.createElement ("button")
-        closeBtn.classList.add "main-tab-close"
-        closeBtn.textContent <- "×"
-        closeBtn.onclick <- fun ev -> ev.stopPropagation () |> ignore; closeInspectorTab objRef
+        el.ondragover <- fun ev -> ev.preventDefault ()
 
-        // Middle-click anywhere on the tab closes it - same as verb tabs above.
-        tab.onmousedown <-
+        el.ondrop <-
             fun ev ->
-                if ev.button = 1.0 then
-                    ev.preventDefault ()
-                    closeInspectorTab objRef
+                ev.preventDefault ()
+                ev.stopPropagation ()
 
-        tab.appendChild label |> ignore
-        tab.appendChild closeBtn |> ignore
-        verbTabsEl.appendChild tab |> ignore
+                match draggedTab with
+                | Some dragged when dragged <> tab ->
+                    let without = tabOrder |> List.filter (fun t -> t <> dragged)
+                    let targetIdx = without |> List.findIndex (fun t -> t = tab)
+                    tabOrder <- (without |> List.take targetIdx) @ [ dragged ] @ (without |> List.skip targetIdx)
+                    draggedTab <- None
+                    renderTabs ()
+                | _ -> ()
+
+        el.ondragend <-
+            fun _ ->
+                draggedTab <- None
+                el.classList.remove "dragging"
+
+        el.appendChild label |> ignore
+        el.appendChild closeBtn |> ignore
+        el
+
+    for tab in tabOrder do
+        verbTabsEl.appendChild (renderOneTab tab) |> ignore
+
+    // Container-level fallback: dropping into empty space past the last tab
+    // (rather than onto a specific tab) appends the dragged tab to the end.
+    // The per-tab `ondrop`'s `stopPropagation()` above keeps this from also
+    // firing when a drop lands on a specific tab.
+    verbTabsEl.ondragover <- fun ev -> ev.preventDefault ()
+
+    verbTabsEl.ondrop <-
+        fun ev ->
+            ev.preventDefault ()
+
+            match draggedTab with
+            | Some dragged ->
+                tabOrder <- (tabOrder |> List.filter (fun t -> t <> dragged)) @ [ dragged ]
+                draggedTab <- None
+                renderTabs ()
+            | None -> ()
 
     if activeTab = GameTab then
         tabGameBtn.classList.add "active"
@@ -3118,7 +3180,10 @@ ws.onmessage <-
                                 let idx = openVerbTabs |> List.findIndex (fun t -> t = oldPreview)
                                 openVerbTabs <- openVerbTabs |> List.mapi (fun i t -> if i = idx then (objRef, verb) else t)
                                 tabContent <- Map.remove oldPreview tabContent
-                            | None -> openVerbTabs <- openVerbTabs @ [ (objRef, verb) ]
+                                tabOrder <- tabOrder |> List.map (fun t -> if t = VerbTab oldPreview then VerbTab(objRef, verb) else t)
+                            | None ->
+                                openVerbTabs <- openVerbTabs @ [ (objRef, verb) ]
+                                tabOrder <- tabOrder @ [ VerbTab(objRef, verb) ]
 
                             previewTab <- Some(objRef, verb)
 
