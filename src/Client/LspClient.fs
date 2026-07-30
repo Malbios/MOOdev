@@ -179,7 +179,10 @@ let getObjectTreeAsync () : Async<(int64 * string * int64[] * int64[] * TreeVerb
 /// corpus-wide "what's safe to delete" scan (matches
 /// `Handlers.MooLspServer.FindDeadVerbs`/`Handlers.findDeadVerbs`). Same
 /// `float`-then-`int64` conversion discipline as `getObjectTreeAsync` above.
-let findDeadVerbsAsync () : Async<(int64 * string * bool)[]> =
+/// `dobj`/`prep`/`iobj` let the dead-verbs view show each entry in
+/// MOO-call-syntax shape (`obj:verb(this, none, this)`), not just a bare
+/// name.
+let findDeadVerbsAsync () : Async<(int64 * string * string * string * string * bool)[]> =
     async {
         let! result = requestAsync "moodev/findDeadVerbs" (createObj [])
 
@@ -187,7 +190,16 @@ let findDeadVerbsAsync () : Async<(int64 * string * bool)[]> =
             return [||]
         else
             let items: obj[] = unbox result
-            return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string), (o?possiblyDynamic: bool))
+
+            return
+                items
+                |> Array.map (fun o ->
+                    int64 (o?objRef: float),
+                    (o?verbName: string),
+                    (o?dobj: string),
+                    (o?prep: string),
+                    (o?iobj: string),
+                    (o?possiblyDynamic: bool))
     }
 
 /// Wires hover, go-to-definition, completions, signature help,

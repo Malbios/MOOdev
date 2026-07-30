@@ -48,6 +48,9 @@ type ObjectTreeProperty = { Name: string; Perms: string }
 type DeadVerbEntry =
     { ObjRef: ObjRef
       VerbName: string
+      Dobj: string
+      Prep: string
+      Iobj: string
       PossiblyDynamic: bool }
 
 type ObjectTreeNode =
@@ -467,7 +470,14 @@ let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
             match v.Meta.Names with
             | primary :: _ when not (confirmedTargets.Contains(num, v.Meta.Index)) ->
                 let possiblyDynamic = unresolvedCallNames |> Seq.exists (Metadata.Resolver.verbNameMatchesAny v.Meta.Names)
-                Some { ObjRef = num; VerbName = primary; PossiblyDynamic = possiblyDynamic }
+
+                Some
+                    { ObjRef = num
+                      VerbName = primary
+                      Dobj = v.Meta.Dobj
+                      Prep = v.Meta.Prep
+                      Iobj = v.Meta.Iobj
+                      PossiblyDynamic = possiblyDynamic }
             | _ -> None))
     |> Array.ofSeq
 

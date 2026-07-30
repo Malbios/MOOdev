@@ -831,12 +831,16 @@ let private matchesFilter (filterText: string) (label: string) : bool =
 /// flat response at login - keyed by objRef (`treeNodes`) so parent/child
 /// lookups don't re-scan the array. The tree itself only ever displays
 /// objects (verbs/properties live in the object inspector instead - see
-/// `loadInspector`), so this only tracks the structural shape.
+/// `loadInspector`), so this only tracks the structural shape - plus
+/// `HasOwnContent`, which doesn't drive any row rendering, only whether
+/// `flattenVisibleRows`' "hide empty leaves" filter considers this object a
+/// genuine dead end (see its own comment).
 type private TreeNode =
     { ObjRef: int64
       Name: string
       Parents: int64[]
-      Children: int64[] }
+      Children: int64[]
+      HasOwnContent: bool }
 
 let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
 
@@ -851,15 +855,17 @@ let private buildTree
     : unit =
     // Verbs/properties are still part of the wire shape (the tree's own
     // login-time fetch is shared with other consumers), but the tree itself
-    // no longer displays them - see `TreeNode`'s own comment.
+    // no longer displays them - see `TreeNode`'s own comment. Only whether
+    // there are any at all survives, for the "hide empty leaves" check.
     treeNodes <-
         nodes
-        |> Array.map (fun (objRef, name, parents, children, _verbs, _properties) ->
+        |> Array.map (fun (objRef, name, parents, children, verbs, properties) ->
             objRef,
             { ObjRef = objRef
               Name = name
               Parents = parents
-              Children = children })
+              Children = children
+              HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) })
         |> Map.ofArray
 
     rootRefs <-
@@ -884,7 +890,7 @@ let private mergeLiveChildren
     (parentRef: int64)
     (children: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[])
     : unit =
-    for objRef, name, parents, _verbs, _properties in children do
+    for objRef, name, parents, verbs, properties in children do
         if not (Map.containsKey objRef treeNodes) then
             treeNodes <-
                 Map.add
@@ -892,7 +898,8 @@ let private mergeLiveChildren
                     { ObjRef = objRef
                       Name = name
                       Parents = parents
-                      Children = [||] }
+                      Children = [||]
+                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) }
                     treeNodes
 
     match Map.tryFind parentRef treeNodes with
@@ -910,7 +917,7 @@ let private mergeLiveChildren
 /// `mergeLiveChildren` does, then unions every returned ref into `rootRefs`
 /// (deduplicated - repeat calls, e.g. on every login, are idempotent).
 let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVerb[] * LspClient.TreeProperty[])[]) : unit =
-    for objRef, name, parents, _verbs, _properties in roots do
+    for objRef, name, parents, verbs, properties in roots do
         if not (Map.containsKey objRef treeNodes) then
             treeNodes <-
                 Map.add
@@ -918,7 +925,8 @@ let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVer
                     { ObjRef = objRef
                       Name = name
                       Parents = parents
-                      Children = [||] }
+                      Children = [||]
+                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) }
                     treeNodes
 
     rootRefs <- Array.append rootRefs (roots |> Array.map (fun (r, _, _, _, _) -> r)) |> Array.distinct
@@ -2539,14 +2547,16 @@ and private renderErrorsList () : unit =
             li.appendChild pre |> ignore
             errorsListEl.appendChild li |> ignore
 
-/// Renders `moodev/findDeadVerbs`' results into the tree toolbar's popover -
-/// each entry clickable straight through to that verb via the existing
+/// Renders `moodev/findDeadVerbs`' results into the Dead Verbs sidebar view -
+/// each entry shown in MOO-call-syntax shape (`obj:verb(dobj, prep, iobj)`)
+/// and clickable straight through to that verb via the existing
 /// `openOrSwitchToVerb`. Entries flagged `possiblyDynamic` (a call site with
 /// a matching literal name exists but couldn't be resolved statically - see
 /// `Handlers.findDeadVerbs`'s own comment) are shown distinctly rather than
 /// as a clean "nothing calls this" hit.
-and private renderDeadVerbsResults (results: (int64 * string * bool)[]) : unit =
-    let dynamicCount = results |> Array.filter (fun (_, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
+and private renderDeadVerbsResults (results: (int64 * string * string * string * string * bool)[]) : unit =
+    let dynamicCount =
+        results |> Array.filter (fun (_, _, _, _, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
 
     treeDeadVerbsSummaryEl.textContent <-
         if results.Length = 0 then
@@ -2556,17 +2566,19 @@ and private renderDeadVerbsResults (results: (int64 * string * bool)[]) : unit =
 
     treeDeadVerbsListEl.innerHTML <- ""
 
-    for objRef, verbName, possiblyDynamic in results do
+    for objRef, verbName, dobj, prep, iobj, possiblyDynamic in results do
         let li = document.createElement ("li")
         li.classList.add "picker-item"
         li.classList.add "inspector-link"
         li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
 
+        let call = sprintf "#%d:%s(%s, %s, %s)" objRef verbName dobj prep iobj
+
         li.textContent <-
             if possiblyDynamic then
-                sprintf "#%d %s (possibly referenced dynamically)" objRef verbName
+                sprintf "%s (possibly referenced dynamically)" call
             else
-                sprintf "#%d %s" objRef verbName
+                call
 
         treeDeadVerbsListEl.appendChild li |> ignore
 
@@ -2710,16 +2722,21 @@ and private flattenVisibleRows
     (liveChildrenChecked: Set<int64>)
     (roots: int64[])
     : TreeRow list =
-    // "Empty leaf" = has no children - the tree's only remaining
-    // expandable content once verbs/properties moved to the inspector.
-    // Applied both to a parent's own children (`childrenOf`) and to the
-    // top-level `roots` just below - `#4`/`#5` (parentless, no children)
-    // previously stayed visible with this toggle on because it was only
-    // ever checked for a node's children, never for the roots themselves.
+    // "Empty leaf" = no children *and* no verbs/properties of its own - a
+    // genuine dead end, not just "nothing to expand in the tree" (an
+    // object can easily have real verbs/properties, visible in the
+    // inspector, while still being a tree leaf - that's not empty, just
+    // terminal). Applied both to a parent's own children (`childrenOf`)
+    // and to the top-level `roots` just below - a root used to stay
+    // visible regardless of this toggle (only ever checked for a node's
+    // children, never the roots themselves); fixing *that* then briefly
+    // over-corrected to "any childless object", which wrongly hid `#5`
+    // too (childless, but has its own verbs) alongside genuinely-empty
+    // `#4`.
     let isEmptyLeaf (ref: int64) : bool =
         match Map.tryFind ref treeNodes with
         | None -> false // unknown ref - show rather than silently drop
-        | Some n -> Array.isEmpty n.Children
+        | Some n -> Array.isEmpty n.Children && not n.HasOwnContent
 
     let childrenOf (node: TreeNode) : int64[] =
         node.Children |> Array.filter (fun childRef -> not hideEmptyLeaves || not (isEmptyLeaf childRef))
