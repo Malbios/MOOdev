@@ -620,8 +620,8 @@ html, body {
 
 .inspector-refs {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.6em;
+  flex-direction: column;
+  gap: 0.3em;
 }
 
 .inspector-ref-item {
@@ -647,7 +647,7 @@ html, body {
   color: #999;
   cursor: pointer;
   padding: 0 0.3em;
-  font-size: 0.85em;
+  font-size: 1.1em;
   line-height: 1;
 }
 
@@ -688,7 +688,7 @@ html, body {
   cursor: pointer;
   padding: 0 0.3em;
   font-family: inherit;
-  font-size: 1.1em;
+  font-size: 1.3em;
   line-height: 1;
 }
 
@@ -703,7 +703,7 @@ html, body {
   cursor: pointer;
   padding: 0 0.4em;
   font-family: inherit;
-  font-size: 1.3em;
+  font-size: 1.5em;
   font-weight: bold;
   line-height: 1;
 }
@@ -718,7 +718,7 @@ html, body {
   color: #a55;
   cursor: pointer;
   padding: 0 0.2em;
-  font-size: 0.85em;
+  font-size: 1.1em;
   line-height: 1;
 }
 
@@ -785,6 +785,21 @@ html, body {
 .inspector-owner-edit-group input {
   flex: 1;
   min-width: 0;
+}
+
+/* A bare `display:flex` span is still block-level and fills its container -
+   `inline-flex` plus a fixed input width is what actually narrows it for a
+   standalone context (e.g. the header's owner/rename edit), as opposed to
+   the table-cell contexts above where stretching to the column width is
+   correct. */
+.inspector-owner-edit-group-compact {
+  display: inline-flex;
+  width: auto;
+}
+
+.inspector-owner-edit-group-compact input {
+  flex: none;
+  width: 10em;
 }
 
 .inspector-owner-quick-btn {

@@ -354,6 +354,9 @@ let private buildTryDispatch
                 | "set-owner" ->
                     do! IdeActions.setOwner config session webSocket (getObj ()) (getStr "ownerExpr") ct
                     return true
+                | "rename-object" ->
+                    do! IdeActions.setName config session webSocket (getObj ()) (getStr "name") ct
+                    return true
                 | "set-flag" ->
                     do! IdeActions.setFlag config session webSocket (getObj ()) (getStr "flag") (root.GetProperty("value").GetInt32() = 1) ct
                     return true
@@ -362,9 +365,6 @@ let private buildTryDispatch
                     return true
                 | "remove-parent" ->
                     do! IdeActions.removeParent config session webSocket (getObj ()) (root.GetProperty("parent").GetInt64()) ct
-                    return true
-                | "get-location" ->
-                    do! IdeActions.getLocation config session webSocket ct
                     return true
                 | "get-live-children" ->
                     do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct

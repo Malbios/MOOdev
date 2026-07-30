@@ -18,8 +18,6 @@ open Language.Parser
 open Metadata.Schema
 open Metadata.TreeFormat
 
-let parseObjRef (s: string) : ObjRef = Int64.Parse(s.TrimStart('#'))
-
 /// `builtin-param-names.json` is embedded in this assembly (see
 /// `Metadata.fsproj`) - a static, build-time extraction from ToastStunt's
 /// own C source comments, not per-`Survive`-checkout data. Not `private`:

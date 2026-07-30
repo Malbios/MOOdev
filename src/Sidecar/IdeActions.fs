@@ -1,6 +1,6 @@
-/// Phase 4 of moo-vcs-plan.md: sidecar-mediated replacements for all five
+/// Phase 4 of moo-vcs-plan.md: sidecar-mediated replacements for the four
 /// retired `$vcs` IDE verbs (`ide_fetch`, `ide_save`, `ide_get_properties`,
-/// `ide_set_property`, `ide_get_location`). Each function runs its MOO
+/// `ide_set_property`). Each function runs its MOO
 /// query over the browser session's own live connection
 /// (`BridgeHandler.evalOnSession` - so `player` is whichever character is
 /// actually logged into that tab) and sends the response to the browser in
@@ -633,6 +633,50 @@ let setOwner
                 ct
     }
 
+/// Renames an object - `.name = newName`, a direct dot-assignable pseudo-
+/// property (confirmed against `ToastStunt/src/execute.cc`'s `OP_PUT_PROP`
+/// handling of the `.name` built-in - owner-or-wizard, blocked for player
+/// objects unless wizard; the sidecar's connection is always a wizard, so
+/// this is never actually blocked). `name:` is a real field in
+/// `object.moo` (`FORMAT.md` §3), so this re-exports on success like any
+/// other structural change.
+let setName
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (newName: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let nameLit = "\"" + newName.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; try {o}.name = {nameLit}; ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let! gitError = exportAndCommitObject config session objRef "name" GitStore.Modified ct
+                    return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-name-set-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// Toggles one of the inspector's flag badges. `flagName` is never
 /// user-typed - it only ever arrives as one of seven fixed button labels
 /// the client itself defines - so splicing it directly into the generated
@@ -1020,10 +1064,12 @@ else
     pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
     props_out = {{@props_out, ["name" -> pn, "owner" -> tostr(powner), "ownername" -> pownername, "perms" -> pi[2]]}};
   endfor
+  connplayername = valid(player) ? (typeof(player.name) == STR ? player.name | "") | "";
   result = ["name" -> live_name, "aliases" -> alias_list, "owner" -> tostr({o}.owner), "ownername" -> ownername,
             "player" -> is_player({o}), "programmer" -> {o}.programmer, "wizard" -> {o}.wizard,
             "read" -> {o}.r, "write" -> {o}.w, "fertile" -> {o}.f, "anonymous" -> {o}.a,
-            "parents" -> parents_out, "children" -> children_out, "verbs" -> verbs_out, "properties" -> props_out];
+            "parents" -> parents_out, "children" -> children_out, "verbs" -> verbs_out, "properties" -> props_out,
+            "connectedPlayer" -> tostr(player), "connectedPlayerName" -> connplayername];
 endif"""
 
         let! json = evalRunner statements "result" ct
@@ -1055,9 +1101,21 @@ endif"""
             // reads on the client side.
             let flag (name: string) = root.GetProperty(name).GetInt32() = 1
 
+            let connectedPlayerRef = int64 (root.GetProperty("connectedPlayer").GetString().TrimStart('#'))
+
+            let connectedPlayerDisplay =
+                formatLiveName corponymsByObjnum connectedPlayerRef (root.GetProperty("connectedPlayerName").GetString())
+
             let payload =
                 {| name = formatLiveName corponymsByObjnum objRef (root.GetProperty("name").GetString())
+                   // The raw `.name` value (often empty for an unnamed
+                   // object) - unlike `name` above, not run through
+                   // `formatLiveName`, since the rename widget needs to
+                   // prefill with what's actually assignable back to
+                   // `.name`, not a display string like `"#6 (#6)"`.
+                   rawName = root.GetProperty("name").GetString()
                    owner = refOf (root.GetProperty("owner").GetString()) (root.GetProperty("ownername").GetString())
+                   connectedPlayerDisplay = connectedPlayerDisplay
                    aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> Array.ofSeq
                    player = flag "player"
                    programmer = flag "programmer"
@@ -1099,21 +1157,6 @@ endif"""
                      |> Array.ofSeq |}
 
             do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [ JsonSerializer.Serialize(payload) ] ct
-    }
-
-/// `ide_get_location()` replacement - "player" here is whichever character
-/// is logged into this session, matching the retired verb's own
-/// `player.location` (this only works correctly because the query runs
-/// over the session's own connection, not a shared wizard one).
-let getLocation (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
-    task {
-        // Real tab bytes via chr(9), not "\t" - see getProperties' comment.
-        let statements =
-            """room = player.location; lines = {}; if (valid(room)) exits = `room.exits ! E_PROPNF => {}'; lines = {"room" + chr(9) + tostr(room) + chr(9) + room.name}; for e in (exits) lines = {@lines, "exit" + chr(9) + tostr(e) + chr(9) + e.name}; endfor for c in (room.contents) if (c != player) lines = {@lines, "content" + chr(9) + tostr(c) + chr(9) + c.name}; endif endfor endif"""
-
-        let! json = evalOnSession session statements "lines" ct
-        let lines = json.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
-        do! sendWire webSocket "moodev-location-content" lines ct
     }
 
 /// Resolves `obj`+`verbName` to its corponym and *current* on-disk path
