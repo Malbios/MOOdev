@@ -1,0 +1,1 @@
+TextDocumentReferences already computes "who calls this" per-verb with a documented caveat for dynamic dispatch (obj:(name)(), eval()). Running it across every verb once and surfacing the zero-reference set (with that same caveat attached) would answer "what's safe to delete" corpus-wide instead of one verb at a time.

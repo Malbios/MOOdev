@@ -39,6 +39,17 @@ type ObjectTreeVerb =
 /// Same idea as `ObjectTreeVerb`, for properties.
 type ObjectTreeProperty = { Name: string; Perms: string }
 
+/// One verb `FindDeadVerbs` found no confirmed reference to.
+/// `PossiblyDynamic` carries forward the exact same "unresolvable call site
+/// with a matching literal name" caveat `TextDocumentReferences`'s
+/// `moodev-caveat://` entry already surfaces for a single search - applied
+/// per-verb here instead of per-search, since a verb only reachable via
+/// `this:(name)()`/computed dispatch isn't safely "dead", just unconfirmed.
+type DeadVerbEntry =
+    { ObjRef: ObjRef
+      VerbName: string
+      PossiblyDynamic: bool }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
@@ -425,6 +436,40 @@ let private allVerbCallReferences (graph: Graph) : (ObjRef * string * AstQuery.F
                     | _ -> false)
                 |> Seq.map (fun r -> num, primary, r)
             | _ -> Seq.empty))
+
+/// Corpus-wide counterpart to `TextDocumentReferences` - instead of
+/// resolving every call site against one target verb, resolves every call
+/// site's own target *once* and checks every verb in the graph against that
+/// single confirmed-targets set. Deliberately not `private` (unlike
+/// `allVerbCallReferences` above) so `LanguageServer.Tests` can call it
+/// directly without spinning up a full `MooLspServer` - same reasoning
+/// `Metadata.Resolver`'s functions are public for `ResolverTests.fs`.
+let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
+    let confirmedTargets = System.Collections.Generic.HashSet<ObjRef * int>()
+    let unresolvedCallNames = System.Collections.Generic.HashSet<string>()
+
+    for containingObj, _, r in allVerbCallReferences graph do
+        match r.Ref with
+        | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
+            match Metadata.Resolver.resolveReceiverInContext graph containingObj receiver with
+            | Some receiverStart ->
+                match Metadata.Resolver.findCallableVerb graph receiverStart callName with
+                | Some(actualDefiner, actualVerb) -> confirmedTargets.Add(actualDefiner, actualVerb.Meta.Index) |> ignore
+                | None -> ()
+            | None -> unresolvedCallNames.Add callName |> ignore
+        | _ -> ()
+
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Verbs
+        |> Seq.choose (fun v ->
+            match v.Meta.Names with
+            | primary :: _ when not (confirmedTargets.Contains(num, v.Meta.Index)) ->
+                let possiblyDynamic = unresolvedCallNames |> Seq.exists (Metadata.Resolver.verbNameMatchesAny v.Meta.Names)
+                Some { ObjRef = num; VerbName = primary; PossiblyDynamic = possiblyDynamic }
+            | _ -> None))
+    |> Array.ofSeq
 
 /// Minimal client stub - this phase never needs to push notifications or
 /// send server-initiated requests back to the editor (no diagnostics, no
@@ -823,3 +868,10 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
 
             return Ok nodes
         }
+
+    /// Custom method (`moodev/findDeadVerbs`, no params) - the "what's safe
+    /// to delete" report: every verb `findDeadVerbs` found no confirmed
+    /// reference to, corpus-wide, in one pass rather than searching one verb
+    /// at a time via `TextDocumentReferences`.
+    member _.FindDeadVerbs(_p: obj) : Async<Result<DeadVerbEntry[], JsonRpc.Error>> =
+        async { return Ok(findDeadVerbs graph) }

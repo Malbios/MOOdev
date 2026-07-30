@@ -8,7 +8,7 @@
         "type": "tabs",
         "children": [
           {
-            "id": "242344b071f3c88c",
+            "id": "7fb229d216fa727a",
             "type": "leaf",
             "state": {
               "type": "kanban",
@@ -26,6 +26,20 @@
               },
               "icon": "lucide-trello",
               "title": "Development"
+            }
+          },
+          {
+            "id": "8cd79907b5cd4d8f",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "Untitled.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "Untitled"
             }
           }
         ]
@@ -193,9 +207,28 @@
       "obsidian-kanban:Create new board": false
     }
   },
-  "active": "242344b071f3c88c",
+  "active": "7fb229d216fa727a",
   "lastOpenFiles": [
+    "Development.md.tmp.30200.c7574e86783b",
+    "cards/Task tick_seconds usage.md",
+    "Untitled.md",
     "Development.md",
+    "cards/In-IDE test runner.md",
+    "cards/Object inheritance graph view.md",
+    "cards/VCS Promotion UI.md",
+    "cards/Structured property editor.md",
+    "cards/Command palette jump-to-anything.md",
+    "cards/Rename symbol refactor.md",
+    "cards/make version history work.md",
+    "cards/Dead-verb finder.md",
+    "cards",
+    "cards/Doc comment convention support.md",
+    "cards/Live diagnostics.md",
+    "cards/Static checks for the MOOcode gotchas.md",
+    "cards/verb-level test harness.md",
+    "cards/permission inheritance visualizer.md",
+    "cards/runtime error stream.md",
+    "cards/live task queue inspector.md",
     "Models/6d16ffce-932c-4b10-8960-58d8d762dfe4.md",
     "Models.base",
     "Models/388543bc-62bc-4f88-affe-c7593a0a410f.md",
@@ -210,36 +243,17 @@
     "Models/6860e8e1-9353-4b3a-b87a-e7f0dbcd235c.md",
     "System/Attachments/502b9bac-c97c-4793-8a03-22ec15b85676.png",
     "Models/b23683a1-5ba4-4dc0-b23b-da852ace780d.md",
-    "Models/d180465b-4766-43a2-b02a-39c96ac56cf3.md",
     "System/Attachments/f553eb10-3f5f-4b5e-aba3-096b5f1e142f.png",
     "System/Attachments/92b28a41-aa16-40b2-8c5e-01d23b0397ab.png",
-    "Models/6d78bb4f-1aae-4ae0-b67d-170f6383dfcb.md",
-    "Models/f2f4ee0f-3670-406d-9557-b139549465e5.md",
     "System/Attachments/0f241539-c8ea-4647-8732-0995f689917f.png",
     "System/Attachments/d06b0630-f2f0-4c0a-a482-e81f925979a6.png",
-    "Models/30e4f431-8a8e-4783-bc88-465b17dc8543.md",
-    "Models/5125d2e0-3b07-4afc-954a-57a3a6e000ea.md",
     "Models",
     "Files",
     "System/Attachments",
     "System",
-    "Scratch Pad.md",
     "AI/Tripo/Models.base",
-    "AI/Tripo/Database/items/deda71c9-04e4-4f4e-80ef-07a03da51481.md",
-    "AI/Tripo/Database/items/a007c85d-82d1-4eab-a4cd-b244eee4b54e.md",
-    "AI/Tripo/Database/items/ec342cd0-ef93-477a-9971-c5029234bb28.md",
-    "AI/Tripo/Database/items/71647b4c-5856-4892-8663-cc8a506b078f.md",
-    "AI/Tripo/Database/items/6f5b6a2b-a176-447f-8401-6d99aa74c671.md",
     "System/Attachments/hinata-3.glb",
     "System/Attachments/hinata-2.glb",
-    "System/Attachments/hinata 1.glb",
-    "System/Attachments/busty-butt.glb",
-    "AI/Tripo/Database/items/25070b84-fcba-47c5-a6c4-261e1685895b.md",
-    "AI/Tripo/Database/items/266b4ce2-e4a6-494c-9f6d-a093314cf996.md",
-    "AI/Tripo/Database/items/088fd2b6-c1d1-45db-8c16-e8603d244793.md",
-    "AI/Tripo/Database/items/b5e7f147-5ba1-490a-9aa5-04bc073177ee.md",
-    "AI/Tripo/Database/items/dfe35f84-385f-427a-99b1-f1643e48ffaf.md",
-    "AI/Tripo/Database/items/9380e5f8-ec3a-459b-a5b7-0488a3f33433.md",
-    "AI/Tripo/Database/items/11339566-449b-4345-9cfb-2de00205d834.md"
+    "System/Attachments/hinata 1.glb"
   ]
 }

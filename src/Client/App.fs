@@ -99,6 +99,17 @@ let private historyPaneEl = document.getElementById ("history-pane")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
 let private corponymHistoryListEl = document.getElementById ("corponym-history-list")
+let private tabTasksBtn = document.getElementById ("tab-tasks")
+let private tasksPaneEl = document.getElementById ("tasks-pane")
+let private tasksListEl = document.getElementById ("tasks-list")
+let private tabErrorsBtn = document.getElementById ("tab-errors")
+let private errorsPaneEl = document.getElementById ("errors-pane")
+let private errorsListEl = document.getElementById ("errors-list")
+let private errorsClearBtn = document.getElementById ("errors-clear-btn")
+let private treeDeadVerbsBtn = document.getElementById ("tree-dead-verbs-btn")
+let private treeDeadVerbsPopoverEl = document.getElementById ("tree-dead-verbs-popover")
+let private treeDeadVerbsSummaryEl = document.getElementById ("tree-dead-verbs-summary")
+let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -438,21 +449,29 @@ treeFilterSettingsBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
         treeNewObjectPopoverEl.classList.remove "visible"
+        treeDeadVerbsPopoverEl.classList.remove "visible"
         treeFilterSettingsPopoverEl.classList.toggle "visible" |> ignore
 
 treeNewObjectBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
         treeFilterSettingsPopoverEl.classList.remove "visible"
+        treeDeadVerbsPopoverEl.classList.remove "visible"
         treeNewObjectPopoverEl.classList.toggle "visible" |> ignore
+
+// `treeDeadVerbsBtn.onclick` itself is wired further down, alongside
+// `tabTasksBtn`/`tabErrorsBtn` - it needs `renderDeadVerbsResults`, part of
+// the big mutually-recursive function group defined later in this file.
 
 treeFilterSettingsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 treeNewObjectPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
+treeDeadVerbsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 
 document.onclick <-
     fun _ ->
         treeFilterSettingsPopoverEl.classList.remove "visible"
         treeNewObjectPopoverEl.classList.remove "visible"
+        treeDeadVerbsPopoverEl.classList.remove "visible"
 
 Settings.init ()
 
@@ -469,6 +488,8 @@ type private OpenTab =
     | VerbTab of objRef: int64 * verbName: string
     | InspectorTab of objRef: int64
     | HistoryTab
+    | TasksTab
+    | ErrorsTab
 
 let mutable private activeTab: OpenTab = GameTab
 
@@ -529,6 +550,11 @@ let mutable private tabOrder: OpenTab list = []
 /// `None` when nothing is being dragged.
 let mutable private draggedTab: OpenTab option = None
 
+/// In-memory, session-only log of received `#0:handle_uncaught_error`/
+/// `handle_task_timeout` events - newest first. Not persisted; a page
+/// reload starts fresh, same as every other purely-client-side list here.
+let mutable private errorLog: (System.DateTime * string * string list) list = []
+
 /// Most-recently-active-first history of tabs actually switched away from
 /// (across every kind - Game/History/Verb/Inspector), so closing a tab can
 /// fall back to whatever was genuinely active right before it, not just
@@ -540,7 +566,9 @@ let mutable private tabHistory: OpenTab list = []
 let private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
     | GameTab
-    | HistoryTab -> true
+    | HistoryTab
+    | TasksTab
+    | ErrorsTab -> true
     | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
     | InspectorTab o -> openInspectorTabs |> List.contains o
 
@@ -601,7 +629,9 @@ let private currentVerbDoc () : (int64 * string) option =
     | VerbTab(o, v) -> Some(o, v)
     | GameTab
     | InspectorTab _
-    | HistoryTab -> None
+    | HistoryTab
+    | TasksTab
+    | ErrorsTab -> None
 
 /// Sends a Phase 4 structured IDE-action envelope (`{"action": ..., ...}`)
 /// over the main WebSocket - the sidecar's `Program.buildTryDispatch` parses
@@ -705,7 +735,7 @@ statusPositionEl.textContent <- "Ln 1, Col 1"
 /// verb-history pane replaces the plain editor pane, everything else stays
 /// hidden the same way).
 let private allPanes =
-    [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl; historyPaneEl ]
+    [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl; historyPaneEl; tasksPaneEl; errorsPaneEl ]
 
 let private activateOnly (paneEl: HTMLElement) : unit =
     for p in allPanes do
@@ -727,6 +757,8 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
     | HistoryTab -> activateOnly historyPaneEl
+    | TasksTab -> activateOnly tasksPaneEl
+    | ErrorsTab -> activateOnly errorsPaneEl
 
 /// The historical code currently shown in the verb-history diff view's
 /// "original" side - what "Restore this version" writes into the live
@@ -794,7 +826,9 @@ let private cacheCurrentEditorContent () : unit =
     | VerbTab(o, v) -> tabContent <- Map.add (o, v) (editor.getValue ()) tabContent
     | GameTab
     | InspectorTab _
-    | HistoryTab -> ()
+    | HistoryTab
+    | TasksTab
+    | ErrorsTab -> ()
 
 /// Pulls the value following `marker` out of an mcp header line, up to the
 /// next space - used for short fixed-shape fields like "ref:" and "ok:".
@@ -1139,7 +1173,9 @@ let rec private switchToTab (tab: OpenTab) : unit =
         match tab with
         | GameTab
         | InspectorTab _
-        | HistoryTab -> ()
+        | HistoryTab
+        | TasksTab
+        | ErrorsTab -> ()
         | VerbTab(o, v) ->
             editor.setValue (Map.find (o, v) tabContent)
             // setValue above just re-fired onDidChangeModelContent - this
@@ -1215,7 +1251,9 @@ and private closeInspectorTab (objRef: int64) : unit =
         | InspectorTab o -> loadInspector o None
         | GameTab
         | VerbTab _
-        | HistoryTab -> ()
+        | HistoryTab
+        | TasksTab
+        | ErrorsTab -> ()
     else
         renderTabs ()
         renderTree ()
@@ -2457,6 +2495,160 @@ and private renderCorponymHistoryList (entries: (string * int64 * string * strin
             li.textContent <- sprintf "%s  %s $%s: %s" (date.ToString("yyyy-MM-dd HH:mm")) kind name detail
             corponymHistoryListEl.appendChild li |> ignore
 
+/// Refreshes the Tasks tab - always, same "always fresh" convention
+/// `loadCorponymHistory` uses, since the queue changes constantly.
+and private loadTasks () : unit =
+    tasksListEl.innerHTML <- "Loading..."
+    sendAction [ "action" ==> "get-tasks" ]
+
+/// Switches to the Tasks tab and refreshes it.
+and private openOrSwitchToTasks () : unit =
+    switchToTab TasksTab
+    if isLoggedIn then loadTasks () else tasksListEl.innerHTML <- ""
+
+/// Renders `get-tasks`'s results - `queued_tasks()` minus its two obsolete
+/// tick/seconds-placeholder fields (see `IdeActions.getTasks`'s own
+/// comment). `programmer`/`vloc`/`this` are each clickable through to that
+/// object's inspector, same link style used throughout this file.
+and private renderTasksList
+    (tasks:
+        {| id: int64
+           start: int64
+           programmerRef: int64
+           programmer: string
+           vlocRef: int64
+           vloc: string
+           verb: string
+           line: int64
+           thisRef: int64
+           this: string
+           bytes: int64 |} array)
+    : unit =
+    tasksListEl.innerHTML <- ""
+
+    if tasks.Length = 0 then
+        let li = document.createElement ("li")
+        li.textContent <- "No queued tasks."
+        tasksListEl.appendChild li |> ignore
+    else
+        for t in tasks do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+
+            let startText =
+                if t.start = -1L then
+                    "reading"
+                else
+                    System.DateTimeOffset.FromUnixTimeSeconds(t.start).LocalDateTime.ToString("yyyy-MM-dd HH:mm:ss")
+
+            let label = document.createElement ("span")
+            label.textContent <- sprintf "#%d  %s  " t.id startText
+            li.appendChild label |> ignore
+
+            let programmerLink = document.createElement ("span")
+            programmerLink.classList.add "inspector-link"
+            programmerLink.textContent <- t.programmer
+            programmerLink.onclick <- fun _ -> openOrSwitchToInspector t.programmerRef
+            li.appendChild programmerLink |> ignore
+
+            let verbLabel = document.createElement ("span")
+            verbLabel.textContent <- sprintf " calling "
+            li.appendChild verbLabel |> ignore
+
+            let vlocLink = document.createElement ("span")
+            vlocLink.classList.add "inspector-link"
+            vlocLink.textContent <- sprintf "%s:%s" t.vloc t.verb
+            vlocLink.onclick <- fun _ -> openOrSwitchToVerb t.vlocRef t.verb
+            li.appendChild vlocLink |> ignore
+
+            let restLabel = document.createElement ("span")
+            restLabel.textContent <- sprintf " (line %d)  this=" t.line
+            li.appendChild restLabel |> ignore
+
+            let thisLink = document.createElement ("span")
+            thisLink.classList.add "inspector-link"
+            thisLink.textContent <- t.this
+            thisLink.onclick <- fun _ -> openOrSwitchToInspector t.thisRef
+            li.appendChild thisLink |> ignore
+
+            let bytesLabel = document.createElement ("span")
+            bytesLabel.textContent <- sprintf "  %d bytes" t.bytes
+            li.appendChild bytesLabel |> ignore
+
+            let killBtn = document.createElement ("button")
+            killBtn.classList.add "inspector-row-delete-btn"
+            killBtn.textContent <- "🗑"
+            killBtn.title <- "Kill this task"
+
+            killBtn.onclick <-
+                fun _ ->
+                    if window.confirm (sprintf "Kill task #%d?" t.id) then
+                        sendAction [ "action" ==> "kill-task"; "task" ==> int t.id ]
+
+            li.appendChild killBtn |> ignore
+            tasksListEl.appendChild li |> ignore
+
+/// Switches to the Errors tab - unlike Tasks/History, there's no server
+/// round trip to refresh (errors only ever arrive as unsolicited
+/// `moodev-error` pushes, never fetched), so this just shows whatever's
+/// already in `errorLog`.
+and private openOrSwitchToErrors () : unit =
+    switchToTab ErrorsTab
+    renderErrorsList ()
+
+/// Rebuilds the Errors tab's list from `errorLog`. Traceback lines are
+/// plain text, not structured per-frame data yet - no click-to-jump in this
+/// pass (an explicit non-goal, not forgotten).
+and private renderErrorsList () : unit =
+    errorsListEl.innerHTML <- ""
+
+    if errorLog.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No errors yet this session."
+        errorsListEl.appendChild li |> ignore
+    else
+        for whenReceived, kind, tracebackLines in errorLog do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            let pre = document.createElement ("pre")
+
+            pre.textContent <-
+                sprintf "%s  [%s]\n%s" (whenReceived.ToString("yyyy-MM-dd HH:mm:ss")) kind (String.concat "\n" tracebackLines)
+
+            li.appendChild pre |> ignore
+            errorsListEl.appendChild li |> ignore
+
+/// Renders `moodev/findDeadVerbs`' results into the tree toolbar's popover -
+/// each entry clickable straight through to that verb via the existing
+/// `openOrSwitchToVerb`. Entries flagged `possiblyDynamic` (a call site with
+/// a matching literal name exists but couldn't be resolved statically - see
+/// `Handlers.findDeadVerbs`'s own comment) are shown distinctly rather than
+/// as a clean "nothing calls this" hit.
+and private renderDeadVerbsResults (results: (int64 * string * bool)[]) : unit =
+    let dynamicCount = results |> Array.filter (fun (_, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
+
+    treeDeadVerbsSummaryEl.textContent <-
+        if results.Length = 0 then
+            "No dead verbs found."
+        else
+            sprintf "%d dead verb(s), %d possibly referenced dynamically" results.Length dynamicCount
+
+    treeDeadVerbsListEl.innerHTML <- ""
+
+    for objRef, verbName, possiblyDynamic in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+        li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+
+        li.textContent <-
+            if possiblyDynamic then
+                sprintf "#%d %s (possibly referenced dynamically)" objRef verbName
+            else
+                sprintf "#%d %s" objRef verbName
+
+        treeDeadVerbsListEl.appendChild li |> ignore
+
 /// Rebuilds `#verb-tabs` (the dynamic, closable, drag-reorderable tabs) and
 /// the static `#tab-game` button's `.active` state. `#tab-game` itself is
 /// never recreated - only its highlight changes. Iterates `tabOrder` once
@@ -2508,9 +2700,11 @@ and private renderTabs () : unit =
 
                 fun () -> closeInspectorTab objRef
             | GameTab
-            | HistoryTab ->
-                // Never appear in `tabOrder` - Game/History are static
-                // buttons outside the draggable strip.
+            | HistoryTab
+            | TasksTab
+            | ErrorsTab ->
+                // Never appear in `tabOrder` - Game/History/Tasks/Errors are
+                // static buttons outside the draggable strip.
                 fun () -> ()
 
         let closeBtn = document.createElement ("button")
@@ -3038,6 +3232,30 @@ outputEl.onclick <-
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
 tabHistoryBtn.onclick <- fun _ -> openOrSwitchToHistory ()
+tabTasksBtn.onclick <- fun _ -> openOrSwitchToTasks ()
+tabErrorsBtn.onclick <- fun _ -> openOrSwitchToErrors ()
+
+errorsClearBtn.onclick <-
+    fun _ ->
+        errorLog <- []
+        renderErrorsList ()
+
+treeDeadVerbsBtn.onclick <-
+    fun ev ->
+        ev.stopPropagation () |> ignore
+        treeFilterSettingsPopoverEl.classList.remove "visible"
+        treeNewObjectPopoverEl.classList.remove "visible"
+        treeDeadVerbsPopoverEl.classList.toggle "visible" |> ignore
+
+        if treeDeadVerbsPopoverEl.classList.contains "visible" then
+            treeDeadVerbsSummaryEl.textContent <- "Scanning..."
+            treeDeadVerbsListEl.innerHTML <- ""
+
+            async {
+                let! results = LspClient.findDeadVerbsAsync ()
+                renderDeadVerbsResults results
+            }
+            |> Async.StartImmediate
 
 historySearchInputEl.onkeydown <-
     fun ev ->
@@ -3243,6 +3461,7 @@ ws.onmessage <-
                 Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
             elif header.StartsWith("moodev-login-result") then
                 if headerField "ok: " header = Some "1" then
+                    isLoggedIn <- true
                     Login.hide ()
 
                     async {
@@ -3620,6 +3839,44 @@ ws.onmessage <-
                         |> List.ofArray
 
                     renderCorponymHistoryList entries
+            elif header.StartsWith("moodev-tasks") then
+                if activeTab = TasksTab then
+                    let tasks =
+                        lines
+                        |> Array.map (fun line ->
+                            let o: obj = JS.JSON.parse line
+
+                            {| id = int64 (o?id: float)
+                               start = int64 (o?start: float)
+                               programmerRef = int64 (o?programmerRef: float)
+                               programmer = (o?programmer: string)
+                               vlocRef = int64 (o?vlocRef: float)
+                               vloc = (o?vloc: string)
+                               verb = (o?verb: string)
+                               line = int64 (o?line: float)
+                               thisRef = int64 (o?thisRef: float)
+                               this = (o?this: string)
+                               bytes = int64 (o?bytes: float) |})
+
+                    renderTasksList tasks
+            elif header.StartsWith("moodev-kill-task-result") then
+                let ok = headerField "ok: " header = Some "1"
+
+                if ok then
+                    if activeTab = TasksTab then loadTasks ()
+                elif not (Array.isEmpty lines) then
+                    window.alert (String.concat "\n" lines)
+            elif header.StartsWith("moodev-error") then
+                // Unsolicited push from `#0:handle_uncaught_error`/
+                // `handle_task_timeout` (see moo-dev/CLAUDE.md's bootstrap
+                // verbs) - can arrive at any time, not just while the Errors
+                // tab is open, so this always logs it; `renderErrorsList`
+                // only actually touches the DOM when that tab is active.
+                let kind = headerField "kind: " header |> Option.defaultValue "error"
+                errorLog <- (System.DateTime.Now, kind, lines |> List.ofArray) :: errorLog
+
+                if activeTab = ErrorsTab then
+                    renderErrorsList ()
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text

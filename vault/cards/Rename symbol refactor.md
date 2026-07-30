@@ -1,0 +1,1 @@
+The reference data behind "Find All References" already exists; a rename action that rewrites every resolvable call site (surfacing the same "N sites couldn't be confirmed statically" caveat before applying) is a short step further.

@@ -160,6 +160,55 @@ describes, just via the native path instead of `do_command`) to break the chicke
 `executables/vcs-commit.sh` (the old `$vcs`-era shell-out script) no longer runs at all - retired
 along with `$vcs` itself.
 
+### Optional bootstrap verbs - the Errors tab
+
+Unlike `user_connected`/`do_command` above, these two are **not** required for the IDE to work at
+all - only for the Errors tab's live traceback stream. Confirmed via `git blame` that stock
+ToastStunt (upstream, predating this fork's own patches) already calls
+`#0:handle_uncaught_error(code, msg, value, stack, traceback)` and `#0:handle_task_timeout(tag,
+stack, traceback)` automatically on every uncaught error/tick-or-seconds timeout
+(`ToastStunt/src/execute.cc:557-625`, dispatch at `execute.cc:3201-3226`) - **no C patch needed**.
+If the verb doesn't exist, ToastStunt silently falls back to its classic behavior (`notify()`-ing
+the raw traceback straight to the connected player), so a world without these two verbs isn't
+broken, it just doesn't feed the Errors tab.
+
+- **`#0:handle_uncaught_error`** / **`#0:handle_task_timeout`** - format the traceback via the same
+  `#$#moodev-*`/`#$#*`/`#$#:` multiline framing `moodev-edit-content` uses, then `return 1` (marks
+  the error "handled" so the fallback plain-`notify()` doesn't *also* fire and double-print to the
+  player). **The continuation-line shape is stricter than it looks** - confirmed against
+  `Sidecar/McpFilter.fs`'s `classifyHashLine` (not just assumed from the doc comment describing the
+  now-retired `$vcs:ide_fetch`/`ide_save`'s use of the same convention, which got this wrong the
+  first time live-testing this feature): a continuation line isn't just `#$#* <content>` - it's
+  `#$#* <tag> text: <content>`, where `<tag>` is the *first token* after `ref: ` in the header line
+  (here, the literal `0`). Get the tag wrong (or omit the `text: ` marker) and `classifyHashLine`
+  doesn't recognize the continuation at all - it passes the raw `#$#* ...` line straight through to
+  the terminal as plain text instead of folding it into the structured message, which is exactly
+  what happened before this was corrected:
+  ```
+  @verb #0:handle_uncaught_error this none this rxd
+  @program #0:handle_uncaught_error
+  {code, msg, value, stack, traceback} = args;
+  notify(player, "#$#moodev-error ref: 0 kind: uncaught");
+  notify(player, "#$#* 0 text: " + msg);
+  for line in (traceback) notify(player, "#$#* 0 text: " + line); endfor
+  notify(player, "#$#: 0");
+  return 1;
+  .
+
+  @verb #0:handle_task_timeout this none this rxd
+  @program #0:handle_task_timeout
+  {tag, stack, traceback} = args;
+  notify(player, "#$#moodev-error ref: 0 kind: timeout");
+  notify(player, "#$#* 0 text: " + tostr(tag));
+  for line in (traceback) notify(player, "#$#* 0 text: " + line); endfor
+  notify(player, "#$#: 0");
+  return 1;
+  .
+  ```
+  Same `#0.wizard = 1`/`#0.programmer = 1` requirement as every other `#0`-owned bootstrap verb
+  above - no separate `Sidecar`/`McpFilter.fs` change needed, since `#$#moodev-*` line recognition
+  is already fully generic (`rest.StartsWith("moodev-")`, no allowlist).
+
 ## LSP service character + listener - the LanguageServer's own live connection
 
 The LSP (`src/LanguageServer`) resolves hover, go-to-definition, and builtin docs live now, via a

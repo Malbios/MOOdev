@@ -1303,6 +1303,79 @@ result = ["roots" -> out, "truncated" -> ((total > {maxLiveRoots}) ? 1 | 0)];"""
         do! sendWire webSocket (sprintf "moodev-live-roots truncated: %d" (if truncated then 1 else 0)) lines ct
     }
 
+/// `get-tasks` - every forked/suspended/reading task (`queued_tasks()`,
+/// confirmed against `ToastStunt/src/tasks.cc`). Deliberately drops that
+/// list's 3rd/4th elements - both are dead placeholders from an old
+/// clock-based scheduler (`/* OBSOLETE */` in the source itself), not real
+/// tick/seconds usage; there is no builtin anywhere in ToastStunt that
+/// reports per-task cumulative tick/second consumption, only the *current*
+/// task's own remaining budget (`ticks_left()`/`seconds_left()`). Getting
+/// real per-task usage would need a new C-side patch (tracked as a vault
+/// follow-up card, not attempted here).
+let getTasks (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+
+        let statements =
+            """out = {};
+for t in (queued_tasks())
+  out = {@out, ["id" -> t[1], "start" -> t[2], "programmer" -> tostr(t[5]), "vloc" -> tostr(t[6]), "verb" -> t[7], "line" -> t[8], "this" -> tostr(t[9]), "bytes" -> t[10]]};
+endfor
+result = out;"""
+
+        let! json = evalRunner statements "result" ct
+        let root = json.RootElement
+        let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+
+        let refDisplay (refText: string) =
+            let refNum = int64 (refText.TrimStart('#'))
+            formatLiveName corponymsByObjnum refNum "", refNum
+
+        let lines =
+            root.EnumerateArray()
+            |> Seq.map (fun t ->
+                let programmerName, programmerRef = refDisplay (t.GetProperty("programmer").GetString())
+                let vlocName, vlocRef = refDisplay (t.GetProperty("vloc").GetString())
+                let thisName, thisRef = refDisplay (t.GetProperty("this").GetString())
+
+                JsonSerializer.Serialize(
+                    {| id = t.GetProperty("id").GetInt64()
+                       start = t.GetProperty("start").GetInt64()
+                       programmerRef = programmerRef
+                       programmer = programmerName
+                       vlocRef = vlocRef
+                       vloc = vlocName
+                       verb = t.GetProperty("verb").GetString()
+                       line = t.GetProperty("line").GetInt64()
+                       thisRef = thisRef
+                       ``this`` = thisName
+                       bytes = t.GetProperty("bytes").GetInt64() |}
+                ))
+            |> List.ofSeq
+
+        do! sendWire webSocket "moodev-tasks" lines ct
+    }
+
+/// `kill-task {task}` - `kill_task(id)`, wizard-eval'd so it always has
+/// permission regardless of the task's own owner.
+let killTask (webSocket: WebSocket) (session: Session) (taskId: int64) (ct: CancellationToken) : Task<unit> =
+    task {
+        let statements =
+            $"""ok = 0; errtext = ""; try kill_task({taskId}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-kill-task-result task: %d ok: %d" taskId (if ok then 1 else 0))
+                (if ok then [] else [ errtext ])
+                ct
+    }
+
 /// The inspector's sole source of structural data (owner, flags,
 /// parents/children, verbs, properties) - always live, never a static
 /// export, so it reflects edits made moments ago. Owner/parent/child refs

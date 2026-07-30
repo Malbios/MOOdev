@@ -1,0 +1,1 @@
+MOOcode has no comment syntax (confirmed in the M3 notes), but the codebase already leans on a bare leading string-literal as an informal doc line (moo-vcs-plan.md's own verb sketch does this: "Describe this room to the caller.";). Hover-over-a-call and outline view could surface that line as documentation.

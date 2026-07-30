@@ -1,0 +1,1 @@
+MOO has no native unit testing; a mock-connection runner that calls a verb and asserts on notify() output/return value would be new ground, not an extension of anything planned. Bigger lift than the others.

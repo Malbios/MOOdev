@@ -1,0 +1,1 @@
+The tree filter box searches while browsing, but there's no "type a name, land directly on that object or verb" action.

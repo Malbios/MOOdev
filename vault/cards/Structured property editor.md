@@ -1,0 +1,1 @@
+Property values are currently edited as raw MOO-expression text in a plain `<input>` (confirmed at App.fs:1677-1862). A small structured widget for list/map literals specifically would remove a lot of syntax-error round-trips for a very common edit.

@@ -420,6 +420,12 @@ let private buildTryDispatch
                 | "get-live-info" ->
                     do! IdeActions.getLiveInfo config session webSocket (getObj ()) ct
                     return true
+                | "get-tasks" ->
+                    do! IdeActions.getTasks config session webSocket ct
+                    return true
+                | "kill-task" ->
+                    do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
+                    return true
                 | "checkpoint" ->
                     do! IdeActions.checkpoint config webSocket ct
                     return true

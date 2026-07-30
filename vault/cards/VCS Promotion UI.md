@@ -1,0 +1,1 @@
+Sidecar/Promotion.fs and the promote/promote-diff CLI subcommands are fully implemented (Phase 6 of the VCS plan), but there's no corresponding WebSocket action or browser panel — right now promoting or diffing dev-vs-prod means dropping to a terminal and invoking the sidecar binary directly, outside the IDE entirely.
