@@ -3170,16 +3170,28 @@ ws.onmessage <-
                         liveChildrenChecked <- Set.empty
                         selectedObjRef <- None
                         renderTree ()
+
+                        // Parentless live objects (e.g. the LSP's own
+                        // `#4`/`#5` bootstrap objects) have no discovery
+                        // path via the static preload above or an expand
+                        // click - see `mergeLiveRoots`'s own comment - so
+                        // this is fetched once per login, the only trigger
+                        // point with no equivalent user gesture to hang it
+                        // off of. Sequenced strictly *after* `buildTree`
+                        // above, not fired in parallel with it - `buildTree`
+                        // overwrites `treeNodes`/`rootRefs` wholesale from
+                        // the static export, so if this fired concurrently
+                        // and its response (a single direct MOO eval,
+                        // typically faster than the LSP's full graph fetch)
+                        // landed first, `buildTree`'s later overwrite would
+                        // silently erase whatever had just been merged in -
+                        // confirmed live: an intermittent race, not a
+                        // hypothetical one, that made `#4`/`#5` vanish from
+                        // the tree unpredictably depending purely on which
+                        // response happened to arrive first.
+                        sendAction [ "action" ==> "get-live-roots" ]
                     }
                     |> Async.StartImmediate
-
-                    // Parentless live objects (e.g. the LSP's own `#4`/`#5`
-                    // bootstrap objects) have no discovery path via the
-                    // static preload above or an expand click - see
-                    // `mergeLiveRoots`'s own comment - so this is fetched
-                    // once per login, the only trigger point with no
-                    // equivalent user gesture to hang it off of.
-                    sendAction [ "action" ==> "get-live-roots" ]
             elif header.StartsWith("moodev-prop-content") then
                 // Each line is "propname<TAB>literal" (see
                 // `$vcs:ide_get_properties` - a real tab character, not
