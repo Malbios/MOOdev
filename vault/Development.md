@@ -17,7 +17,6 @@ kanban-plugin: board
 - [ ] [[In-IDE test runner]]
 - [ ] [[Task tick_seconds usage]]
 - [ ] Explore options to work without LSP/Sidecar apps (so other teams can use this more easily)
-- [ ] better "new object" UI
 - [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
 
 
@@ -37,6 +36,7 @@ kanban-plugin: board
 - [ ] [[make version history work]]
 - [ ] some kind of in-IDE documentation of MOOcode in general and more specifically all built-ins
 - [ ] [[Doc comment convention support]]
+- [ ] better "new object" UI
 
 
 ## Removed
