@@ -219,6 +219,27 @@ let findGotchasAsync () : Async<(int64 * string * string)[]> =
             return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string), (o?kind: string))
     }
 
+/// Custom method (`moodev/getMoocodeDocs`, no params) - the full docs
+/// catalog (matches `Handlers.MooLspServer.GetMoocodeDocs`/
+/// `Handlers.moocodeDocs`): every control keyword, implicit variable, and
+/// live builtin, one flat list. `kind` is one of `"keyword"`/`"variable"`/
+/// `"builtin"`. Static for the whole session (nothing here changes without
+/// a server restart), so the caller fetches this once and caches it rather
+/// than re-requesting on every sidebar-view switch.
+let getMoocodeDocsAsync () : Async<(string * string * string * string)[]> =
+    async {
+        let! result = requestAsync "moodev/getMoocodeDocs" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+
+            return
+                items
+                |> Array.map (fun o -> (o?name: string), (o?signature: string), (o?description: string), (o?kind: string))
+    }
+
 /// Wires hover, go-to-definition, completions, signature help,
 /// find-references, and the custom `moodev-verb://` URI opener into the
 /// given Monaco instance for the "moocode" language.
@@ -365,11 +386,18 @@ let wire
                         |> Array.map (fun item ->
                             let label: string = item?label
 
+                            let documentation: obj =
+                                if isNullOrUndefined item?documentation then
+                                    null
+                                else
+                                    createObj [ "value" ==> (item?documentation?value: string) ]
+
                             createObj
                                 [ "label" ==> label
                                   "kind" ==> monacoCompletionKind (item?kind: int)
                                   "insertText" ==> label
-                                  "range" ==> range ])
+                                  "range" ==> range
+                                  "documentation" ==> documentation ])
 
                     return createObj [ "suggestions" ==> suggestions ]
         }
@@ -400,8 +428,15 @@ let wire
                         |> Array.map (fun s ->
                             let parameters: obj[] = s?parameters
 
+                            let documentation: obj =
+                                if isNullOrUndefined s?documentation then
+                                    null
+                                else
+                                    createObj [ "value" ==> (s?documentation?value: string) ]
+
                             createObj
                                 [ "label" ==> (s?label: string)
+                                  "documentation" ==> documentation
                                   "parameters" ==> (parameters |> Array.map (fun p -> createObj [ "label" ==> (p?label: string) ])) ])
 
                     return

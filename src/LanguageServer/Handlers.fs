@@ -119,15 +119,17 @@ let private resolvableVerbCallAt
     | _ -> None
 
 
-/// Every declared field defaulted to `None`/absent - `CompletionItem` has
-/// 19 fields and only `Label` is ever meaningfully populated here.
-let private mkCompletionItem (label: string) (kind: CompletionItemKind) : CompletionItem =
+/// Every declared field defaulted to `None`/absent except `Label` and,
+/// where the caller has it (currently only builtins - see `builtinHoverText`),
+/// `Documentation` - the same Markdown hover already shows, so a completion
+/// popup describes a builtin identically instead of just naming it.
+let private mkCompletionItem (label: string) (kind: CompletionItemKind) (documentation: string option) : CompletionItem =
     { Label = label
       LabelDetails = None
       Kind = Some kind
       Tags = None
       Detail = None
-      Documentation = None
+      Documentation = documentation |> Option.map (fun text -> U2.C2 { Kind = MarkupKind.Markdown; Value = text })
       Deprecated = None
       Preselect = None
       SortText = None
@@ -388,6 +390,84 @@ let private implicitVariableHelp (name: string) : string option =
     | "iobj" -> Some "The indirect object resolved by the command parser (`#-1`/`$nothing` if none)."
     | "iobjstr" -> Some "The raw string the command parser matched as the indirect object."
     | _ -> None
+
+/// One documentable "thing" in MOOcode - a control keyword, an implicit
+/// variable, or a builtin function - unified into one flat, searchable
+/// catalog for the client's docs sidebar (`moodev/getMoocodeDocs`).
+/// `Signature` is just the bare name for keywords/variables (nothing more
+/// to show) and the full `name(args)` shape for builtins.
+type MoocodeDocEntry =
+    { Name: string
+      Signature: string
+      Description: string
+      Kind: string }
+
+/// All 19 cases of `Language.Lexer.Keyword` - listed explicitly since
+/// `keywordHelp`'s own match is exhaustive but this project doesn't reach
+/// for reflection-based DU enumeration elsewhere, so neither does this.
+let private allKeywords: Language.Lexer.Keyword list =
+    [ Language.Lexer.Keyword.If
+      Language.Lexer.Keyword.Else
+      Language.Lexer.Keyword.ElseIf
+      Language.Lexer.Keyword.EndIf
+      Language.Lexer.Keyword.For
+      Language.Lexer.Keyword.In
+      Language.Lexer.Keyword.EndFor
+      Language.Lexer.Keyword.Fork
+      Language.Lexer.Keyword.EndFork
+      Language.Lexer.Keyword.Return
+      Language.Lexer.Keyword.While
+      Language.Lexer.Keyword.EndWhile
+      Language.Lexer.Keyword.Try
+      Language.Lexer.Keyword.Except
+      Language.Lexer.Keyword.Finally
+      Language.Lexer.Keyword.EndTry
+      Language.Lexer.Keyword.Any
+      Language.Lexer.Keyword.Break
+      Language.Lexer.Keyword.Continue ]
+
+/// The same 12 names `implicitVariableHelp`'s own match hardcodes above -
+/// kept as a literal list here too so `moocodeDocs` can enumerate them. The
+/// prose itself still only ever comes from calling `implicitVariableHelp`,
+/// so there's exactly one place the actual descriptions live.
+let private implicitVariableNames =
+    [ "this"; "caller"; "player"; "verb"; "args"; "argstr"; "dobj"; "dobjstr"; "prep"; "prepstr"; "iobj"; "iobjstr" ]
+
+/// Full catalog for the client's docs sidebar: every control keyword,
+/// implicit variable, and live builtin - reusing the exact same prose hover
+/// already shows (`keywordHelp`/`implicitVariableHelp`/`fn.Description`), so
+/// the two surfaces can never disagree; this only ever enumerates *which*
+/// existing function to call for each name, never duplicates the text
+/// itself.
+let moocodeDocs (liveBuiltins: Map<string, BuiltinFunc>) : MoocodeDocEntry[] =
+    let keywordEntries =
+        allKeywords
+        |> List.map (fun k ->
+            { Name = keywordText k
+              Signature = keywordText k
+              Description = keywordHelp k
+              Kind = "keyword" })
+
+    let variableEntries =
+        implicitVariableNames
+        |> List.choose (fun name ->
+            implicitVariableHelp name
+            |> Option.map (fun desc ->
+                { Name = name
+                  Signature = name
+                  Description = desc
+                  Kind = "variable" }))
+
+    let builtinEntries =
+        liveBuiltins
+        |> Map.toList
+        |> List.map (fun (name, fn) ->
+            { Name = name
+              Signature = builtinSignatureLabel fn
+              Description = fn.Description |> Option.defaultValue "Built-in function."
+              Kind = "builtin" })
+
+    keywordEntries @ variableEntries @ builtinEntries |> List.toArray
 
 /// Hover text for a verb call whose receiver *couldn't* be resolved
 /// statically (`this:foo()`, `who:tell()`) - best-effort via
@@ -942,14 +1022,14 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
 
                     let localVarItems =
                         AstQuery.boundVariableNames stmts
-                        |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Variable)
+                        |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Variable None)
 
                     let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
 
                     let builtinItems =
                         liveBuiltins
                         |> Map.toList
-                        |> List.map (fun (name, _) -> mkCompletionItem name CompletionItemKind.Function)
+                        |> List.map (fun (name, fn) -> mkCompletionItem name CompletionItemKind.Function (Some(builtinHoverText fn)))
 
                     let verbItems =
                         AstQuery.nearestReferenceAtOrBefore (lspLine + 1) (lspCol + 1) stmts
@@ -959,7 +1039,7 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                             | _ -> None)
                         |> Option.map (fun startObj ->
                             Metadata.Resolver.allCallableVerbNames graph startObj
-                            |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Method))
+                            |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Method None))
                         |> Option.defaultValue []
 
                     let items = List.toArray (localVarItems @ builtinItems @ verbItems)
@@ -1000,7 +1080,9 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
 
                         let sigInfo: SignatureInformation =
                             { Label = builtinSignatureLabel fn
-                              Documentation = None
+                              Documentation =
+                                fn.Description
+                                |> Option.map (fun text -> U2.C2 { Kind = MarkupKind.Markdown; Value = text })
                               Parameters = Some parameters
                               ActiveParameter = None }
 
@@ -1130,3 +1212,12 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// `suspend()`, or a `list[0]`-shaped index, corpus-wide.
     member _.FindGotchas(_p: obj) : Async<Result<GotchaEntry[], JsonRpc.Error>> =
         async { return Ok(findGotchas graph) }
+
+    /// Custom method (`moodev/getMoocodeDocs`, no params) - the full catalog
+    /// for the client's docs sidebar: every control keyword, implicit
+    /// variable, and live builtin, one flat searchable list (`moocodeDocs`).
+    member _.GetMoocodeDocs(_p: obj) : Async<Result<MoocodeDocEntry[], JsonRpc.Error>> =
+        async {
+            let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+            return Ok(moocodeDocs liveBuiltins)
+        }

@@ -63,6 +63,7 @@ let private viewTasksBtn = document.getElementById ("view-tasks")
 let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
+let private viewDocsBtn = document.getElementById ("view-docs")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -115,6 +116,10 @@ let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list
 let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
 let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
 let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
+let private sidebarViewDocsEl = document.getElementById ("sidebar-view-docs")
+let private docsSearchInputEl = document.getElementById ("docs-search-input") :?> HTMLInputElement
+let private docsListEl = document.getElementById ("docs-list")
+let private docsDetailEl = document.getElementById ("docs-detail")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -483,8 +488,17 @@ type private SidebarView =
     | ErrorsView
     | DeadVerbsView
     | GotchasView
+    | DocsView
 
 let mutable private activeSidebarView: SidebarView = TreeView
+
+/// The full docs catalog (`moodev/getMoocodeDocs`), fetched at most once
+/// per session - unlike every other sidebar view here, it's static for the
+/// whole session (nothing about MOOcode's keywords/implicit variables/live
+/// builtins changes without a server restart), so `switchToSidebarView`'s
+/// `DocsView` arm only fetches when this is still `None`, then just filters
+/// and re-renders the cached array locally on every later switch/search.
+let mutable private moocodeDocsCache: (string * string * string * string)[] option = None
 
 /// Which property, if any, is the specific sub-focus within the currently
 /// shown inspector - set alongside `selectedObjRef` whenever a caller asks
@@ -733,7 +747,7 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
 
-/// The six mutually-exclusive views under `#sidebar` - same `activateOnly`
+/// The seven mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
 let private allSidebarViews =
     [ sidebarViewTreeEl
@@ -741,7 +755,8 @@ let private allSidebarViews =
       sidebarViewTasksEl
       sidebarViewErrorsEl
       sidebarViewDeadVerbsEl
-      sidebarViewGotchasEl ]
+      sidebarViewGotchasEl
+      sidebarViewDocsEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -2514,6 +2529,20 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderGotchasResults results
         }
         |> Async.StartImmediate
+    | DocsView ->
+        activateOnlySidebarView sidebarViewDocsEl
+
+        match moocodeDocsCache with
+        | Some _ -> renderDocsList (docsSearchInputEl.value)
+        | None ->
+            docsListEl.innerHTML <- "<li class=\"placeholder\">Loading...</li>"
+
+            async {
+                let! results = LspClient.getMoocodeDocsAsync ()
+                moocodeDocsCache <- Some results
+                renderDocsList (docsSearchInputEl.value)
+            }
+            |> Async.StartImmediate
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -2521,7 +2550,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewTasksBtn, TasksView
           viewErrorsBtn, ErrorsView
           viewDeadVerbsBtn, DeadVerbsView
-          viewGotchasBtn, GotchasView ] do
+          viewGotchasBtn, GotchasView
+          viewDocsBtn, DocsView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -2751,6 +2781,80 @@ and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
         li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
 
         treeGotchasListEl.appendChild li |> ignore
+
+/// Shows one docs entry's full signature + description in the detail pane -
+/// the only thing clicking a row in the docs list does. Unlike every other
+/// clickable list in this sidebar, a docs entry is a pure reference with
+/// nothing to navigate to, so this just renders text in place rather than
+/// calling `openOrSwitchToVerb`/`openOrSwitchToInspector`.
+and private showDocsDetail (signature: string) (description: string) (kind: string) : unit =
+    docsDetailEl.innerHTML <- ""
+
+    let heading = document.createElement ("div")
+    heading.classList.add "docs-detail-heading"
+    heading.textContent <- signature
+    docsDetailEl.appendChild heading |> ignore
+
+    let kindEl = document.createElement ("div")
+    kindEl.classList.add "docs-detail-kind"
+    kindEl.textContent <- kind
+    docsDetailEl.appendChild kindEl |> ignore
+
+    let body = document.createElement ("div")
+    body.classList.add "docs-detail-description"
+    body.textContent <- description
+    docsDetailEl.appendChild body |> ignore
+
+/// Renders the docs list from `moocodeDocsCache`, filtered to `filterText`
+/// (case-insensitive substring match against name or description) - called
+/// both right after the one-time fetch and on every search-box keystroke,
+/// same "filter an already-fetched array client-side" shape the tree
+/// filter uses (`treeFilterEl.oninput`), not a server round trip per
+/// keystroke like history search - the whole catalog is small and static
+/// for the session, so there's nothing to gain by re-asking the server.
+and private renderDocsList (filterText: string) : unit =
+    docsListEl.innerHTML <- ""
+
+    match moocodeDocsCache with
+    | None -> ()
+    | Some allEntries ->
+        let needle = filterText.Trim().ToLowerInvariant()
+
+        let matches (name: string, _signature, description: string, _kind) =
+            needle = "" || name.ToLowerInvariant().Contains(needle) || description.ToLowerInvariant().Contains(needle)
+
+        let kindOrder (kind: string) =
+            match kind with
+            | "keyword" -> 0
+            | "variable" -> 1
+            | _ -> 2
+
+        let filtered =
+            allEntries
+            |> Array.filter matches
+            |> Array.sortBy (fun (name, _, _, kind) -> kindOrder kind, name)
+
+        if Array.isEmpty filtered then
+            let li = document.createElement ("li")
+            li.textContent <- "No matches."
+            li.classList.add "placeholder"
+            docsListEl.appendChild li |> ignore
+        else
+            for name, signature, description, kind in filtered do
+                let li = document.createElement ("li")
+                li.classList.add "picker-item"
+
+                let nameSpan = document.createElement ("span")
+                nameSpan.textContent <- name
+                li.appendChild nameSpan |> ignore
+
+                let kindSpan = document.createElement ("span")
+                kindSpan.classList.add "docs-kind-badge"
+                kindSpan.textContent <- kind
+                li.appendChild kindSpan |> ignore
+
+                li.onclick <- fun _ -> showDocsDetail signature description kind
+                docsListEl.appendChild li |> ignore
 
 /// Rebuilds `#verb-tabs` (the dynamic, closable, drag-reorderable tabs) and
 /// the static `#tab-game` button's `.active` state. `#tab-game` itself is
@@ -3112,6 +3216,9 @@ viewTasksBtn.onclick <- fun _ -> switchToSidebarView TasksView
 viewErrorsBtn.onclick <- fun _ -> switchToSidebarView ErrorsView
 viewDeadVerbsBtn.onclick <- fun _ -> switchToSidebarView DeadVerbsView
 viewGotchasBtn.onclick <- fun _ -> switchToSidebarView GotchasView
+viewDocsBtn.onclick <- fun _ -> switchToSidebarView DocsView
+
+docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
 errorsClearBtn.onclick <-
     fun _ ->

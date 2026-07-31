@@ -591,6 +591,54 @@ html, body {
   margin-bottom: 0.6em;
 }
 
+/* --- MOOcode docs view -------------------------------------------------
+   List and detail split the view's height 50/50, each scrolling
+   independently - same idea as the tree/inspector split, applied here
+   directly rather than to the tree, since that split never actually landed
+   there. */
+
+#sidebar-view-docs {
+  padding: 0.8em 1em;
+  gap: 0.5em;
+}
+
+#docs-list {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+#docs-detail {
+  flex: 1 1 50%;
+  min-height: 0;
+  overflow-y: auto;
+  border-top: 1px solid #444;
+  padding-top: 0.6em;
+}
+
+.docs-kind-badge {
+  float: right;
+  color: #999;
+  font-size: 0.85em;
+}
+
+.docs-detail-heading {
+  font-family: monospace;
+  font-weight: bold;
+  margin-bottom: 0.3em;
+}
+
+.docs-detail-kind {
+  color: #999;
+  font-size: 0.85em;
+  margin-bottom: 0.6em;
+}
+
+.docs-detail-description {
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
 /* --- Object inspector ------------------------------------------------- */
 
 #inspector-diagnostics {
