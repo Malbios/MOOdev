@@ -97,6 +97,8 @@ let private verbHistoryPaneEl = document.getElementById ("verb-history-pane")
 let private verbHistoryListEl = document.getElementById ("verb-history-list")
 let private verbHistoryDiffEditorEl = document.getElementById ("verb-history-diff-editor")
 let private verbHistoryRestoreBtn = document.getElementById ("verb-history-restore-btn")
+let private editorHistoryBtn = document.getElementById ("editor-history-btn")
+let private verbHistoryCloseBtn = document.getElementById ("verb-history-close-btn")
 let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
@@ -793,6 +795,32 @@ verbHistoryRestoreBtn.onclick <-
             showingVerbHistory <- false
             showPaneFor activeTab
         | None -> ()
+
+// The only place `showingVerbHistory` is ever set to `true` - everything
+// else needed to show a verb's history (the pane itself, the
+// `moodev-verb-history`/`verb-at-commit` response handlers, the diff
+// editor, the restore button) was already fully built, but nothing ever
+// flipped this on or fired the initial fetch, so the pane could never
+// actually open. Only reachable while a `VerbTab` is showing the plain
+// editor (see `showPaneFor` - this button lives inside `#editor-pane`,
+// which is exactly that state), so `activeTab` is always a `VerbTab` here.
+editorHistoryBtn.onclick <-
+    fun _ ->
+        match activeTab with
+        | VerbTab(objRef, verbName) ->
+            verbHistoryListEl.innerHTML <- "<li>Loading...</li>"
+            verbHistoryRestoreBtn.setAttribute ("style", "display:none")
+            currentHistoricalCode <- None
+            showingVerbHistory <- true
+            showPaneFor activeTab
+            sendAction [ "action" ==> "verb-history"; "obj" ==> int objRef; "verb" ==> verbName ]
+        | GameTab
+        | InspectorTab _ -> ()
+
+verbHistoryCloseBtn.onclick <-
+    fun _ ->
+        showingVerbHistory <- false
+        showPaneFor activeTab
 
 /// Snapshots whatever's currently in the editor into `tabContent`, if the
 /// active tab is a verb - called right before navigating away from it.

@@ -103,11 +103,15 @@
         <div id="editor-status">
           <span id="status-dirty"></span>
           <span id="status-position"></span>
+          <button id="editor-history-btn" class="pane-action-btn" title="View this verb's history">🕐 History</button>
         </div>
       </div>
       <div id="verb-history-pane">
         <div id="verb-history-list-pane">
-          <div class="sidebar-header">History</div>
+          <div class="sidebar-header">
+            History
+            <button id="verb-history-close-btn" class="pane-action-btn">Back to editor</button>
+          </div>
           <ul id="verb-history-list" class="picker-list"></ul>
         </div>
         <div id="verb-history-diff-pane">
