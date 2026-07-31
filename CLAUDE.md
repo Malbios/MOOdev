@@ -84,15 +84,26 @@ sidecar owns all of that from the outside via `eval()`.
   the same root cause as `test-instance-stop.ps1`'s own fix (see its own comment). The `;;` this
   world's `#0:do_command` bootstrap verb recognizes (see "Bootstrap verbs" below) is what actually
   reaches `eval()` here.
-- **Automated test instance** — `survive.test.db` (a fresh copy of `survive.db` taken at start),
-  FileIO rooted at a throwaway scratch repo (`C:\dev\moo-code\SurviveTestScratch`, `git init`'d once and
-  reused — its history is never inspected). Started/stopped headlessly (no visible window) via
-  `test-instance-start.ps1` / `test-instance-stop.ps1` in this repo group's root, on port 7778 by
-  default so it can run alongside the dev world's 7777. Nothing from this instance is ever
-  promoted — `test-instance-stop.ps1` just calls `shutdown()`, no save. Because the scratch repo is
-  separate, the two instances can run at the same time with zero risk of racing on `Survive`'s git
-  state. Intentionally left on `Minimal.db`-derived content rather than switched to the richer
-  `ToastCore` profile below - automated tests want the simplest/fastest baseline, not realism.
+- **Automated test instance** — `survive.test.db` (a fresh copy of `survive.db` taken at start), no
+  FileIO root at all (the `-i` flag is dropped entirely here — confirmed optional at the C++ level,
+  and nothing reads it since `$vcs` is retired). `test-instance-start.ps1` / `test-instance-stop.ps1`
+  in this repo group's root now manage the **full stack** headlessly (no visible window), not just
+  the MOO process: Sidecar, LSP server, and Client too, each a single directly-tracked process (no
+  `dotnet watch run`/`npm run dev` wrapper layers, which leave orphaned children behind when
+  killed — confirmed live, this exact mistake accumulated ~25 orphaned processes across several
+  sessions before this script tracked them). The Sidecar (which owns all git-based version control)
+  is pointed at a dedicated scratch content tree, `C:\dev\moo-code\SurviveTestTree` — rebuilt from
+  scratch on every run by exporting whatever's actually live on *this run's* test MOO instance
+  (`Sidecar.exe export`), never cloned from or pointed at the real `Survive` repo. This is the fix
+  for a real, repeated mistake: earlier sessions' manual Sidecar launches for Playwright-driven
+  verification kept defaulting to `Moo:TreeDir`'s real-`Survive` default, leaving real (if
+  unmerged/unpushed) commits and WIP refs in the real repo. Default ports: MOO 7778, Sidecar 5900,
+  LSP 5950, Client 5199, LSP-bridge listener 7782 — all distinct from both `test.ps1` profiles
+  below, so everything can run concurrently. Nothing from this instance is ever promoted —
+  `test-instance-stop.ps1` tears down Sidecar/LSP/Client immediately, then calls the MOO's own
+  `shutdown()`, no save. Intentionally left on `Minimal.db`-derived content rather than switched to
+  the richer `ToastCore` profile below - automated tests want the simplest/fastest baseline, not
+  realism.
 
 `test.ps1` also supports a **`ToastCore`** profile (`-Database ToastCore`) - a full, separate,
 manually-launched MOOdev instance (its own server/sidecar/LSP/client ports, its own db seeded from
@@ -274,7 +285,8 @@ wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo-code/ToastStunt/run && /mnt/c/dev/mo
 
 For automated/headless testing, use `test-instance-start.ps1` / `test-instance-stop.ps1` instead
 (see "Two MOO instances" above) rather than hand-rolling a second launch of this command — it
-handles the `survive.test.db` copy and scratch FileIO root for you.
+handles the `survive.test.db` copy, the isolated Sidecar content tree, and starting/stopping the
+Sidecar/LSP/Client alongside it, all in one call.
 
 The `-i` flag points FileIO at the `Survive` repo - a holdover from the retired `$vcs`'s file
 writes there; nothing on the MOO side does its own file I/O anymore (the sidecar owns all of that
@@ -301,3 +313,12 @@ npm run dev
 ```
 
 Then open the client dev server URL in a browser.
+
+**This bare `dotnet watch run` defaults `Moo:TreeDir` to the real `C:\dev\moo-code\Survive` repo**
+(`Sidecar/appsettings.json`) - every save/add/delete action will commit real changes there. That's
+correct for interactively working against the real dev world (what `test.ps1` already does,
+passing `--Moo:TreeDir` itself), but wrong for automated/Playwright-driven verification - use
+`test-instance-start.ps1` for that instead (see "Two MOO instances" above), which points the
+Sidecar at an isolated scratch tree automatically. This exact confusion (manually launching a
+"test" Sidecar without overriding `TreeDir`) previously left real, if unmerged/unpushed, commits
+and WIP refs in the real `Survive` repo across several sessions.

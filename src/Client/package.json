@@ -4,7 +4,8 @@
   "version": "0.0.0",
   "scripts": {
     "dev": "dotnet fable watch . -o output -s --run vite",
-    "build": "dotnet fable . -o output && vite build"
+    "build": "dotnet fable . -o output && vite build",
+    "preview": "vite preview"
   },
   "dependencies": {
     "monaco-editor": "^0.52.0"
