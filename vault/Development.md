@@ -17,6 +17,7 @@ kanban-plugin: board
 - [ ] [[In-IDE test runner]]
 - [ ] [[Task tick_seconds usage]]
 - [ ] Explore options to work without LSP/Sidecar apps (so other teams can use this more easily)
+- [ ] [[Server status panel]]
 - [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
 
 
