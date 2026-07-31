@@ -20,6 +20,8 @@ kanban-plugin: board
 - [ ] [[In-IDE test runner]]
 - [ ] [[Task tick_seconds usage]]
 - [ ] Explore options to work without LSP/Sidecar apps (so other teams can use this more easily)
+- [ ] some kind of in-IDE documentation of MOOcode in general and more specifically all built-ins
+- [ ] better "new object" UI
 
 
 ## In Progress
