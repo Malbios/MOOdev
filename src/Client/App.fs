@@ -452,16 +452,12 @@ Settings.init ()
 /// Which "tab" is showing in the main area - the game terminal, one of the
 /// open verbs, or the object inspector. Game is a permanent, non-closable,
 /// always-first tab (rendered as the static `#tab-game` button); every verb
-/// ever opened this session gets its own closable tab alongside it in
-/// `#verb-tabs`, VS Code-style. `InspectorTab` is different from both:
-/// it's never rendered as a tab button at all (never added to `tabOrder`) -
-/// selecting an object in the tree switches the main area to it directly,
-/// taking over the same space Game/verb tabs use, with no separate
-/// tab-strip entry to click back onto (switching to Game or a verb tab is
-/// the only way back). This is still the single source of truth for both
-/// "which tab is highlighted" and "what's loaded in the editor" - earlier
-/// versions of this file kept a separate `currentDocument` in sync by
-/// hand; folding it into this type removes that duplication.
+/// or inspector ever opened this session gets its own closable tab
+/// alongside it in `#verb-tabs`, VS Code-style (an inspector tab is labeled
+/// "ⓘ #N" - see `renderTabs`). This is the single source of truth for both
+/// "which tab is highlighted" and "what's loaded in the main pane" -
+/// earlier versions of this file kept a separate `currentDocument` in sync
+/// by hand; folding it into this type removes that duplication.
 type private OpenTab =
     | GameTab
     | VerbTab of objRef: int64 * verbName: string
@@ -517,13 +513,19 @@ let mutable private isLoggedIn = false
 /// it's permanent and rendered separately.
 let mutable private openVerbTabs: (int64 * string) list = []
 
-/// Render order for the tab strip (verb tabs, drag-reorderable) - a
-/// view-order overlay on top of `openVerbTabs`, which remains the source of
-/// truth for membership and preview-tab bookkeeping. Game is never in here -
-/// it's a static button outside the draggable strip. Mirrors every
-/// append/replace/remove `openVerbTabs` already goes through
-/// (`renderTabs`' drag handlers are the only place this is reordered
-/// arbitrarily).
+/// Open inspector tabs, in the order they were opened - parallel to
+/// `openVerbTabs`, including the same preview-tab mechanic (see
+/// `previewInspectorTab`). Unlike verb tabs, content is never cached
+/// client-side - see `loadInspector`'s own comment for why.
+let mutable private openInspectorTabs: int64 list = []
+
+/// Render order for the tab strip (verb + inspector tabs, drag-reorderable) -
+/// a view-order overlay on top of `openVerbTabs`/`openInspectorTabs`, which
+/// remain the source of truth for membership and preview-tab bookkeeping.
+/// Game is never in here - it's a static button outside the draggable
+/// strip. Mirrors every append/replace/remove those two lists already go
+/// through (`renderTabs`' drag handlers are the only place this is
+/// reordered arbitrarily).
 let mutable private tabOrder: OpenTab list = []
 
 /// The tab currently mid-drag (`renderTabs`' drag-and-drop handlers), or
@@ -582,6 +584,15 @@ let mutable private tabContent: Map<int64 * string, string> = Map.empty
 /// already-open tab (preview or pinned) never changes this - only opening
 /// something *not yet open* does.
 let mutable private previewTab: (int64 * string) option = None
+
+/// Same "preview tab" mechanic as `previewTab`, for inspector tabs: at most
+/// one open inspector tab is a preview at a time (shown in italics via the
+/// same `.preview` CSS class). Opening a brand-new inspector while a preview
+/// exists replaces it in place rather than piling up tabs - useful since
+/// clicking through owner/parent/child/verb-object links tends to hop
+/// between objects quickly. Double-clicking pins it. Switching to an
+/// already-open tab (preview or pinned) never touches this.
+let mutable private previewInspectorTab: int64 option = None
 
 /// The `(objRef, verb) option` shape a couple of call sites still need
 /// (`saveIfDirty`, `Monaco.wireLsp`'s hover/definition callback) - derived
@@ -1038,14 +1049,11 @@ let rec private switchToTab (tab: OpenTab) : unit =
         renderTabs ()
         renderTree ()
 
-/// No "open inspector tabs" registry (see `OpenTab`'s own comment) - an
-/// inspector fallback is "still open" exactly as long as the object it was
-/// for still exists.
 and private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
     | GameTab -> true
     | VerbTab(o, v) -> openVerbTabs |> List.contains (o, v)
-    | InspectorTab o -> Map.containsKey o treeNodes
+    | InspectorTab o -> openInspectorTabs |> List.contains o
 
 /// Opens `(objRef, verbName)` - switches instantly from the client-side
 /// cache if it's already an open tab, otherwise fetches it from the server
@@ -1086,24 +1094,71 @@ and private closeTab (objRef: int64, verbName: string) : unit =
         renderTabs ()
         renderTree ()
 
-/// Switches the main area to `objRef`'s inspector (see `OpenTab`'s own
-/// comment - no tab button, just takes over the same space Game/verb tabs
-/// use) and *always* kicks off a fresh load (structural info + live
-/// property values), even when it was already the selected object. Used by
-/// the tree's object rows and every clickable owner/parent/child link
-/// inside the inspector itself - all funnel through here so "always
-/// fresh" is handled in exactly one place. `highlightProp`, when `Some`,
-/// is forwarded to `loadInspector` to scroll to and flash that property's
-/// row once the table renders.
+/// Closes an open inspector tab. If it was the active one, falls back the
+/// same way `closeTab` does (`tabHistory`, or Game if nothing valid is
+/// left) - and, per `loadInspector`'s "always fresh" rule, re-loads
+/// whichever inspector tab it falls back to rather than showing whatever
+/// that tab last happened to render.
+and private closeInspectorTab (objRef: int64) : unit =
+    let wasActive = activeTab = InspectorTab objRef
+    openInspectorTabs <- openInspectorTabs |> List.filter (fun r -> r <> objRef)
+    tabOrder <- tabOrder |> List.filter (fun t -> t <> InspectorTab objRef)
+    if previewInspectorTab = Some objRef then previewInspectorTab <- None
+
+    // The object's tree row stays "selected" independently of `activeTab`
+    // (see `selectedObjRef`'s own comment) - but with its inspector gone,
+    // there's nothing left for that selection to point at, so it shouldn't
+    // outlive the tab that justified it.
+    if selectedObjRef = Some objRef then
+        selectedObjRef <- None
+        activeInspectorProp <- None
+
+    if wasActive then
+        let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
+        switchToTab fallback
+
+        match fallback with
+        | InspectorTab o -> openOrSwitchToInspectorWith o None
+        | GameTab
+        | VerbTab _ -> ()
+    else
+        renderTabs ()
+        renderTree ()
+
+/// Opens `objRef`'s inspector - switches instantly if it's already an open
+/// tab (adding it first if not), then *always* kicks off a fresh load
+/// (structural info + live property values), even when the tab was already
+/// open and already active. Used by the tab strip itself, the tree's
+/// object rows, and every clickable owner/parent/child link inside the
+/// inspector pane - all funnel through here (via
+/// `openOrSwitchToInspector`/`openOrSwitchToInspectorWith` below) so
+/// "already open" and "always fresh" are each handled in exactly one
+/// place. `highlightProp`, when `Some`, is forwarded to `loadInspector` to
+/// scroll to and flash that property's row once the table renders.
 and private openOrSwitchToInspectorWith (objRef: int64) (highlightProp: string option) : unit =
+    if not (openInspectorTabs |> List.contains objRef) then
+        // Same preview-tab replacement `moodev-edit-content` does for verb
+        // tabs (see `previewTab`'s own comment) - replace the current
+        // preview inspector tab in place if there is one, otherwise append.
+        match previewInspectorTab with
+        | Some oldPreview ->
+            let idx = openInspectorTabs |> List.findIndex (fun r -> r = oldPreview)
+            openInspectorTabs <- openInspectorTabs |> List.mapi (fun i r -> if i = idx then objRef else r)
+            tabOrder <- tabOrder |> List.map (fun t -> if t = InspectorTab oldPreview then InspectorTab objRef else t)
+        | None ->
+            openInspectorTabs <- openInspectorTabs @ [ objRef ]
+            tabOrder <- tabOrder @ [ InspectorTab objRef ]
+
+        previewInspectorTab <- Some objRef
+
     selectedObjRef <- Some objRef
     activeInspectorProp <- highlightProp |> Option.map (fun p -> (objRef, p))
     switchToTab (InspectorTab objRef)
     loadInspector objRef highlightProp
 
 /// `openOrSwitchToInspectorWith objRef None` - every existing call site
-/// (the tree's object rows, owner/parent/child links) goes through this,
-/// unchanged.
+/// (the tab strip, the tree's object rows, owner/parent/child links) goes
+/// through this, unchanged.
 and private openOrSwitchToInspector (objRef: int64) : unit = openOrSwitchToInspectorWith objRef None
 
 /// Fetches and renders `objRef`'s inspector content: structural data
@@ -1247,15 +1302,6 @@ and private mkEditableCell (labelText: string) (widget: HTMLElement) (onConfirm:
     // (not yet editing) still bubbles up as before.
     editGroup.onclick <- fun ev -> ev.stopPropagation ()
 
-    let confirmBtn = document.createElement ("button")
-    confirmBtn.classList.add "inspector-add-property-btn"
-    confirmBtn.textContent <- "✓"
-    confirmBtn.title <- "Confirm"
-    confirmBtn.onclick <- fun _ -> onConfirm ()
-
-    editGroup.appendChild widget |> ignore
-    editGroup.appendChild confirmBtn |> ignore
-
     let editBtn = document.createElement ("button")
     editBtn.classList.add "inspector-owner-edit-btn"
     editBtn.textContent <- "✎"
@@ -1267,6 +1313,30 @@ and private mkEditableCell (labelText: string) (widget: HTMLElement) (onConfirm:
             labelSpan.setAttribute ("style", "display:none")
             editBtn.setAttribute ("style", "display:none")
             editGroup.setAttribute ("style", "")
+
+    let confirmBtn = document.createElement ("button")
+    confirmBtn.classList.add "inspector-add-property-btn"
+    confirmBtn.textContent <- "✓"
+    confirmBtn.title <- "Confirm"
+
+    // `onConfirm` itself decides whether the new value actually differs
+    // from the old one - every call site skips its `sendAction` entirely
+    // when it doesn't, so an unchanged value never triggers an in-game
+    // mutation (and the capture hook never sees a no-op commit). Either
+    // way, closing back to the label view happens here, once: a real
+    // change gets overwritten a moment later anyway once the resulting
+    // `loadInspector` refresh rebuilds this row from scratch, and a
+    // skipped one still needs *some* way back to the label without that
+    // refresh ever happening.
+    confirmBtn.onclick <-
+        fun _ ->
+            onConfirm ()
+            labelSpan.setAttribute ("style", "")
+            editBtn.setAttribute ("style", "")
+            editGroup.setAttribute ("style", "display:none")
+
+    editGroup.appendChild widget |> ignore
+    editGroup.appendChild confirmBtn |> ignore
 
     td.appendChild labelSpan |> ignore
     td.appendChild editBtn |> ignore
@@ -1466,7 +1536,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     renameConfirmBtn.onclick <-
         fun _ ->
             let newName = renameInput.value.Trim()
-            if newName <> "" then
+            if newName <> "" && newName <> (info?rawName: string) then
                 sendAction [ "action" ==> "rename-object"; "obj" ==> int objRef; "name" ==> newName ]
 
     renameGroup.appendChild renameConfirmBtn |> ignore
@@ -1561,8 +1631,17 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         ownerConfirmBtn.onclick <-
             fun _ ->
                 let expr = ownerEditInput.value.Trim()
-                if expr <> "" then
+                if expr <> "" && expr <> sprintf "#%d" ownerRef then
                     sendAction [ "action" ==> "set-owner"; "obj" ==> int objRef; "ownerExpr" ==> expr ]
+
+                // A real change is overwritten a moment later anyway once
+                // the resulting `loadInspector` refresh rebuilds this row
+                // from scratch - but an unchanged value skips that refresh
+                // entirely (see `mkEditableCell`'s own comment), so this is
+                // the only way back to the plain link view either way.
+                link.setAttribute ("style", "")
+                editBtn.setAttribute ("style", "")
+                editGroup.setAttribute ("style", "display:none")
 
         editGroup.appendChild ownerConfirmBtn |> ignore
 
@@ -1710,7 +1789,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 mkEditableCell pname nameInput (fun () ->
                     let newName = nameInput.value.Trim()
 
-                    if newName <> "" then
+                    if newName <> "" && newName <> pname then
                         sendAction
                             [ "action" ==> "set-property-info"
                               "obj" ==> int objRef
@@ -1740,7 +1819,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 mkEditableCell (p?owner: string) pOwnerGroup (fun () ->
                     let expr = pOwnerInput.value.Trim()
 
-                    if expr <> "" then
+                    if expr <> "" && expr <> sprintf "#%d" pOwnerRef then
                         sendAction
                             [ "action" ==> "set-property-info"
                               "obj" ==> int objRef
@@ -1768,13 +1847,16 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                         (fun () -> ())
 
                 mkEditableCell pPerms pPermsWidget (fun () ->
-                    sendAction
-                        [ "action" ==> "set-property-info"
-                          "obj" ==> int objRef
-                          "name" ==> pname
-                          "newName" ==> pname
-                          "ownerExpr" ==> sprintf "#%d" pOwnerRef
-                          "perms" ==> pCurrentPerms () ])
+                    let newPerms = pCurrentPerms ()
+
+                    if newPerms <> pPerms then
+                        sendAction
+                            [ "action" ==> "set-property-info"
+                              "obj" ==> int objRef
+                              "name" ==> pname
+                              "newName" ==> pname
+                              "ownerExpr" ==> sprintf "#%d" pOwnerRef
+                              "perms" ==> newPerms ])
             else
                 let td = document.createElement ("td")
                 td.textContent <- pPerms
@@ -2053,7 +2135,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 mkEditableCell verbName nameInput (fun () ->
                     let newNames = nameInput.value.Trim()
 
-                    if newNames <> "" then
+                    if newNames <> "" && newNames <> vFullNames then
                         sendAction
                             [ "action" ==> "set-verb-info"
                               "obj" ==> int objRef
@@ -2088,7 +2170,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 mkEditableCell (v?owner: string) vOwnerGroup (fun () ->
                     let expr = vOwnerInput.value.Trim()
 
-                    if expr <> "" then
+                    if expr <> "" && expr <> sprintf "#%d" vOwnerRef then
                         sendAction
                             [ "action" ==> "set-verb-info"
                               "obj" ==> int objRef
@@ -2117,13 +2199,16 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                         (fun () -> ())
 
                 mkEditableCell vPerms vPermsWidget (fun () ->
-                    sendAction
-                        [ "action" ==> "set-verb-info"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "newNames" ==> vFullNames
-                          "ownerExpr" ==> sprintf "#%d" vOwnerRef
-                          "perms" ==> vCurrentPerms () ])
+                    let newPerms = vCurrentPerms ()
+
+                    if newPerms <> vPerms then
+                        sendAction
+                            [ "action" ==> "set-verb-info"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "newNames" ==> vFullNames
+                              "ownerExpr" ==> sprintf "#%d" vOwnerRef
+                              "perms" ==> newPerms ])
             else
                 let td = document.createElement ("td")
                 td.textContent <- vPerms
@@ -2136,13 +2221,14 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 let dobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vDobj
 
                 mkEditableCell vDobj dobjEditSelect (fun () ->
-                    sendAction
-                        [ "action" ==> "set-verb-args"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "dobj" ==> dobjEditSelect.value
-                          "prep" ==> vPrep
-                          "iobj" ==> vIobj ])
+                    if dobjEditSelect.value <> vDobj then
+                        sendAction
+                            [ "action" ==> "set-verb-args"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "dobj" ==> dobjEditSelect.value
+                              "prep" ==> vPrep
+                              "iobj" ==> vIobj ])
             else
                 let td = document.createElement ("td")
                 td.textContent <- vDobj
@@ -2156,13 +2242,16 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                     mkQuickFillInput "none, any, or a preposition" vPrep [ "none", "none"; "any", "any" ] false
 
                 mkEditableCell vPrep prepEditGroup (fun () ->
-                    sendAction
-                        [ "action" ==> "set-verb-args"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "dobj" ==> vDobj
-                          "prep" ==> prepEditInput.value.Trim()
-                          "iobj" ==> vIobj ])
+                    let newPrep = prepEditInput.value.Trim()
+
+                    if newPrep <> vPrep then
+                        sendAction
+                            [ "action" ==> "set-verb-args"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "dobj" ==> vDobj
+                              "prep" ==> newPrep
+                              "iobj" ==> vIobj ])
             else
                 let td = document.createElement ("td")
                 td.textContent <- vPrep
@@ -2175,13 +2264,14 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 let iobjEditSelect = mkArgSpecSelect [ "none"; "any"; "this" ] vIobj
 
                 mkEditableCell vIobj iobjEditSelect (fun () ->
-                    sendAction
-                        [ "action" ==> "set-verb-args"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "dobj" ==> vDobj
-                          "prep" ==> vPrep
-                          "iobj" ==> iobjEditSelect.value ])
+                    if iobjEditSelect.value <> vIobj then
+                        sendAction
+                            [ "action" ==> "set-verb-args"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "dobj" ==> vDobj
+                              "prep" ==> vPrep
+                              "iobj" ==> iobjEditSelect.value ])
             else
                 let td = document.createElement ("td")
                 td.textContent <- vIobj
@@ -2601,12 +2691,26 @@ and private renderTabs () : unit =
                             renderTabs ()
 
                 fun () -> closeTab (objRef, verbName)
-            | GameTab
-            | InspectorTab _ ->
-                // Neither ever appears in `tabOrder` - Game is a static
-                // button outside the draggable strip, and the inspector is
-                // never rendered as a tab at all (see `OpenTab`'s own
-                // comment) - this arm only exists to satisfy the match.
+            | InspectorTab objRef ->
+                // Inspector tabs share the same strip as verb tabs (an "ⓘ
+                // #N" label, same close-× behavior, and the same
+                // preview-tab mechanic) - unlike verb tabs, clicking one
+                // always re-loads it fresh (`openOrSwitchToInspector`, not
+                // a bare `switchToTab`).
+                if previewInspectorTab = Some objRef then el.classList.add "preview"
+                label.textContent <- sprintf "ⓘ #%d" objRef
+                label.onclick <- fun _ -> openOrSwitchToInspector objRef
+
+                label.ondblclick <-
+                    fun _ ->
+                        if previewInspectorTab = Some objRef then
+                            previewInspectorTab <- None
+                            renderTabs ()
+
+                fun () -> closeInspectorTab objRef
+            | GameTab ->
+                // Never appears in `tabOrder` - Game is a static button
+                // outside the draggable strip.
                 fun () -> ()
 
         let closeBtn = document.createElement ("button")
@@ -3259,30 +3363,16 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
-                            // The object is gone - drop every open verb tab
-                            // that referenced it and scrub it out of the
-                            // tree, rather than leaving a dangling
-                            // reference an unrelated click could still hit.
+                            // The object is gone - drop every open tab that
+                            // referenced it (a verb tab, or its own
+                            // inspector tab) and scrub it out of the tree,
+                            // rather than leaving a dangling reference an
+                            // unrelated click could still hit.
                             for o, v in openVerbTabs |> List.filter (fun (o, _) -> o = objRef) do
                                 closeTab (o, v)
 
-                            if selectedObjRef = Some objRef then
-                                selectedObjRef <- None
-                                activeInspectorProp <- None
-
-                            // If its inspector is the main area's current
-                            // tab, fall back the same way closing a verb
-                            // tab does (`tabHistory`, or Game if nothing
-                            // valid is left) - re-loading fresh if the
-                            // fallback is itself another inspector, per
-                            // `loadInspector`'s "always fresh" rule.
-                            if activeTab = InspectorTab objRef then
-                                let fallback = tabHistory |> List.tryFind isTabStillOpen |> Option.defaultValue GameTab
-
-                                match fallback with
-                                | InspectorTab o -> openOrSwitchToInspectorWith o None
-                                | GameTab
-                                | VerbTab _ -> switchToTab fallback
+                            if openInspectorTabs |> List.contains objRef then
+                                closeInspectorTab objRef
 
                             removeLiveNode objRef
                             renderTree ()
