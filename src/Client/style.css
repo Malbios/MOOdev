@@ -287,6 +287,44 @@ html, body {
   display: block;
 }
 
+.tree-color-rules-header {
+  font-weight: bold;
+  padding-top: 0.4em;
+  border-top: 1px solid #333;
+  margin-top: 0.3em;
+}
+
+.tree-color-rules-list {
+  max-height: 10em;
+  overflow-y: auto;
+}
+
+.tree-color-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+  padding: 0.2em 0;
+}
+
+.tree-color-swatch {
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  border-radius: 2px;
+  border: 1px solid #444;
+  flex: none;
+}
+
+/* Overrides the popover's own `white-space: nowrap` so this message wraps
+   instead of stretching the popover to fit one long line. */
+.tree-color-rules-empty {
+  color: #888;
+  font-size: 0.85em;
+  padding: 0.3em 0;
+  max-width: 16em;
+  white-space: normal;
+}
+
 .picker-list {
   list-style: none;
   margin: 0;
@@ -813,6 +851,21 @@ html, body {
 
 .inspector-row-delete-btn:hover {
   color: #f77;
+}
+
+/* Tree-color rule swatch/trigger in the inspector header - a native
+   <input type="color"> doubles as both the swatch display and the picker
+   trigger, so this just sizes/borders it to match the other small
+   icon-button-sized controls in the header. */
+.inspector-tree-color-btn {
+  width: 1.3em;
+  height: 1.3em;
+  padding: 0;
+  border: 1px solid #444;
+  border-radius: 3px;
+  background: none;
+  cursor: pointer;
+  vertical-align: middle;
 }
 
 /* Inherited verb/property rows - read-only summaries dimmed relative to

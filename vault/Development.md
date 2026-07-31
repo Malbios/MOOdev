@@ -8,7 +8,6 @@ kanban-plugin: board
 
 - [ ] [[Configurable MOO server target]]
 	#UI/UX #Server #Complex
-- [ ] Colorize the tree-view
 - [ ] [[Rename symbol refactor]]
 	#Acceleration
 - [ ] [[Task tick_seconds usage]]
@@ -83,6 +82,7 @@ kanban-plugin: board
 - [ ] [[Doc comment convention support]]
 - [ ] better "new object" UI
 - [ ] [[Recycle-object safety precheck]]
+- [ ] Colorize the tree-view
 
 
 ## Removed

@@ -76,6 +76,8 @@ let private treeNewObjectBtn = document.getElementById ("tree-new-object-btn")
 let private treeFilterHideEmptyLeavesEl =
     document.getElementById ("tree-filter-hide-empty-leaves") :?> HTMLInputElement
 
+let private treeColorRulesListEl = document.getElementById ("tree-color-rules-list")
+
 let private treeListEl = document.getElementById ("tree-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
 let private sidebarToggleBtn = document.getElementById ("sidebar-toggle")
@@ -358,6 +360,29 @@ module private Settings =
 
     let setHideEmptyLeaves (enabled: bool) : unit =
         window.localStorage.setItem (hideEmptyLeavesKey, (if enabled then "on" else "off"))
+
+    let private colorRulesKey = "moodev-tree-color-rules"
+
+    /// `int64` is a real JS `BigInt` under Fable - `JSON.stringify` throws on
+    /// a bare `BigInt`, so `objRef` always round-trips through `float` here,
+    /// same discipline every other objRef-over-the-wire spot in this
+    /// codebase already follows (see `LspClient.fs`).
+    let loadColorRules () : (int64 * string * string) list =
+        match window.localStorage.getItem colorRulesKey with
+        | null -> []
+        | json ->
+            try
+                (unbox (JS.JSON.parse json): obj[])
+                |> Array.map (fun o -> int64 (o?objRef: float), (o?label: string), (o?color: string))
+                |> Array.toList
+            with _ -> []
+
+    let saveColorRules (rules: (int64 * string * string) list) : unit =
+        rules
+        |> List.map (fun (objRef, label, color) -> createObj [ "objRef" ==> float objRef; "label" ==> label; "color" ==> color ])
+        |> Array.ofList
+        |> JS.JSON.stringify
+        |> fun json -> window.localStorage.setItem (colorRulesKey, json)
 
     let private apply (wordWrap: string) (fontSize: int) (minimap: bool) : unit =
         editor.updateOptions (
@@ -954,6 +979,52 @@ type private TreeNode =
       HasOwnContent: bool }
 
 let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
+
+/// A user-defined "color this object and everything descending from it in
+/// the tree" rule (see `colorForObject` below) - set/cleared from an
+/// object's own inspector, reviewed/removed from the tree's "Tree display
+/// options" popover. `TypeLabel` is captured once at rule-creation time from
+/// the inspector's own current header text, so the popover's rule list reads
+/// exactly like the rest of the UI rather than re-deriving a label.
+type private ColorRule = { TypeObjRef: int64; TypeLabel: string; Color: string }
+
+let mutable private colorRules: ColorRule list =
+    Settings.loadColorRules () |> List.map (fun (r, l, c) -> { TypeObjRef = r; TypeLabel = l; Color = c })
+
+let private saveColorRulesToStorage () : unit =
+    Settings.saveColorRules (colorRules |> List.map (fun r -> r.TypeObjRef, r.TypeLabel, r.Color))
+
+/// Closest-ancestor-wins distance from `current` up to `target` via
+/// `treeNodes`'s `Parents` chain (recursive walk, cycle-guarded) - `None` if
+/// `target` isn't reachable (not an ancestor, or its subtree was never
+/// loaded into `treeNodes`).
+let rec private ancestryDistance (visited: Set<int64>) (current: int64) (target: int64) (depth: int) : int option =
+    if current = target then
+        Some depth
+    elif Set.contains current visited then
+        None
+    else
+        match Map.tryFind current treeNodes with
+        | Some node ->
+            node.Parents
+            |> Array.choose (fun p -> ancestryDistance (Set.add current visited) p target (depth + 1))
+            |> Array.sortBy id
+            |> Array.tryHead
+        | None -> None
+
+/// The color to render `objRef`'s tree row with, if any rule's type object
+/// is `objRef` itself or an ancestor of it - ties broken by whichever rule's
+/// type object is *closest* (fewest parent-hops), matching how a more
+/// specific MOO class overrides a broader one.
+let private colorForObject (objRef: int64) : string option =
+    if List.isEmpty colorRules then
+        None
+    else
+        colorRules
+        |> List.choose (fun rule -> ancestryDistance Set.empty objRef rule.TypeObjRef 0 |> Option.map (fun d -> d, rule.Color))
+        |> List.sortBy fst
+        |> List.tryHead
+        |> Option.map snd
 
 /// True roots of the object tree - objects with zero parents (`$root_class`
 /// and a handful of others, confirmed against the real corpus rather than
@@ -1753,6 +1824,35 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             |> Async.StartImmediate
 
     header.appendChild recycleBtn |> ignore
+
+    // Tree-color rule for this object + everything descending from it (see
+    // `colorForObject`/`ancestryDistance`) - a native `<input type="color">`
+    // doubles as both the swatch display and the picker trigger, no separate
+    // popup needed (no existing color-picker precedent elsewhere in this
+    // codebase to mirror instead). `onchange`, not `oninput` - commits once
+    // the picker closes rather than firing a redraw/localStorage write per
+    // drag frame, matching the discrete feel of the rename/recycle buttons
+    // right next to it.
+    let existingColorRule = colorRules |> List.tryFind (fun r -> r.TypeObjRef = objRef)
+
+    let colorInput = document.createElement ("input") :?> HTMLInputElement
+    colorInput.setAttribute ("type", "color")
+    colorInput.classList.add "inspector-tree-color-btn"
+    colorInput.title <- "Set tree color for this object and its descendants"
+    colorInput.value <- (existingColorRule |> Option.map (fun r -> r.Color) |> Option.defaultValue "#6699cc")
+    colorInput.onchange <- fun _ -> setColorRule objRef (info?name: string) colorInput.value
+    header.appendChild colorInput |> ignore
+
+    match existingColorRule with
+    | Some _ ->
+        let clearColorBtn = document.createElement ("button")
+        clearColorBtn.classList.add "inspector-row-delete-btn"
+        clearColorBtn.textContent <- "×"
+        clearColorBtn.title <- "Remove tree color rule"
+        clearColorBtn.onclick <- fun _ -> removeColorRule objRef
+        header.appendChild clearColorBtn |> ignore
+    | None -> ()
+
     inspectorContentEl.appendChild header |> ignore
 
     let ownerRow = document.createElement ("div")
@@ -3200,6 +3300,11 @@ and private renderTreeRows (rows: TreeRow list) : unit =
             kindIcon.classList.add "tree-icon"
             kindIcon.classList.add "tree-icon-object"
             kindIcon.textContent <- "◇"
+
+            match colorForObject objRef with
+            | Some color -> kindIcon.setAttribute ("style", sprintf "color: %s" color)
+            | None -> ()
+
             li.appendChild kindIcon |> ignore
 
             let labelSpan = document.createElement ("span")
@@ -3242,6 +3347,57 @@ and private renderTreeRows (rows: TreeRow list) : unit =
                     renderTree ()
 
             treeListEl.appendChild li |> ignore
+
+/// Sets (or overwrites) the tree-color rule for `objRef` - called from its
+/// own inspector's color swatch. Refreshes both the popover's rule list and
+/// the tree itself so the change is visible immediately in both places.
+and private setColorRule (objRef: int64) (label: string) (color: string) : unit =
+    colorRules <- (colorRules |> List.filter (fun r -> r.TypeObjRef <> objRef)) @ [ { TypeObjRef = objRef; TypeLabel = label; Color = color } ]
+    saveColorRulesToStorage ()
+    renderColorRulesList ()
+    renderTree ()
+
+/// Removes the tree-color rule for `objRef`, if any - called from either its
+/// own inspector's clear button or the popover's per-rule remove button.
+and private removeColorRule (objRef: int64) : unit =
+    colorRules <- colorRules |> List.filter (fun r -> r.TypeObjRef <> objRef)
+    saveColorRulesToStorage ()
+    renderColorRulesList ()
+    renderTree ()
+
+/// Rebuilds the "Tree display options" popover's color-rules list from
+/// `colorRules` - the only place a rule for an object *other than* the one
+/// currently open in the inspector can be reviewed or removed.
+and private renderColorRulesList () : unit =
+    treeColorRulesListEl.innerHTML <- ""
+
+    if List.isEmpty colorRules then
+        let empty = document.createElement ("div")
+        empty.textContent <- "No color rules yet - set one from an object's inspector."
+        empty.classList.add "tree-color-rules-empty"
+        treeColorRulesListEl.appendChild empty |> ignore
+    else
+        for rule in colorRules do
+            let row = document.createElement ("div")
+            row.classList.add "tree-color-rule-row"
+
+            let swatch = document.createElement ("span")
+            swatch.classList.add "tree-color-swatch"
+            swatch.setAttribute ("style", sprintf "background-color: %s" rule.Color)
+            row.appendChild swatch |> ignore
+
+            let label = document.createElement ("span")
+            label.textContent <- rule.TypeLabel
+            row.appendChild label |> ignore
+
+            let removeBtn = document.createElement ("button")
+            removeBtn.classList.add "inspector-row-delete-btn"
+            removeBtn.textContent <- "🗑"
+            removeBtn.title <- sprintf "Remove color rule for %s" rule.TypeLabel
+            removeBtn.onclick <- fun _ -> removeColorRule rule.TypeObjRef
+            row.appendChild removeBtn |> ignore
+
+            treeColorRulesListEl.appendChild row |> ignore
 
 /// Fires an automatic, one-time `get-live-children` for every currently
 /// rendered leaf row (`isExpandable = false`) not yet checked or already
@@ -3378,6 +3534,10 @@ treeFilterHideEmptyLeavesEl.onchange <-
 // Starts out showing its empty-state placeholder - populated for real once
 // `moodev-login-result` confirms a login (see below).
 renderTree ()
+
+// Shows any color rules persisted from a previous session immediately,
+// rather than waiting for the first add/remove.
+renderColorRulesList ()
 
 ws.onopen <-
     fun _ ->
