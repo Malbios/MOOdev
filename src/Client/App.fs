@@ -660,6 +660,42 @@ let private fetchVerb (objRef: int64) (verb: string) : unit =
 /// not just real diffs).
 let mutable private isDirty = false
 
+/// Verb tabs with a save currently in flight (server hasn't responded yet).
+/// Lets a second attempt to save the same tab - e.g. blur firing a save,
+/// then that tab's own close button clicked right after, per `closeTab`'s
+/// own comment on DOM event ordering - await the *same* request instead of
+/// sending a redundant second compile.
+let mutable private saveInFlight: Set<int64 * string> = Set.empty
+
+/// Verb tabs whose most recent save response was a compile failure -
+/// cleared on that tab's next successful save, and on a fresh `fetchVerb`
+/// load (see the `moodev-edit-content`/`moodev-edit-result` handlers).
+/// Lets `closeTab` answer "is it safe to discard this tab" for a
+/// *background* tab with no network round trip - its own last save already
+/// resolved back when the user blurred away from it.
+let mutable private failedSaveTabs: Set<int64 * string> = Set.empty
+
+/// Continuations waiting to learn a specific in-flight save's outcome -
+/// resolved and cleared by the `moodev-edit-result` handler once that tab's
+/// response arrives. A list, not a single slot, since more than one caller
+/// can end up waiting on the same in-flight save (see `saveIfDirtyAsync`).
+let mutable private pendingSaveResolvers: Map<int64 * string, (bool -> unit) list> = Map.empty
+
+/// Which verb needs saving and what its content was, captured at the exact
+/// moment of the edit that dirtied it (every `onDidChangeModelContent`
+/// firing, below) - not read later, on demand, by whatever eventually calls
+/// `saveIfDirtyAsync`. `activeTab`/`editor.getValue()` are NOT safe to read
+/// at blur time: confirmed live that a click transferring focus away from
+/// Monaco can already have run its own handler - changing `activeTab` and,
+/// for a verb-to-verb switch, overwriting the shared editor's buffer via
+/// `setValue` - *before* the blur callback's body executes, so reading
+/// either "live" from inside the blur handler can silently pick up the
+/// *new* tab's identity and/or content instead of the one actually being
+/// blurred away from. Capturing both together here, at the instant of the
+/// keystroke that caused them, is immune to that race entirely. `None`
+/// exactly when `isDirty` is `false` (cleared together, in `setDirty`).
+let mutable private dirtySave: (int64 * string * string) option = None
+
 /// The single place `isDirty` ever changes - also keeps the status bar's
 /// dirty/saved indicator in sync, so every call site gets that for free
 /// instead of needing to remember to update the status bar itself.
@@ -672,31 +708,55 @@ let private setDirty (value: bool) : unit =
     else
         statusDirtyEl.classList.remove "modified"
 
-editor.onDidChangeModelContent (fun _ -> setDirty true) |> ignore
+    if not value then
+        dirtySave <- None
 
-/// Autosaves the currently-open verb, but only if it's actually been
-/// edited since it was loaded or last saved - see `isDirty`'s own comment
-/// for why that check matters. Wired to the editor losing focus entirely
-/// (`onDidBlurEditorWidget`, not `onDidBlurEditorText` - the latter also
-/// fires when focus merely moves to one of the editor's own widgets, like
-/// the find box, which isn't "leaving" the editor at all).
+editor.onDidChangeModelContent (fun _ ->
+    setDirty true
+
+    dirtySave <- currentVerbDoc () |> Option.map (fun (o, v) -> (o, v, editor.getValue ())))
+|> ignore
+
+/// Autosaves the currently-open verb if it's actually been edited since it
+/// was loaded or last saved (see `isDirty`'s own comment), resolving to
+/// whether the save actually succeeded - `true` if there was nothing to
+/// save either. Unlike the old `saveIfDirty`, this never clears `isDirty`
+/// itself - only the `moodev-edit-result` handler does that, on a
+/// *confirmed* `ok: 1` - and never sends a second request for a tab that
+/// already has one in flight; a second caller just awaits the existing one
+/// via `pendingSaveResolvers`. (A save whose response arrives after the
+/// user has typed further edits during the round trip won't incorrectly
+/// clear those newer edits' dirty state - `onDidChangeModelContent` will
+/// already have set `isDirty` back to `true` by then.)
 ///
-/// This also happens to be what makes closing/switching tabs safe without
-/// any confirmation prompt: clicking a different tab or a tab's close
-/// button is a click outside Monaco, which blurs it - and therefore runs
-/// this - *before* the click handler that switches/closes anything, per
-/// standard DOM event ordering. By the time a tab becomes a background tab
-/// at all, its edits (if any) are already flushed to the server.
-let private saveIfDirty () : unit =
-    if isDirty then
-        match currentVerbDoc () with
-        | Some(objRef, verb) ->
-            let code = codeLines (editor.getValue ())
-            sendAction [ "action" ==> "save-verb"; "obj" ==> int objRef; "verb" ==> verb; "code" ==> code ]
-            setDirty false
-        | None -> ()
+/// Wired to the editor losing focus entirely (`onDidBlurEditorWidget`, not
+/// `onDidBlurEditorText` - the latter also fires when focus merely moves to
+/// one of the editor's own widgets, like the find box, which isn't
+/// "leaving" the editor at all), fire-and-forget - blurring to switch tabs
+/// stays exactly as fast as before, no waiting. `closeTab` below is the one
+/// caller that actually awaits this, since closing (unlike switching) is
+/// destructive.
+///
+/// Reads only `dirtySave` (see its own comment for why `activeTab`/
+/// `editor.getValue()` themselves are unsafe here) - and, like it, decides
+/// synchronously the instant this function is *called*, not deferred into
+/// whenever the returned `Async<bool>` happens to be started/awaited. Only
+/// the "wait for the response" part is genuinely async.
+let private saveIfDirtyAsync () : Async<bool> =
+    match dirtySave with
+    | None -> async { return true }
+    | Some(objRef, verb, code) ->
+        let key = (objRef, verb)
 
-editor.onDidBlurEditorWidget (fun () -> saveIfDirty ()) |> ignore
+        if not (Set.contains key saveInFlight) then
+            saveInFlight <- Set.add key saveInFlight
+            sendAction [ "action" ==> "save-verb"; "obj" ==> int objRef; "verb" ==> verb; "code" ==> codeLines code ]
+
+        Async.FromContinuations(fun (resolve, _, _) ->
+            let existing = pendingSaveResolvers |> Map.tryFind key |> Option.defaultValue []
+            pendingSaveResolvers <- Map.add key (resolve :: existing) pendingSaveResolvers)
+
+editor.onDidBlurEditorWidget (fun () -> saveIfDirtyAsync () |> Async.Ignore |> Async.StartImmediate) |> ignore
 
 // Keeps the status bar's cursor-position readout live.
 editor.onDidChangeCursorPosition (fun ev ->
@@ -1118,16 +1178,22 @@ and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
     else
         fetchVerb objRef verbName
 
-/// Closes an open verb tab. If it was the active one, falls back to
-/// whatever tab was genuinely active right before it (`tabHistory`,
-/// skipping anything no longer open), or Game if history has nothing
-/// valid left. See `saveIfDirty`'s comment for why this never risks
-/// losing unsaved edits without a confirmation prompt.
-and private closeTab (objRef: int64, verbName: string) : unit =
+/// Actually tears down an open verb tab - no save-state check at all. Only
+/// safe to call once it's already known there's nothing worth saving left
+/// (a server-confirmed verb/object delete - that content is gone either
+/// way) or the caller (`closeTab` below) has already decided discarding is
+/// fine. If it was the active one, falls back to whatever tab was
+/// genuinely active right before it (`tabHistory`, skipping anything no
+/// longer open), or Game if history has nothing valid left.
+and private closeTabImmediate (objRef: int64, verbName: string) : unit =
+    let key = (objRef, verbName)
     let wasActive = activeTab = VerbTab(objRef, verbName)
     openVerbTabs <- openVerbTabs |> List.filter (fun t -> t <> (objRef, verbName))
     tabOrder <- tabOrder |> List.filter (fun t -> t <> VerbTab(objRef, verbName))
     if previewTab = Some(objRef, verbName) then previewTab <- None
+    saveInFlight <- Set.remove key saveInFlight
+    failedSaveTabs <- Set.remove key failedSaveTabs
+    pendingSaveResolvers <- Map.remove key pendingSaveResolvers
 
     if wasActive then
         // `switchToTab` below still sees `activeTab = VerbTab(objRef,
@@ -1143,6 +1209,31 @@ and private closeTab (objRef: int64, verbName: string) : unit =
         tabContent <- Map.remove (objRef, verbName) tabContent
         renderTabs ()
         renderTree ()
+
+/// Closes an open verb tab from user-initiated action (the tab strip's ×
+/// button or middle-click, via `closeAction` below) - unlike
+/// `closeTabImmediate`, this actually checks whether there's a compile-
+/// failed save that would be silently discarded, and asks first:
+///   - the *active* tab awaits its real, current save outcome (triggering
+///     one via `saveIfDirtyAsync` if none is already in flight - e.g. from
+///     the blur that just fired switching focus to this close button)
+///   - a *background* tab's last save already resolved back when the user
+///     blurred away from it, so `failedSaveTabs` already has the answer,
+///     no round trip needed
+and private closeTab (objRef: int64, verbName: string) : unit =
+    async {
+        let key = (objRef, verbName)
+
+        let! ok =
+            if activeTab = VerbTab(objRef, verbName) then
+                saveIfDirtyAsync ()
+            else
+                async { return not (Set.contains key failedSaveTabs) }
+
+        if ok || window.confirm "This verb has unsaved changes that failed to compile. Close and discard them?" then
+            closeTabImmediate (objRef, verbName)
+    }
+    |> Async.StartImmediate
 
 /// Closes an open inspector tab. If it was the active one, falls back the
 /// same way `closeTab` does (`tabHistory`, or Game if nothing valid is
@@ -3363,6 +3454,11 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         tabContent <- Map.add (objRef, verb) content tabContent
+                        // A fresh load is a clean baseline - any earlier
+                        // failed/in-flight save for this tab no longer
+                        // describes anything real.
+                        failedSaveTabs <- Set.remove (objRef, verb) failedSaveTabs
+                        saveInFlight <- Set.remove (objRef, verb) saveInFlight
 
                         if not (openVerbTabs |> List.contains (objRef, verb)) then
                             // Brand-new tab - VS Code's preview-tab mechanic
@@ -3399,13 +3495,44 @@ ws.onmessage <-
                     | false, _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-edit-result") then
-                let ok = headerField "ok: " header = Some "1"
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef ->
+                        let key = (objRef, verb)
+                        let ok = headerField "ok: " header = Some "1"
 
-                editorDiagnosticsEl.textContent <-
-                    if ok then "" else String.concat "\n" lines
+                        saveInFlight <- Set.remove key saveInFlight
 
-                let lineErrors = lines |> Array.toList |> List.choose parseErrorLine
-                Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
+                        failedSaveTabs <-
+                            if ok then Set.remove key failedSaveTabs else Set.add key failedSaveTabs
+
+                        // Resolve any awaiters (e.g. `closeTab`, waiting to
+                        // decide whether to confirm a discard) *before* the
+                        // UI repaint below - that repaint must never be able
+                        // to leave an awaited promise hanging just because
+                        // Monaco's marker rendering had a problem of its
+                        // own with this particular response.
+                        match pendingSaveResolvers |> Map.tryFind key with
+                        | Some resolvers ->
+                            pendingSaveResolvers <- Map.remove key pendingSaveResolvers
+                            for resolve in resolvers do
+                                resolve ok
+                        | None -> ()
+
+                        // Only the tab this response is actually *for* gets
+                        // repainted - a response arriving for a background
+                        // tab (its own earlier blur-triggered save) must not
+                        // touch whatever's currently on screen.
+                        if activeTab = VerbTab(objRef, verb) then
+                            if ok then setDirty false
+
+                            editorDiagnosticsEl.textContent <- if ok then "" else String.concat "\n" lines
+
+                            let lineErrors = lines |> Array.toList |> List.choose parseErrorLine
+                            Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
+                    | false, _ -> ()
+                | _ -> ()
             elif header.StartsWith("moodev-login-result") then
                 if headerField "ok: " header = Some "1" then
                     isLoggedIn <- true
@@ -3549,7 +3676,7 @@ ws.onmessage <-
                     | true, objRef ->
                         if headerField "ok: " header = Some "1" then
                             if openVerbTabs |> List.contains (objRef, verb) then
-                                closeTab (objRef, verb)
+                                closeTabImmediate (objRef, verb)
 
                             if activeTab = InspectorTab objRef then
                                 loadInspector objRef None
@@ -3581,7 +3708,7 @@ ws.onmessage <-
                             // rather than leaving a dangling reference an
                             // unrelated click could still hit.
                             for o, v in openVerbTabs |> List.filter (fun (o, _) -> o = objRef) do
-                                closeTab (o, v)
+                                closeTabImmediate (o, v)
 
                             if openInspectorTabs |> List.contains objRef then
                                 closeInspectorTab objRef
