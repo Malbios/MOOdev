@@ -579,6 +579,18 @@ html, body {
   margin-bottom: 0.6em;
 }
 
+/* --- Gotchas view ------------------------------------------------------ */
+
+#sidebar-view-gotchas {
+  overflow-y: auto;
+  padding: 0.8em 1em;
+}
+
+#tree-gotchas-summary {
+  color: #999;
+  margin-bottom: 0.6em;
+}
+
 /* --- Object inspector ------------------------------------------------- */
 
 #inspector-diagnostics {

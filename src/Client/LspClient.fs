@@ -202,6 +202,23 @@ let findDeadVerbsAsync () : Async<(int64 * string * string * string * string * b
                     (o?possiblyDynamic: bool))
     }
 
+/// Custom method (`moodev/findGotchas`, no params) - manually triggered
+/// corpus-wide "MOOcode gotchas" static-check scan (matches
+/// `Handlers.MooLspServer.FindGotchas`/`Handlers.findGotchas`). `kind` is
+/// one of the plain-string tags `GotchaEntry.Kind` uses server-side
+/// (`"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"`) - the client's
+/// `gotchaKindLabel` turns it into display text.
+let findGotchasAsync () : Async<(int64 * string * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findGotchas" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+            return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string), (o?kind: string))
+    }
+
 /// Wires hover, go-to-definition, completions, signature help,
 /// find-references, and the custom `moodev-verb://` URI opener into the
 /// given Monaco instance for the "moocode" language.

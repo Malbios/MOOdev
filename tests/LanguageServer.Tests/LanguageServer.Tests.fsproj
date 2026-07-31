@@ -9,6 +9,7 @@
     <Compile Include="AstQueryTests.fs" />
     <Compile Include="HandlerTests.fs" />
     <Compile Include="DeadVerbFinderTests.fs" />
+    <Compile Include="GotchaFinderTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

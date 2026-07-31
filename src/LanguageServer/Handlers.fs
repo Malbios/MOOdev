@@ -440,14 +440,15 @@ let private allVerbCallReferences (graph: Graph) : (ObjRef * string * AstQuery.F
                 |> Seq.map (fun r -> num, primary, r)
             | _ -> Seq.empty))
 
-/// Corpus-wide counterpart to `TextDocumentReferences` - instead of
-/// resolving every call site against one target verb, resolves every call
-/// site's own target *once* and checks every verb in the graph against that
-/// single confirmed-targets set. Deliberately not `private` (unlike
-/// `allVerbCallReferences` above) so `LanguageServer.Tests` can call it
-/// directly without spinning up a full `MooLspServer` - same reasoning
-/// `Metadata.Resolver`'s functions are public for `ResolverTests.fs`.
-let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
+/// The `(definer, verb-index)` set of every verb `allVerbCallReferences`
+/// resolves to a real callable target, corpus-wide, alongside every call
+/// name that couldn't be resolved statically - shared by `findDeadVerbs` (a
+/// verb NOT in the confirmed set is dead; a call name in the unresolved set
+/// matching its own names makes it "possibly dynamic" rather than clean)
+/// and `findGotchas`'s missing-x-bit check (a verb IN the confirmed set
+/// needs its `x` bit, or the resolvable caller that put it there can never
+/// actually reach it).
+let private computeReferenceResolution (graph: Graph) : System.Collections.Generic.HashSet<ObjRef * int> * System.Collections.Generic.HashSet<string> =
     let confirmedTargets = System.Collections.Generic.HashSet<ObjRef * int>()
     let unresolvedCallNames = System.Collections.Generic.HashSet<string>()
 
@@ -461,6 +462,18 @@ let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
                 | None -> ()
             | None -> unresolvedCallNames.Add callName |> ignore
         | _ -> ()
+
+    confirmedTargets, unresolvedCallNames
+
+/// Corpus-wide counterpart to `TextDocumentReferences` - instead of
+/// resolving every call site against one target verb, resolves every call
+/// site's own target *once* and checks every verb in the graph against that
+/// single confirmed-targets set. Deliberately not `private` (unlike
+/// `allVerbCallReferences` above) so `LanguageServer.Tests` can call it
+/// directly without spinning up a full `MooLspServer` - same reasoning
+/// `Metadata.Resolver`'s functions are public for `ResolverTests.fs`.
+let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
+    let confirmedTargets, unresolvedCallNames = computeReferenceResolution graph
 
     graph.Objects
     |> Map.toSeq
@@ -480,6 +493,231 @@ let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
                       PossiblyDynamic = possiblyDynamic }
             | _ -> None))
     |> Array.ofSeq
+
+/// True if `pred` matches `e` or any expression nested anywhere inside it -
+/// exhaustive over every `Expr` case (no wildcard arm) so adding a new AST
+/// node shape to `Ast.fs` is a compile error here until this is updated too,
+/// rather than a silently-incomplete gotcha scan.
+let rec private existsInExpr (pred: Expr -> bool) (e: Expr) : bool =
+    let go = existsInExpr pred
+    let goArg (a: Arg) = match a with | Normal e | Splice e -> go e
+
+    pred e
+    || match e with
+       | IntLit _
+       | FloatLit _
+       | StrLit _
+       | ObjLit _
+       | ErrLit _
+       | Ident _
+       | FirstIndex
+       | LastIndex -> false
+       | Prop(o, n, _, _) -> go o || go n
+       | VerbCall(r, n, args, _, _) -> go r || go n || (args |> List.exists goArg)
+       | Call(_, args, _, _) -> args |> List.exists goArg
+       | Index(a, b) -> go a || go b
+       | Range(a, b) -> go a || go b
+       | Binary(_, a, b) -> go a || go b
+       | Unary(_, a) -> go a
+       | Cond(a, b, c) -> go a || go b || go c
+       | Catch(a, _, fb) -> go a || (fb |> Option.map go |> Option.defaultValue false)
+       | Assign(a, b) -> go a || go b
+       | Scatter(_, b) -> go b
+       | ListLit args -> args |> List.exists goArg
+       | MapLit kvs -> kvs |> List.exists (fun (k, v) -> go k || go v)
+
+/// Every "root" expression directly inside `s` (a loop's condition/source,
+/// an `if`'s condition, an expression statement, a `return` value, ...),
+/// recursively including every nested statement body - `descendIntoFork`
+/// controls whether a nested `fork ... endfork` body's own expressions are
+/// included. `existsInExpr` still has to be applied on top of each yielded
+/// expression to reach *its* nested sub-expressions; this only walks the
+/// statement tree. Exhaustive over every `Stmt` case, same reasoning as
+/// `existsInExpr` above.
+let rec private stmtExprs (descendIntoFork: bool) (s: Stmt) : Expr seq =
+    let body = Seq.collect (stmtExprs descendIntoFork)
+
+    match s with
+    | If(arms, elsePart) ->
+        seq {
+            for cond, b in arms do
+                yield cond
+                yield! body b
+
+            match elsePart with
+            | Some b -> yield! body b
+            | None -> ()
+        }
+    | ForList(_, _, source, b) -> seq { yield source; yield! body b }
+    | ForRange(_, lo, hi, b) -> seq { yield lo; yield hi; yield! body b }
+    | While(_, cond, b) -> seq { yield cond; yield! body b }
+    | Fork(_, delay, b) -> if descendIntoFork then seq { yield delay; yield! body b } else Seq.singleton delay
+    | TryExcept(b, arms) -> Seq.append (body b) (arms |> Seq.collect (fun a -> body a.Body))
+    | TryFinally(b, h) -> Seq.append (body b) (body h)
+    | ExprStmt e -> Seq.singleton e
+    | Return(Some e) -> Seq.singleton e
+    | Return None
+    | Break _
+    | Continue _
+    | ErrorStmt _ -> Seq.empty
+
+/// Every `ForList`/`ForRange`/`While` loop statement anywhere in `stmts`,
+/// at any nesting depth (including inside a `fork` body - that's still a
+/// real loop with its own tick/seconds budget once its task starts
+/// running, so it still needs checking on its own terms).
+let rec private allLoops (stmts: Stmt list) : Stmt seq =
+    seq {
+        for s in stmts do
+            match s with
+            | ForList(_, _, _, b)
+            | ForRange(_, _, _, b)
+            | While(_, _, b) ->
+                yield s
+                yield! allLoops b
+            | If(arms, elsePart) ->
+                for _, b in arms do
+                    yield! allLoops b
+
+                match elsePart with
+                | Some b -> yield! allLoops b
+                | None -> ()
+            | Fork(_, _, b) -> yield! allLoops b
+            | TryExcept(b, arms) ->
+                yield! allLoops b
+                for a in arms do
+                    yield! allLoops a.Body
+            | TryFinally(b, h) ->
+                yield! allLoops b
+                yield! allLoops h
+            | ExprStmt _
+            | Return _
+            | Break _
+            | Continue _
+            | ErrorStmt _ -> ()
+    }
+
+let private isSuspendCall (e: Expr) : bool =
+    match e with
+    | Call(name, _, _, _) -> System.String.Equals(name, "suspend", System.StringComparison.OrdinalIgnoreCase)
+    | _ -> false
+
+/// `list[0]` - always `E_RANGE` (MOO lists are 1-indexed, so there is no
+/// legitimate reason to index with a literal `0`); `list[$]`/`list[a..b]`
+/// aren't this shape and are left alone.
+let private isZeroIndex (e: Expr) : bool =
+    match e with
+    | Index(_, IntLit 0L) -> true
+    | _ -> false
+
+/// A loop's own body has no `suspend()` reachable anywhere inside it (a
+/// nested loop's suspend still counts - it runs during the outer loop's own
+/// iterations; a nested `fork`'s doesn't - that's a different task's
+/// budget), so a source that grows past the tick/seconds limit will end
+/// the task mid-iteration with no chance to yield first.
+let private loopBodyNeedsSuspend (body: Stmt list) : bool =
+    body |> List.collect (stmtExprs false >> List.ofSeq) |> List.exists (existsInExpr isSuspendCall) |> not
+
+/// One of the three catalogued "MOOcode gotchas" (the project plan's own
+/// MOOcode gotchas section) `findGotchas` checks for, exhaustively across
+/// every parsed verb in the graph. `Kind` is a plain string tag rather than
+/// a DU - simpler to send over the wire, matching `Dobj`/`Prep`/`Iobj`'s own
+/// plain-string convention on `DeadVerbEntry` above - one of
+/// `"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"`.
+type GotchaEntry = { ObjRef: ObjRef; VerbName: string; Kind: string }
+
+/// True if `target` is `start` itself or reachable by walking `start`'s
+/// parents transitively - i.e. whether a dispatch search starting at
+/// `start` and walking up through its ancestors would ever reach an object
+/// defining a verb (the same walk `findCallableVerb` does, just without
+/// that function's own x-bit filter - see `findGotchas`'s missing-x-bit
+/// check for why this needs its own, laxer walk). `visited` guards against
+/// a malformed/cyclic parent chain; a well-formed DAG never needs it.
+let rec private isReachableAncestor (graph: Graph) (visited: System.Collections.Generic.HashSet<ObjRef>) (start: ObjRef) (target: ObjRef) : bool =
+    if start = target then
+        true
+    elif not (visited.Add start) then
+        false
+    else
+        match Map.tryFind start graph.Objects with
+        | None -> false
+        | Some node -> node.Parents |> List.exists (fun p -> isReachableAncestor graph visited p target)
+
+/// Every resolvable `VerbCall`'s `(receiver start, call name)` pair,
+/// corpus-wide - deliberately *not* filtered through `findCallableVerb`
+/// (unlike `computeReferenceResolution`'s `confirmedTargets`): that
+/// function's own `findOwnVerb` already excludes non-executable verbs
+/// before matching by name, so a verb missing the `x` bit can never appear
+/// in `confirmedTargets` no matter how many callers name it - the exact
+/// case the missing-x-bit check exists to catch. This collects the raw
+/// receiver+name instead, so `findGotchas` can check name-match and
+/// ancestor-reachability itself, independent of executability.
+let private allResolvableCallSites (graph: Graph) : (ObjRef * string) seq =
+    allVerbCallReferences graph
+    |> Seq.choose (fun (containingObj, _, r) ->
+        match r.Ref with
+        | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
+            Metadata.Resolver.resolveReceiverInContext graph containingObj receiver
+            |> Option.map (fun receiverStart -> receiverStart, callName)
+        | _ -> None)
+
+/// Static, whole-corpus checks for the gotchas already catalogued in the
+/// project plan doc but never turned into tooling - cheap to check
+/// exhaustively precisely because a MOO codebase is finite (the same
+/// property `findDeadVerbs`/the M4 resolver both lean on). Reports at verb
+/// granularity, not a specific line/column - `Ast.fs`'s statement nodes
+/// (unlike its four reference-bearing expression nodes) don't carry source
+/// positions, so there's nothing more precise to report without extending
+/// the parser itself, out of scope here. Deliberately not `private`, same
+/// reasoning as `findDeadVerbs`.
+///
+/// Missing-x-bit note: this doesn't replicate `findCallableVerb`'s exact
+/// first-match-wins dispatch order (which would need checking whether some
+/// *other*, executable, same-named verb sits closer in the ancestor chain
+/// and would shadow this one anyway) - it flags any non-executable verb
+/// whose own name matches some resolvable call site whose receiver can
+/// reach this verb's defining object. A verb genuinely shadowed by a
+/// working same-named verb closer up the chain would still be flagged here
+/// as a false positive - same disclosed-approximation trade-off
+/// `DeadVerbEntry.PossiblyDynamic` already makes elsewhere in this file,
+/// not a precision this check claims.
+let findGotchas (graph: Graph) : GotchaEntry[] =
+    let resolvableCallSites = allResolvableCallSites graph |> Array.ofSeq
+
+    let missingXBit =
+        graph.Objects
+        |> Map.toSeq
+        |> Seq.collect (fun (num, o) ->
+            o.Verbs
+            |> Seq.choose (fun v ->
+                match v.Meta.Names with
+                | primary :: _ when
+                    not (v.Meta.Perms.Contains 'x')
+                    && resolvableCallSites
+                       |> Array.exists (fun (receiverStart, callName) ->
+                           Metadata.Resolver.verbNameMatchesAny v.Meta.Names callName
+                           && isReachableAncestor graph (System.Collections.Generic.HashSet()) receiverStart num)
+                    ->
+                    Some { ObjRef = num; VerbName = primary; Kind = "missing-x-bit" }
+                | _ -> None))
+
+    let structural =
+        graph.Objects
+        |> Map.toSeq
+        |> Seq.collect (fun (num, o) ->
+            o.Verbs
+            |> Seq.collect (fun v ->
+                match v.Ast, v.Meta.Names with
+                | Some stmts, primary :: _ ->
+                    seq {
+                        if allLoops stmts |> Seq.exists (function ForList(_, _, _, b) | ForRange(_, _, _, b) | While(_, _, b) -> loopBodyNeedsSuspend b | _ -> false) then
+                            yield { ObjRef = num; VerbName = primary; Kind = "unbounded-loop" }
+
+                        if stmts |> List.collect (stmtExprs true >> List.ofSeq) |> List.exists (existsInExpr isZeroIndex) then
+                            yield { ObjRef = num; VerbName = primary; Kind = "zero-index" }
+                    }
+                | _ -> Seq.empty))
+
+    Seq.append missingXBit structural |> Array.ofSeq
 
 /// Minimal client stub - this phase never needs to push notifications or
 /// send server-initiated requests back to the editor (no diagnostics, no
@@ -885,3 +1123,10 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// at a time via `TextDocumentReferences`.
     member _.FindDeadVerbs(_p: obj) : Async<Result<DeadVerbEntry[], JsonRpc.Error>> =
         async { return Ok(findDeadVerbs graph) }
+
+    /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
+    /// gotchas" static-check report: every verb `findGotchas` flags for a
+    /// missing `x` bit despite a confirmed caller, an unbounded loop with no
+    /// `suspend()`, or a `list[0]`-shaped index, corpus-wide.
+    member _.FindGotchas(_p: obj) : Async<Result<GotchaEntry[], JsonRpc.Error>> =
+        async { return Ok(findGotchas graph) }

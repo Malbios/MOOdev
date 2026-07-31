@@ -62,6 +62,7 @@ let private viewHistoryBtn = document.getElementById ("view-history")
 let private viewTasksBtn = document.getElementById ("view-tasks")
 let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
+let private viewGotchasBtn = document.getElementById ("view-gotchas")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -111,6 +112,9 @@ let private errorsClearBtn = document.getElementById ("errors-clear-btn")
 let private sidebarViewDeadVerbsEl = document.getElementById ("sidebar-view-dead-verbs")
 let private treeDeadVerbsSummaryEl = document.getElementById ("tree-dead-verbs-summary")
 let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list")
+let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
+let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
+let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -478,6 +482,7 @@ type private SidebarView =
     | TasksView
     | ErrorsView
     | DeadVerbsView
+    | GotchasView
 
 let mutable private activeSidebarView: SidebarView = TreeView
 
@@ -728,10 +733,15 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
 
-/// The five mutually-exclusive views under `#sidebar` - same `activateOnly`
+/// The six mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
 let private allSidebarViews =
-    [ sidebarViewTreeEl; sidebarViewHistoryEl; sidebarViewTasksEl; sidebarViewErrorsEl; sidebarViewDeadVerbsEl ]
+    [ sidebarViewTreeEl
+      sidebarViewHistoryEl
+      sidebarViewTasksEl
+      sidebarViewErrorsEl
+      sidebarViewDeadVerbsEl
+      sidebarViewGotchasEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -2484,13 +2494,24 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderDeadVerbsResults results
         }
         |> Async.StartImmediate
+    | GotchasView ->
+        activateOnlySidebarView sidebarViewGotchasEl
+        treeGotchasSummaryEl.textContent <- "Scanning..."
+        treeGotchasListEl.innerHTML <- ""
+
+        async {
+            let! results = LspClient.findGotchasAsync ()
+            renderGotchasResults results
+        }
+        |> Async.StartImmediate
 
     for btn, v in
         [ viewTreeBtn, TreeView
           viewHistoryBtn, HistoryView
           viewTasksBtn, TasksView
           viewErrorsBtn, ErrorsView
-          viewDeadVerbsBtn, DeadVerbsView ] do
+          viewDeadVerbsBtn, DeadVerbsView
+          viewGotchasBtn, GotchasView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -2687,6 +2708,39 @@ and private renderDeadVerbsResults (results: (int64 * string * string * string *
                 call
 
         treeDeadVerbsListEl.appendChild li |> ignore
+
+/// Human-readable label for one of `Handlers.GotchaEntry`'s plain-string
+/// `Kind` tags - kept client-side (like `renderDeadVerbsResults`'s own
+/// "possibly referenced dynamically" phrasing) rather than sent over the
+/// wire, since it's presentation, not data.
+and private gotchaKindLabel (kind: string) : string =
+    match kind with
+    | "missing-x-bit" -> "missing the x (executable) bit despite a likely caller"
+    | "unbounded-loop" -> "loop with no suspend() anywhere in its body"
+    | "zero-index" -> "list[0] indexing - always raises E_RANGE"
+    | other -> other
+
+/// Renders `moodev/findGotchas`' results into the Gotchas sidebar view -
+/// same shape as `renderDeadVerbsResults`, one entry per (object, verb,
+/// kind) triple (a verb can appear more than once if it trips more than one
+/// check), clickable straight through to that verb.
+and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
+    treeGotchasSummaryEl.textContent <-
+        if results.Length = 0 then
+            "No gotchas found."
+        else
+            sprintf "%d gotcha(s) found." results.Length
+
+    treeGotchasListEl.innerHTML <- ""
+
+    for objRef, verbName, kind in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+        li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+        li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
+
+        treeGotchasListEl.appendChild li |> ignore
 
 /// Rebuilds `#verb-tabs` (the dynamic, closable, drag-reorderable tabs) and
 /// the static `#tab-game` button's `.active` state. `#tab-game` itself is
@@ -3023,6 +3077,7 @@ viewHistoryBtn.onclick <- fun _ -> switchToSidebarView HistoryView
 viewTasksBtn.onclick <- fun _ -> switchToSidebarView TasksView
 viewErrorsBtn.onclick <- fun _ -> switchToSidebarView ErrorsView
 viewDeadVerbsBtn.onclick <- fun _ -> switchToSidebarView DeadVerbsView
+viewGotchasBtn.onclick <- fun _ -> switchToSidebarView GotchasView
 
 errorsClearBtn.onclick <-
     fun _ ->
