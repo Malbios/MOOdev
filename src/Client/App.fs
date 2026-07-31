@@ -1009,12 +1009,22 @@ let mutable private expandedRefs: Set<int64> = Set.empty
 
 /// Objects whose live children have been asked for at least once (a
 /// `get-live-children` round trip has landed, whether or not it turned up
-/// anything new) - lets `isExpandable` show a chevron before the first ask
-/// (an object whose *only* children are live-only would otherwise show none
-/// at all, hiding the exact case this feature exists to reveal) while still
-/// self-correcting to "no chevron" afterward if nothing real ever surfaces.
-/// Same reset lifecycle as `expandedRefs`.
+/// anything new). `isExpandable` only shows a chevron for actually-known
+/// children now, so an object whose *only* children are live-only (created
+/// outside the client's own create-object flow, which already re-checks its
+/// new object's parent immediately) needs some other path to ever surface
+/// them - see `liveChildrenRequested` just below, which drives that
+/// check automatically rather than waiting for a chevron the node no longer
+/// shows. Same reset lifecycle as `expandedRefs`.
 let mutable private liveChildrenChecked: Set<int64> = Set.empty
+
+/// Objects an automatic `get-live-children` request has already been sent
+/// for, whether or not the round trip has landed yet - guards
+/// `requestUncheckedLeaves` (called on every `renderTree`, i.e. every
+/// expand/collapse/filter keystroke) against re-sending the same request
+/// over and over while the first one is still in flight. Same reset
+/// lifecycle as `liveChildrenChecked`.
+let mutable private liveChildrenRequested: Set<int64> = Set.empty
 
 /// The object row the user actually clicked (or opened the inspector for)
 /// while a filter was active - the one thing `promoteFilterExpansionIfAny`
@@ -2892,7 +2902,6 @@ and private ancestorExpansionSet (filterText: string) : Set<int64> =
 and private flattenVisibleRows
     (hideEmptyLeaves: bool)
     (expanded: Set<int64>)
-    (liveChildrenChecked: Set<int64>)
     (roots: int64[])
     : TreeRow list =
     // "Empty leaf" = no children *and* no verbs/properties of its own - a
@@ -2923,9 +2932,11 @@ and private flattenVisibleRows
             let visited = Set.add objRef visited
             let visibleChildren = childrenOf node
 
-            let isExpandable =
-                not (Array.isEmpty visibleChildren)
-                || not (Set.contains objRef liveChildrenChecked) // unknown - assume yes until asked once
+            // Reflects only actually-known children - a node not yet live-
+            // checked shows no arrow rather than one shown speculatively
+            // (see `liveChildrenRequested`'s own comment for how live-only
+            // children still get discovered without one).
+            let isExpandable = not (Array.isEmpty visibleChildren)
 
             let selfRow: TreeRow = objRef, depth, isExpandable
 
@@ -3017,6 +3028,24 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
             treeListEl.appendChild li |> ignore
 
+/// Fires an automatic, one-time `get-live-children` for every currently
+/// rendered leaf row (`isExpandable = false`) not yet checked or already
+/// requested - keeps live-only children (see `liveChildrenChecked`'s own
+/// comment) discoverable without ever showing the user a chevron to click.
+/// The `moodev-live-children` response handler adds the object to
+/// `liveChildrenChecked` and calls `renderTree ()` itself, so a node that
+/// turns out to actually have live children gets its chevron the moment the
+/// round trip lands - no explicit follow-up needed here.
+and private requestUncheckedLeaves (rows: TreeRow list) : unit =
+    for objRef, _, isExpandable in rows do
+        if
+            not isExpandable
+            && not (Set.contains objRef liveChildrenChecked)
+            && not (Set.contains objRef liveChildrenRequested)
+        then
+            liveChildrenRequested <- Set.add objRef liveChildrenRequested
+            sendAction [ "action" ==> "get-live-children"; "obj" ==> int objRef ]
+
 /// Recomputes and redraws the visible tree from `treeNodes`/`expandedRefs`/
 /// `treeFilterText` - the single entry point every state change (expand
 /// toggle, filter keystroke, tab switch, hide-empty-leaves setting) calls
@@ -3026,19 +3055,24 @@ and private renderTree () : unit =
     let hideEmptyLeaves = Settings.hideEmptyLeavesEnabled ()
 
     if treeFilterText.Trim() = "" then
-        renderTreeRows (flattenVisibleRows hideEmptyLeaves expandedRefs liveChildrenChecked rootRefs)
+        let rows = flattenVisibleRows hideEmptyLeaves expandedRefs rootRefs
+        requestUncheckedLeaves rows
+        renderTreeRows rows
     else
         let ancestorRefs = ancestorExpansionSet treeFilterText
         let expanded = Set.union expandedRefs ancestorRefs
-        let allRows = flattenVisibleRows hideEmptyLeaves expanded liveChildrenChecked rootRefs
+        let allRows = flattenVisibleRows hideEmptyLeaves expanded rootRefs
 
         // Keep a row if it's itself a match, or an ancestor on the way to
         // one - expansion only ever reveals a path *down* to a match.
-        allRows
-        |> List.filter (fun (objRef, _, _) ->
-            Set.contains objRef ancestorRefs
-            || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false))
-        |> renderTreeRows
+        let visibleRows =
+            allRows
+            |> List.filter (fun (objRef, _, _) ->
+                Set.contains objRef ancestorRefs
+                || (Map.tryFind objRef treeNodes |> Option.map (nodeMatches treeFilterText) |> Option.defaultValue false))
+
+        requestUncheckedLeaves visibleRows
+        renderTreeRows visibleRows
 
 /// Reveals `objRef` in the tree (expanding every ancestor path to it) and
 /// opens `verbName` directly - used by go-to-definition, which already
@@ -3288,6 +3322,7 @@ ws.onmessage <-
                         buildTree nodes
                         expandedRefs <- Set.empty
                         liveChildrenChecked <- Set.empty
+                        liveChildrenRequested <- Set.empty
                         selectedObjRef <- None
                         renderTree ()
 
