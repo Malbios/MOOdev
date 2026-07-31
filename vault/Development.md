@@ -6,10 +6,8 @@ kanban-plugin: board
 
 ## ToDo
 
-- [ ] [[make version history work]]
 - [ ] [[permission inheritance visualizer]]
 - [ ] [[verb-level test harness]]
-- [ ] [[Static checks for the MOOcode gotchas]]
 - [ ] [[Live diagnostics]]
 - [ ] [[Doc comment convention support]]
 - [ ] [[Rename symbol refactor]]
@@ -22,10 +20,12 @@ kanban-plugin: board
 - [ ] Explore options to work without LSP/Sidecar apps (so other teams can use this more easily)
 - [ ] some kind of in-IDE documentation of MOOcode in general and more specifically all built-ins
 - [ ] better "new object" UI
+- [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
 
 
 ## In Progress
 
+- [ ] [[make version history work]]
 
 
 ## Done
@@ -36,6 +36,7 @@ kanban-plugin: board
 - [ ] [[live task queue inspector]]
 - [ ] [[runtime error stream]]
 - [ ] [[Dead-verb finder]]
+- [ ] [[Static checks for the MOOcode gotchas]]
 
 
 ## Removed
