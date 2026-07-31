@@ -701,7 +701,7 @@ let mutable private dirtySave: (int64 * string * string) option = None
 /// instead of needing to remember to update the status bar itself.
 let private setDirty (value: bool) : unit =
     isDirty <- value
-    statusDirtyEl.textContent <- if value then "Modified" else "Saved"
+    statusDirtyEl.textContent <- if value then "Modified" else "No changes"
 
     if value then
         statusDirtyEl.classList.add "modified"
