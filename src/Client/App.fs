@@ -72,9 +72,6 @@ let private treeFilterClearEl = document.getElementById ("tree-filter-clear")
 let private treeFilterSettingsBtn = document.getElementById ("tree-filter-settings")
 let private treeFilterSettingsPopoverEl = document.getElementById ("tree-filter-settings-popover")
 let private treeNewObjectBtn = document.getElementById ("tree-new-object-btn")
-let private treeNewObjectPopoverEl = document.getElementById ("tree-new-object-popover")
-let private treeNewObjectParentEl = document.getElementById ("tree-new-object-parent") :?> HTMLInputElement
-let private treeNewObjectCreateBtn = document.getElementById ("tree-new-object-create-btn")
 
 let private treeFilterHideEmptyLeavesEl =
     document.getElementById ("tree-filter-hide-empty-leaves") :?> HTMLInputElement
@@ -436,27 +433,15 @@ settingsPanelEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 // Same "inner click stops propagation, outer click closes" idiom as the
 // Settings overlay just above - `document` stands in for a dedicated
 // backdrop element, since this is a small inline popover, not a full-screen
-// modal. Opening one of these two sidebar popovers closes the other, same
-// as VS Code's own toolbar popovers.
+// modal.
 treeFilterSettingsBtn.onclick <-
     fun ev ->
         ev.stopPropagation () |> ignore
-        treeNewObjectPopoverEl.classList.remove "visible"
         treeFilterSettingsPopoverEl.classList.toggle "visible" |> ignore
 
-treeNewObjectBtn.onclick <-
-    fun ev ->
-        ev.stopPropagation () |> ignore
-        treeFilterSettingsPopoverEl.classList.remove "visible"
-        treeNewObjectPopoverEl.classList.toggle "visible" |> ignore
-
 treeFilterSettingsPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
-treeNewObjectPopoverEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
 
-document.onclick <-
-    fun _ ->
-        treeFilterSettingsPopoverEl.classList.remove "visible"
-        treeNewObjectPopoverEl.classList.remove "visible"
+document.onclick <- fun _ -> treeFilterSettingsPopoverEl.classList.remove "visible"
 
 Settings.init ()
 
@@ -636,19 +621,21 @@ let private currentVerbDoc () : (int64 * string) option =
 let private sendAction (fields: (string * obj) list) : unit =
     ws.send (JS.JSON.stringify (createObj fields))
 
-// Wired here rather than alongside the popover's show/hide toggling above
-// (which is plain top-level code that runs before `sendAction` itself is
-// even defined) - F# requires a name to be lexically defined before use for
-// ordinary top-level bindings, unlike the `let rec ... and ...` chain
+// Wired here rather than alongside the tree-filter-settings popover wiring
+// above (which is plain top-level code that runs before `sendAction` itself
+// is even defined) - F# requires a name to be lexically defined before use
+// for ordinary top-level bindings, unlike the `let rec ... and ...` chain
 // `renderTree`/`loadInspector`/etc. below belong to.
-treeNewObjectCreateBtn.onclick <-
-    fun _ ->
-        let parentExpr = treeNewObjectParentEl.value.Trim()
-
-        if parentExpr <> "" then
-            sendAction [ "action" ==> "create-object"; "parentExpr" ==> parentExpr ]
-            treeNewObjectParentEl.value <- ""
-            treeNewObjectPopoverEl.classList.remove "visible"
+//
+// No parent/name/flags prompt up front - creates a bare, parentless object
+// immediately (`$nothing`/`#-1`, the same "no parent" idiom
+// moocode-reference.md documents for `create()`) and lets the existing
+// `moodev-object-create-result` handler open it straight into the
+// inspector, where the user sets name/parent/flags via the exact same
+// affordances already used for every other object (rename pencil, flags
+// row, Parents "+").
+treeNewObjectBtn.onclick <-
+    fun _ -> sendAction [ "action" ==> "create-object"; "parentExpr" ==> "#-1" ]
 
 /// Turns the editor's current content into the line array `IdeActions.saveVerb`
 /// expects for its JSON `code` field.
