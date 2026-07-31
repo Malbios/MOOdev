@@ -3650,10 +3650,31 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef when activeTab = VerbTab(objRef, verb) && showingVerbHistory ->
                         let historicalCode = String.concat "\n" lines
+                        let currentCode = editor.getValue ()
                         currentHistoricalCode <- Some historicalCode
                         let diffEditor = getOrCreateHistoryDiffEditor ()
-                        Monaco.setDiffModel diffEditor historicalCode (editor.getValue ())
-                        verbHistoryRestoreBtn.setAttribute ("style", "")
+                        Monaco.setDiffModel diffEditor historicalCode currentCode
+
+                        // Nothing to restore when this historical version is
+                        // identical to what's already in the editor -
+                        // compared per line, ignoring leading/trailing
+                        // whitespace and CRLF/LF. Whitespace-insensitive,
+                        // not just CRLF-insensitive, because opening a verb
+                        // always reindents it to Monaco's own convention
+                        // (see `moodev-edit-content`'s own comment on why -
+                        // most of the live corpus has no indentation at
+                        // all), which very often does not match whatever
+                        // indentation style the historical exported version
+                        // happens to use - a purely cosmetic difference,
+                        // not a real content change, so it shouldn't make an
+                        // otherwise-identical version look "different".
+                        let normalizeForCompare (s: string) =
+                            s.Replace("\r\n", "\n").Split('\n') |> Array.map (fun l -> l.Trim()) |> String.concat "\n"
+
+                        if normalizeForCompare historicalCode = normalizeForCompare currentCode then
+                            verbHistoryRestoreBtn.setAttribute ("style", "display:none")
+                        else
+                            verbHistoryRestoreBtn.setAttribute ("style", "")
                     | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-search-result") then

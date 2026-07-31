@@ -25,7 +25,6 @@ kanban-plugin: board
 
 ## In Progress
 
-- [ ] [[make version history work]]
 
 
 ## Done
@@ -37,6 +36,7 @@ kanban-plugin: board
 - [ ] [[runtime error stream]]
 - [ ] [[Dead-verb finder]]
 - [ ] [[Static checks for the MOOcode gotchas]]
+- [ ] [[make version history work]]
 
 
 ## Removed
