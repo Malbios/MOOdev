@@ -40,7 +40,13 @@ type VerbDispatchResult =
       Prep: string
       Iobj: string
       Owner: ObjRef
-      OwnerName: string }
+      OwnerName: string
+      /// `verb_code(definer, verbName, 0, 1)` output, one MOO source line
+      /// per element - fetched alongside the rest of this record so hover
+      /// can lex/parse it for the leading doc comment and an auto-inferred
+      /// summary (`Handlers.hoverForResolvedVerbLive`) without a second
+      /// round trip.
+      Code: string list }
 
 /// One connection's worth of mutable state - a fresh one is created each
 /// time `ensureConnected` (re)connects, so a dropped/failed connection never
@@ -200,7 +206,11 @@ let create (wsUrl: string) : SidecarBridge =
                               Prep = root.GetProperty("prep").GetString()
                               Iobj = root.GetProperty("iobj").GetString()
                               Owner = root.GetProperty("owner").GetInt64()
-                              OwnerName = root.GetProperty("ownerName").GetString() }
+                              OwnerName = root.GetProperty("ownerName").GetString()
+                              Code =
+                                root.GetProperty("code").EnumerateArray()
+                                |> Seq.map (fun e -> e.GetString())
+                                |> List.ofSeq }
                 else
                     return None
         }

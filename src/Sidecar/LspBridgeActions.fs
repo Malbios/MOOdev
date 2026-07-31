@@ -67,7 +67,7 @@ let handleResolveVerbDispatch
         let verbLit = mooStringLiteral verbName
 
         let statements =
-            $"""found = 0; definer = #-1; def_names = ""; def_perms = ""; def_dobj = ""; def_prep = ""; def_iobj = ""; def_owner = #-1; def_ownername = ""; def_definername = "";
+            $"""found = 0; definer = #-1; def_names = ""; def_perms = ""; def_dobj = ""; def_prep = ""; def_iobj = ""; def_owner = #-1; def_ownername = ""; def_definername = ""; def_code = {{}};
 stack = {{#{startObj}}};
 while (!found && length(stack) > 0)
   candidate = stack[1];
@@ -93,6 +93,7 @@ while (!found && length(stack) > 0)
       def_dobj = va[1];
       def_prep = va[2];
       def_iobj = va[3];
+      def_code = verb_code(candidate, {verbLit}, 0, 1);
     else
       stack = {{@parents(candidate), @stack}};
     endif
@@ -100,12 +101,17 @@ while (!found && length(stack) > 0)
 endwhile"""
 
         let resultExpr =
-            """found ? ["found" -> 1, "definer" -> tostr(definer), "definername" -> def_definername, "names" -> def_names, "perms" -> def_perms, "dobj" -> def_dobj, "prep" -> def_prep, "iobj" -> def_iobj, "owner" -> tostr(def_owner), "ownername" -> def_ownername] | ["found" -> 0]"""
+            """found ? ["found" -> 1, "definer" -> tostr(definer), "definername" -> def_definername, "names" -> def_names, "perms" -> def_perms, "dobj" -> def_dobj, "prep" -> def_prep, "iobj" -> def_iobj, "owner" -> tostr(def_owner), "ownername" -> def_ownername, "code" -> def_code] | ["found" -> 0]"""
 
         let! json = evalRunner statements resultExpr ct
         let root = json.RootElement
 
         if root.GetProperty("found").GetInt32() = 1 then
+            let code =
+                root.GetProperty("code").EnumerateArray()
+                |> Seq.map (fun e -> e.GetString())
+                |> List.ofSeq
+
             let payload =
                 {| id = id
                    found = true
@@ -117,7 +123,8 @@ endwhile"""
                    prep = root.GetProperty("prep").GetString()
                    iobj = root.GetProperty("iobj").GetString()
                    owner = int64 (root.GetProperty("owner").GetString().TrimStart('#'))
-                   ownerName = root.GetProperty("ownername").GetString() |}
+                   ownerName = root.GetProperty("ownername").GetString()
+                   code = code |}
 
             return JsonSerializer.Serialize(payload)
         else

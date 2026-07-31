@@ -204,24 +204,6 @@ let private definerName (graph: Graph) (definer: ObjRef) : string =
 let private liveDisplayName (name: string) (objRef: ObjRef) : string =
     if name = "" then sprintf "#%d" objRef else sprintf "%s (#%d)" name objRef
 
-/// Hover body for a `VerbCall` resolved via `SidecarBridge.ResolveVerbDispatch`
-/// - the live equivalent of the old `hoverForResolvedVerb`, which took a
-/// static-graph `VerbNode` this project no longer builds for the resolved
-/// verb (see `Handlers.MooLspServer`'s `TextDocumentHover`/`TextDocumentDefinition`).
-let private hoverForResolvedVerbLive (verbName: string) (result: SidecarBridge.VerbDispatchResult) : Hover =
-    sprintf
-        "**%s** on `#%d (%s)`\n\nnames: `%s`  \nargs: `%s %s %s`  \nperms: `%s`  \nowner: `%s`"
-        verbName
-        result.Definer
-        (if result.DefinerName = "" then sprintf "#%d" result.Definer else result.DefinerName)
-        result.Names
-        result.Dobj
-        result.Prep
-        result.Iobj
-        result.Perms
-        (liveDisplayName result.OwnerName result.Owner)
-    |> mkHover
-
 /// `result.Names`'s primary (first-declared) name is what the client
 /// re-requests through the normal `ide_fetch` flow to actually jump there -
 /// not necessarily the alias the caller happened to use.
@@ -696,6 +678,266 @@ let private isZeroIndex (e: Expr) : bool =
 /// the task mid-iteration with no chance to yield first.
 let private loopBodyNeedsSuspend (body: Stmt list) : bool =
     body |> List.collect (stmtExprs false >> List.ofSeq) |> List.exists (existsInExpr isSuspendCall) |> not
+
+/// Every statement anywhere in `stmts`, at any nesting depth (including
+/// inside `fork`/`try` bodies) - same traversal shape as `allLoops` above,
+/// just unfiltered (every `Stmt` case is yielded, not only loops). Backs
+/// both the "can suspend" (any `Fork`) and "may return a value" (any
+/// `Return(Some _)`) facts `inferredVerbSummary` reports below.
+let rec private allStmtsDeep (stmts: Stmt list) : Stmt seq =
+    seq {
+        for s in stmts do
+            yield s
+
+            match s with
+            | If(arms, elsePart) ->
+                for _, b in arms do
+                    yield! allStmtsDeep b
+
+                match elsePart with
+                | Some b -> yield! allStmtsDeep b
+                | None -> ()
+            | ForList(_, _, _, b)
+            | ForRange(_, _, _, b)
+            | While(_, _, b)
+            | Fork(_, _, b) -> yield! allStmtsDeep b
+            | TryExcept(b, arms) ->
+                yield! allStmtsDeep b
+
+                for a in arms do
+                    yield! allStmtsDeep a.Body
+            | TryFinally(b, h) ->
+                yield! allStmtsDeep b
+                yield! allStmtsDeep h
+            | ExprStmt _
+            | Return _
+            | Break _
+            | Continue _
+            | ErrorStmt _ -> ()
+    }
+
+/// One inferred verb parameter, in whatever shape it was recovered as -
+/// `Ast.fs`'s `ScatterItem` for the `{who, ?what = 0, @rest} = args;` idiom
+/// (which already carries required/optional-with-default/rest for free), or
+/// a bare ordinal `args[N]` index for the `who = args[1];` fallback idiom.
+type private InferredParam =
+    | ReqParam of string
+    | OptParam of string * string option
+    | RestParam of string
+    | IndexParam of int * string
+
+/// Renders simple literal defaults (`?what = 0`, `?msg = ""`, ...) verbatim;
+/// anything more complex (an expression referencing another variable, a
+/// property, a call) is left as "no default text" rather than attempting a
+/// full expression pretty-printer, which doesn't exist in this project and
+/// is out of scope here (`verb_code`'s own indent=1 rendering is the only
+/// full-source pretty-printer this tooling has, and it operates MOO-side).
+let rec private exprBrief (e: Expr) : string option =
+    match e with
+    | IntLit n -> Some(string n)
+    | FloatLit f -> Some(string f)
+    | StrLit s -> Some(sprintf "\"%s\"" s)
+    | ObjLit n -> Some(sprintf "#%d" n)
+    | ErrLit s -> Some s
+    | Unary(Neg, inner) -> exprBrief inner |> Option.map (sprintf "-%s")
+    | _ -> None
+
+let private renderParam (p: InferredParam) : string =
+    match p with
+    | ReqParam name -> sprintf "`%s`" name
+    | OptParam(name, None) -> sprintf "`%s` (optional)" name
+    | OptParam(name, Some def) -> sprintf "`%s` (optional, default `%s`)" name def
+    | RestParam name -> sprintf "`@%s` (rest)" name
+    | IndexParam(n, name) -> sprintf "`%s` (args[%d])" name n
+
+/// Recovers a verb's parameter list from whichever of the two common
+/// "unpack `args`" idioms appears among the verb's **top-level** statements
+/// (not nested inside `if`/`for`/etc. - conditional/looped arg-unpacking
+/// isn't a pattern worth guessing at). The scatter-assignment idiom, when
+/// present, is authoritative for the whole list and wins outright; the
+/// `args[N]`-indexing idiom is only consulted as a fallback.
+let private inferredParams (stmts: Stmt list) : InferredParam list option =
+    let scatterFromArgs =
+        stmts
+        |> List.tryPick (function
+            | ExprStmt(Scatter(items, Ident("args", _, _))) ->
+                Some(
+                    items
+                    |> List.map (function
+                        | Required bn -> ReqParam bn.Name
+                        | Optional(bn, def) -> OptParam(bn.Name, def |> Option.bind exprBrief)
+                        | Rest bn -> RestParam bn.Name)
+                )
+            | _ -> None)
+
+    match scatterFromArgs with
+    | Some ps -> Some ps
+    | None ->
+        let indexed =
+            stmts
+            |> List.choose (function
+                | ExprStmt(Assign(Ident(name, _, _), Index(Ident("args", _, _), IntLit n))) -> Some(int n, name)
+                | _ -> None)
+            |> List.sortBy fst
+            |> List.map IndexParam
+
+        if List.isEmpty indexed then None else Some indexed
+
+/// Which of the three interesting `AstQuery.Reference` kinds a call/prop/
+/// verb-call reference is - unused `RefIdent`s (local variables, the 12
+/// implicit built-ins) are deliberately dropped, since a verb touches
+/// `this`/`player`/`args` near-universally and listing them would be noise,
+/// not signal.
+type private DepKind =
+    | DepProp
+    | DepVerb
+    | DepBuiltin
+
+/// Everything a verb's body references worth calling out as a dependency -
+/// reuses `AstQuery.collectReferences` wholesale rather than a fresh walk. A
+/// bare `Call` is always a builtin in MOOcode (there are no receiver-less
+/// user-defined functions), so no live-builtins lookup is needed to classify
+/// it.
+let private inferredDependencies (stmts: Stmt list) : (DepKind * string) list =
+    AstQuery.collectReferences stmts
+    |> List.choose (fun fr ->
+        match fr.Ref with
+        | AstQuery.RefProp(_, StrLit name) -> Some(DepProp, name)
+        | AstQuery.RefVerbCall(_, StrLit name, _) -> Some(DepVerb, name)
+        | AstQuery.RefCall(name, _) -> Some(DepBuiltin, name)
+        | _ -> None)
+    |> List.distinct
+
+/// Renders one dependency kind's line, e.g. "Properties: `foo`, `bar`" -
+/// capped at 8 names with an explicit "+N more" suffix rather than a silent
+/// truncation, `None` if this verb has none of this kind.
+let private renderDeps (kind: DepKind) (label: string) (deps: (DepKind * string) list) : string option =
+    let names =
+        deps |> List.choose (fun (k, n) -> if k = kind then Some n else None) |> List.distinct |> List.sort
+
+    match names with
+    | [] -> None
+    | _ ->
+        let shown, extra =
+            if List.length names > 8 then names |> List.truncate 8, List.length names - 8 else names, 0
+
+        let suffix = if extra > 0 then sprintf ", +%d more" extra else ""
+        Some(sprintf "%s: %s%s" label (shown |> List.map (sprintf "`%s`") |> String.concat ", ") suffix)
+
+/// Whether this verb ever suspends the current task - either directly
+/// (`suspend()`, reusing the exact `stmtExprs true` + `existsInExpr
+/// isSuspendCall` idiom `findGotchas`'s own unbounded-loop check already
+/// uses) or by forking a separate task (`Fork` is a `Stmt`, not an `Expr`,
+/// so `existsInExpr` alone can never see it - `allStmtsDeep` covers that
+/// case).
+let private canSuspend (stmts: Stmt list) : bool =
+    (stmts |> List.collect (stmtExprs true >> List.ofSeq) |> List.exists (existsInExpr isSuspendCall))
+    || (allStmtsDeep stmts |> Seq.exists (function Fork _ -> true | _ -> false))
+
+/// Existence check only, not a full control-flow proof that *every* path
+/// returns a value - a bare `return;`/falling off the end both implicitly
+/// yield 0 either way, so this only looks for at least one `return <expr>;`
+/// anywhere in the body worth mentioning.
+let private mayReturnValue (stmts: Stmt list) : bool =
+    allStmtsDeep stmts |> Seq.exists (function Return(Some _) -> true | _ -> false)
+
+/// Auto-inferred documentation summary for a user-authored verb, derived
+/// entirely from its own AST (no authoring convention required) - the
+/// primary half of the "self-documenting code" hover feature; a verb's own
+/// leading `/* ... */` comment (captured by `Language.Lexer.tokenize`, see
+/// `LexResult.LeadingComment`) is the supplementary half, appended
+/// separately by the caller. `None` when none of the four facts below found
+/// anything worth reporting. Deliberately not `private`, same reasoning as
+/// `findGotchas` below - unit tests call this directly against hand-built
+/// ASTs rather than only exercising it through the live hover path.
+let inferredVerbSummary (stmts: Stmt list) : string option =
+    let paramsLine =
+        inferredParams stmts
+        |> Option.map (fun ps -> sprintf "Parameters: %s" (ps |> List.map renderParam |> String.concat ", "))
+
+    let deps = inferredDependencies stmts
+
+    let depLines =
+        [ renderDeps DepProp "Properties" deps
+          renderDeps DepVerb "Verb calls" deps
+          renderDeps DepBuiltin "Builtins" deps ]
+        |> List.choose id
+
+    let suspendLine =
+        if canSuspend stmts then Some "Can suspend (calls `suspend()` or forks a task)" else None
+
+    let returnsLine = if mayReturnValue stmts then Some "May return a value" else None
+
+    let lines =
+        [ yield! Option.toList paramsLine
+          yield! depLines
+          yield! Option.toList suspendLine
+          yield! Option.toList returnsLine ]
+
+    if List.isEmpty lines then
+        None
+    else
+        Some(sprintf "**Inferred:**\n%s" (lines |> List.map (sprintf "- %s") |> String.concat "\n"))
+
+/// A bare string-literal statement as the very first thing in a verb body
+/// (`"Does a thing.";`) - a MOOcode "docstring" idiom, the supplementary
+/// half of the self-documenting-code hover feature. Deliberately NOT a
+/// `/* ... */` block comment: confirmed live that `verb_code()` reconstructs
+/// source from the *compiled* verb program, and comments are discarded by
+/// the lexer before the parser (and therefore the compiled program) ever
+/// sees them - a real block comment can never survive a save/re-fetch round
+/// trip. A bare string-literal expression statement, by contrast, is a
+/// genuine (if inert) AST node, so it round-trips through `set_verb_code()`/
+/// `verb_code()` exactly like any other statement. Deliberately not
+/// `private`, same reasoning as `inferredVerbSummary` above - unit tests
+/// call this directly.
+let leadingDocString (stmts: Stmt list) : string option =
+    match stmts with
+    | ExprStmt(StrLit s) :: _ when s <> "" -> Some s
+    | _ -> None
+
+/// Hover body for a `VerbCall` resolved via `SidecarBridge.ResolveVerbDispatch`
+/// - the live equivalent of the old `hoverForResolvedVerb`, which took a
+/// static-graph `VerbNode` this project no longer builds for the resolved
+/// verb (see `Handlers.MooLspServer`'s `TextDocumentHover`/`TextDocumentDefinition`).
+/// Also lexes/parses `result.Code` (fetched live alongside the rest of this
+/// record, see `SidecarBridge.VerbDispatchResult.Code`) to append an
+/// auto-inferred summary plus any leading docstring statement - the
+/// "self-documenting code" hover feature, extending the same treatment
+/// `builtinHoverText` already gives builtins to user-authored verbs.
+/// Degrades cleanly to just the metadata above (no extra section at all)
+/// when `Code` is empty or fails to lex - never an error, matching every
+/// other graceful miss in this dispatcher.
+let private hoverForResolvedVerbLive (verbName: string) (result: SidecarBridge.VerbDispatchResult) : Hover =
+    let baseText =
+        sprintf
+            "**%s** on `#%d (%s)`\n\nnames: `%s`  \nargs: `%s %s %s`  \nperms: `%s`  \nowner: `%s`"
+            verbName
+            result.Definer
+            (if result.DefinerName = "" then sprintf "#%d" result.Definer else result.DefinerName)
+            result.Names
+            result.Dobj
+            result.Prep
+            result.Iobj
+            result.Perms
+            (liveDisplayName result.OwnerName result.Owner)
+
+    let extraSections =
+        if List.isEmpty result.Code then
+            []
+        else
+            let lexResult = Language.Lexer.tokenize (result.Code |> String.concat "\n")
+
+            match lexResult.Error with
+            | Some _ -> []
+            | None ->
+                let stmts = Language.Parser.parse lexResult.Tokens
+
+                [ inferredVerbSummary stmts
+                  leadingDocString stmts |> Option.map (sprintf "**Comment:**\n%s") ]
+                |> List.choose id
+
+    (baseText :: extraSections) |> String.concat "\n\n" |> mkHover
 
 /// One of the three catalogued "MOOcode gotchas" (the project plan's own
 /// MOOcode gotchas section) `findGotchas` checks for, exhaustively across

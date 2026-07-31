@@ -9,7 +9,6 @@ kanban-plugin: board
 - [ ] [[permission inheritance visualizer]]
 - [ ] [[verb-level test harness]]
 - [ ] [[Live diagnostics]]
-- [ ] [[Doc comment convention support]]
 - [ ] [[Rename symbol refactor]]
 - [ ] [[Command palette jump-to-anything]]
 - [ ] [[Structured property editor]]
@@ -37,6 +36,7 @@ kanban-plugin: board
 - [ ] [[Static checks for the MOOcode gotchas]]
 - [ ] [[make version history work]]
 - [ ] some kind of in-IDE documentation of MOOcode in general and more specifically all built-ins
+- [ ] [[Doc comment convention support]]
 
 
 ## Removed

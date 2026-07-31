@@ -235,7 +235,15 @@ let private fakeBridge: SidecarBridge =
                               Prep = foundVerb.Meta.Prep
                               Iobj = foundVerb.Meta.Iobj
                               Owner = foundVerb.Meta.Owner
-                              OwnerName = bareNameFor foundVerb.Meta.Owner }
+                              OwnerName = bareNameFor foundVerb.Meta.Owner
+                              // Empty on purpose - this fake resolves from
+                              // the static graph, which doesn't carry raw
+                              // source text; hover's new auto-inferred
+                              // section degrades cleanly to "nothing to add"
+                              // when `Code` is empty (see
+                              // `hoverForResolvedVerbLive`), so every
+                              // existing assertion below is unaffected.
+                              Code = [] }
                 | None -> return None
             }
       GetBuiltins = fun () -> task { return graph.Value.Builtins } }
