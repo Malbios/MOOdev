@@ -74,10 +74,16 @@ sidecar owns all of that from the outside via `eval()`.
 
 - **Dev/play world** — `ToastStunt\run\survive.db` / `survive.db.new`, FileIO rooted at the real
   `C:\dev\moo-code\Survive` repo. Launched by `test.ps1 -Database Survive` (also the default with no
-  `-Database` flag) in a visible window. On clean shutdown (in-game `;shutdown();`, or a graceful
+  `-Database` flag) in a visible window. On clean shutdown (in-game `;;shutdown();`, or a graceful
   `SIGTERM`/Ctrl+C — the wrapping script runs once the `wsl` command returns, however it exited),
   `survive.db.new` is promoted over `survive.db`, so the next launch continues from where you left
-  off. This is the only path that ever writes to the real `Survive` repo.
+  off. This is the only path that ever writes to the real `Survive` repo. **Note the double
+  semicolon** - a bare `;shutdown();` silently does nothing on this world: a single leading `;` is
+  ToastStunt's "eval" command alias (`parse_cmd.cc`), which needs a real `eval` verb to dispatch to
+  (ToastCore ships one; this `Minimal.db`-derived world never installed one) - confirmed live via
+  the same root cause as `test-instance-stop.ps1`'s own fix (see its own comment). The `;;` this
+  world's `#0:do_command` bootstrap verb recognizes (see "Bootstrap verbs" below) is what actually
+  reaches `eval()` here.
 - **Automated test instance** — `survive.test.db` (a fresh copy of `survive.db` taken at start),
   FileIO rooted at a throwaway scratch repo (`C:\dev\moo-code\SurviveTestScratch`, `git init`'d once and
   reused — its history is never inspected). Started/stopped headlessly (no visible window) via
