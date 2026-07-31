@@ -8,6 +8,7 @@ kanban-plugin: board
 
 - [ ] [[Configurable MOO server target]]
 	#UI/UX #Server #Complex
+- [ ] Colorize the tree-view
 - [ ] [[Rename symbol refactor]]
 	#Acceleration
 - [ ] [[Task tick_seconds usage]]
@@ -58,8 +59,6 @@ kanban-plugin: board
 	#Acceleration
 - [ ] [[Verb call-graph visualization]]
 	#UI/UX #Acceleration
-- [ ] [[Recycle-object safety precheck]]
-	#UI/UX
 - [ ] [[Inlay hints for call-site arguments]]
 	#Acceleration
 - [ ] [[Tab-session restore across reload]]
@@ -83,6 +82,7 @@ kanban-plugin: board
 - [ ] some kind of in-IDE documentation of MOOcode in general and more specifically all built-ins
 - [ ] [[Doc comment convention support]]
 - [ ] better "new object" UI
+- [ ] [[Recycle-object safety precheck]]
 
 
 ## Removed

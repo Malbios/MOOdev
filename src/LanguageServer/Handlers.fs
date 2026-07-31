@@ -53,6 +53,20 @@ type DeadVerbEntry =
       Iobj: string
       PossiblyDynamic: bool }
 
+/// One reference `FindReferencesToObject` found to a candidate recycle
+/// target - used by the recycle-safety precheck (see `findReferencesToObject`
+/// below for what each `Kind` means and what this deliberately doesn't
+/// cover).
+type ObjectReferenceEntry =
+    { Kind: string // "verb-call" | "object-owner" | "verb-owner" | "property-owner"
+      ObjRef: ObjRef // the object doing the referencing (for verb-owner/property-owner, the object the verb/property is defined on)
+      Detail: string } // call/verb/property name; "" for object-owner
+
+/// `moodev/findReferencesToObject`'s params - the one custom method so far
+/// that actually takes any (every other `moodev/*` method is a no-params
+/// corpus-wide scan).
+type FindReferencesToObjectParams = { ObjRef: ObjRef }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
@@ -555,6 +569,54 @@ let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
                       PossiblyDynamic = possiblyDynamic }
             | _ -> None))
     |> Array.ofSeq
+
+/// Recycle-safety precheck: every statically-confirmable reference to
+/// `target` before it's recycled, corpus-wide. Two kinds, both reusing
+/// existing static-graph machinery rather than a new live MOO query:
+/// - `"verb-call"` - a `VerbCall` somewhere whose receiver resolves (via
+///   `resolveReceiverInContext`, the same resolver `computeReferenceResolution`
+///   uses) to `target` - recycling would leave that call site dispatching to
+///   a nonexistent object.
+/// - `"object-owner"`/`"verb-owner"`/`"property-owner"` - `target` owns the
+///   object/verb/property in question; recycling would leave that ownership
+///   record dangling.
+/// Deliberately doesn't cover: parent/child links (the recycle confirm
+/// dialog already warns about those via child count - see `App.fs`'s
+/// `recycleBtn`), or property *values* that happen to store `#target` (e.g.
+/// `$room.exits` containing it) - the static `Graph` only carries property
+/// *metadata*, never live values, so that would need a new live MOO scan
+/// with no existing pattern to reuse. Public, not `private` (like
+/// `findDeadVerbs` above), so `LanguageServer.Tests` can call it directly.
+let findReferencesToObject (graph: Graph) (target: ObjRef) : ObjectReferenceEntry[] =
+    let verbCallRefs =
+        allVerbCallReferences graph
+        |> Seq.choose (fun (containingObj, _, r) ->
+            match r.Ref with
+            | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
+                match Metadata.Resolver.resolveReceiverInContext graph containingObj receiver with
+                | Some receiverStart when receiverStart = target ->
+                    Some { Kind = "verb-call"; ObjRef = containingObj; Detail = callName }
+                | _ -> None
+            | _ -> None)
+
+    let ownershipRefs =
+        graph.Objects
+        |> Map.toSeq
+        |> Seq.collect (fun (num, o) ->
+            seq {
+                if o.Owner = Some target then
+                    yield { Kind = "object-owner"; ObjRef = num; Detail = "" }
+
+                for v in o.Verbs do
+                    if v.Meta.Owner = target then
+                        yield { Kind = "verb-owner"; ObjRef = num; Detail = (v.Meta.Names |> List.tryHead |> Option.defaultValue "") }
+
+                for p in o.Properties do
+                    if p.Owner = target then
+                        yield { Kind = "property-owner"; ObjRef = num; Detail = p.Name }
+            })
+
+    Seq.append verbCallRefs ownershipRefs |> Array.ofSeq
 
 /// True if `pred` matches `e` or any expression nested anywhere inside it -
 /// exhaustive over every `Expr` case (no wildcard arm) so adding a new AST
@@ -1447,6 +1509,12 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// at a time via `TextDocumentReferences`.
     member _.FindDeadVerbs(_p: obj) : Async<Result<DeadVerbEntry[], JsonRpc.Error>> =
         async { return Ok(findDeadVerbs graph) }
+
+    /// Custom method (`moodev/findReferencesToObject`, `{objRef}`) - the
+    /// recycle-safety precheck report for one candidate object: every
+    /// reference `findReferencesToObject` can confirm statically.
+    member _.FindReferencesToObject(p: FindReferencesToObjectParams) : Async<Result<ObjectReferenceEntry[], JsonRpc.Error>> =
+        async { return Ok(findReferencesToObject graph p.ObjRef) }
 
     /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
     /// gotchas" static-check report: every verb `findGotchas` flags for a

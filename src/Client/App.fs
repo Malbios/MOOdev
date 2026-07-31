@@ -1704,20 +1704,53 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     recycleBtn.onclick <-
         fun _ ->
-            let childCount: int = (unbox info?children: obj[]).Length
-            let name: string = info?name
+            async {
+                // Recycle-safety precheck: every reference `findReferencesToObject`
+                // can confirm statically (verb-call receivers, ownership links) -
+                // see its own doc comment for what this deliberately doesn't cover
+                // (property values, most notably). Fetched fresh on every click
+                // rather than cached, since it's a rare, deliberate action, not
+                // something worth a round-trip on every inspector view.
+                let! refs = LspClient.findReferencesToObjectAsync objRef
 
-            let warning =
-                if childCount > 0 then
-                    sprintf
-                        "Recycle %s? This object has %d child object(s), which will be reparented onto its own parent. This cannot be undone."
-                        name
-                        childCount
-                else
-                    sprintf "Recycle %s? This cannot be undone." name
+                let childCount: int = (unbox info?children: obj[]).Length
+                let name: string = info?name
 
-            if window.confirm warning then
-                sendAction [ "action" ==> "recycle-object"; "obj" ==> int objRef ]
+                let childWarning =
+                    if childCount > 0 then
+                        sprintf
+                            " This object has %d child object(s), which will be reparented onto its own parent."
+                            childCount
+                    else
+                        ""
+
+                let refWarning =
+                    if Array.isEmpty refs then
+                        ""
+                    else
+                        let shown, extraCount =
+                            if refs.Length > 5 then Array.truncate 5 refs, refs.Length - 5 else refs, 0
+
+                        let items =
+                            shown
+                            |> Array.map (fun (kind, o, detail) ->
+                                sprintf "%s on #%d%s" kind o (if detail = "" then "" else sprintf " (%s)" detail))
+                            |> String.concat ", "
+
+                        let extraSuffix = if extraCount > 0 then sprintf ", +%d more" extraCount else ""
+
+                        sprintf
+                            " Also found %d likely reference(s): %s%s. (Best-effort - based on the last exported snapshot, doesn't catch every case such as property values.)"
+                            refs.Length
+                            items
+                            extraSuffix
+
+                let warning = sprintf "Recycle %s?%s%s This cannot be undone." name childWarning refWarning
+
+                if window.confirm warning then
+                    sendAction [ "action" ==> "recycle-object"; "obj" ==> int objRef ]
+            }
+            |> Async.StartImmediate
 
     header.appendChild recycleBtn |> ignore
     inspectorContentEl.appendChild header |> ignore

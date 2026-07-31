@@ -202,6 +202,23 @@ let findDeadVerbsAsync () : Async<(int64 * string * string * string * string * b
                     (o?possiblyDynamic: bool))
     }
 
+/// Custom method (`moodev/findReferencesToObject`, `{objRef}`) - the
+/// recycle-safety precheck: every reference `Handlers.findReferencesToObject`
+/// can confirm statically for one candidate object (matches
+/// `Handlers.MooLspServer.FindReferencesToObject`). `kind` is one of
+/// `"verb-call"`/`"object-owner"`/`"verb-owner"`/`"property-owner"`; `detail`
+/// is the call/verb/property name, `""` for `"object-owner"`.
+let findReferencesToObjectAsync (objRef: int64) : Async<(string * int64 * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findReferencesToObject" (createObj [ "objRef" ==> float objRef ])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+            return items |> Array.map (fun o -> (o?kind: string), int64 (o?objRef: float), (o?detail: string))
+    }
+
 /// Custom method (`moodev/findGotchas`, no params) - manually triggered
 /// corpus-wide "MOOcode gotchas" static-check scan (matches
 /// `Handlers.MooLspServer.FindGotchas`/`Handlers.findGotchas`). `kind` is
