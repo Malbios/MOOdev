@@ -8,12 +8,18 @@ kanban-plugin: board
 
 - [ ] [[Rename symbol refactor]]
 	#Acceleration
-- [ ] [[Task tick_seconds usage]]
-	#Server #UI/UX
+- [ ] [[Tab-session restore across reload]]
+	#UI/UX
+- [ ] [[Global content search (live tree, not history)]]
+	#Acceleration #UI/UX
+- [ ] [[Property-level dead-reference finder]]
+	#UI/UX
+- [ ] [[Inlay hints for call-site arguments]]
+	#Acceleration
 - [ ] [[Unit Testing for MOOcode]]
 	#Complex
-- [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
-	#UI/UX
+- [ ] [[Task tick_seconds usage]]
+	#Server #UI/UX
 - [ ] [[Command palette jump-to-anything]]
 	#UI/UX
 - [ ] [[permission inheritance visualizer]]
@@ -28,8 +34,6 @@ kanban-plugin: board
 	#UI/UX
 - [ ] [[Verb outline breadcrumb view]]
 	#UI/UX
-- [ ] [[Global content search (live tree, not history)]]
-	#Acceleration #UI/UX
 - [ ] [[Snippet scaffold insertion]]
 	#UI/UX #Acceleration
 - [ ] [[Waif and anonymous-object visibility]]
@@ -42,13 +46,9 @@ kanban-plugin: board
 	#Complex
 - [ ] [[Step debugger for MOOcode tasks]]
 	#Acceleration #UI/UX
-- [ ] [[Property-level dead-reference finder]]
-	#UI/UX
 - [ ] [[Code folding]]
 	#UI/UX
 - [ ] [[Auto-formatter]]
-	#UI/UX
-- [ ] [[Eval scratchpad panel]]
 	#UI/UX
 - [ ] [[Call-site arg-spec mismatch checker]]
 	#Acceleration
@@ -56,10 +56,6 @@ kanban-plugin: board
 	#Acceleration
 - [ ] [[Verb call-graph visualization]]
 	#UI/UX #Acceleration
-- [ ] [[Inlay hints for call-site arguments]]
-	#Acceleration
-- [ ] [[Tab-session restore across reload]]
-	#UI/UX
 
 
 ## In Progress
@@ -83,6 +79,8 @@ kanban-plugin: board
 - [ ] Colorize the tree-view
 - [ ] [[Configurable MOO server target]]
 	#UI/UX #Server #Complex
+- [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
+- [ ] [[Eval scratchpad panel]]
 
 
 ## Removed

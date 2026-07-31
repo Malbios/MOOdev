@@ -70,6 +70,7 @@ let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
 let private viewDocsBtn = document.getElementById ("view-docs")
+let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -86,7 +87,6 @@ let private treeColorRulesListEl = document.getElementById ("tree-color-rules-li
 
 let private treeListEl = document.getElementById ("tree-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
-let private sidebarToggleBtn = document.getElementById ("sidebar-toggle")
 
 let private mainTabsEl = document.getElementById ("main-tabs")
 let private tabGameBtn = document.getElementById ("tab-game")
@@ -125,6 +125,9 @@ let private sidebarViewDocsEl = document.getElementById ("sidebar-view-docs")
 let private docsSearchInputEl = document.getElementById ("docs-search-input") :?> HTMLInputElement
 let private docsListEl = document.getElementById ("docs-list")
 let private docsDetailEl = document.getElementById ("docs-detail")
+let private sidebarViewScratchpadEl = document.getElementById ("sidebar-view-scratchpad")
+let private scratchpadInputEl = document.getElementById ("scratchpad-input") :?> HTMLInputElement
+let private scratchpadResultEl = document.getElementById ("scratchpad-result")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -241,10 +244,15 @@ module private PaneResizer =
 /// `!important` overrides `PaneResizer`'s inline `flex` style while active,
 /// so removing the class snaps straight back to whatever width was set
 /// before. Persisted across reloads the same way as everything else here.
+/// No dedicated toggle button - triggered by clicking the activity bar's own
+/// already-active view icon again (see `onActivityBtnClick`), matching VS
+/// Code's own activity-bar behavior.
 module private Sidebar =
     let private collapsedKey = "moodev-sidebar-collapsed"
 
-    let private apply (collapsed: bool) : unit =
+    let isCollapsed () : bool = sidebarEl.classList.contains "collapsed"
+
+    let setCollapsed (collapsed: bool) : unit =
         if collapsed then
             sidebarEl.classList.add "collapsed"
             sidebarResizerEl.classList.add "collapsed"
@@ -252,19 +260,9 @@ module private Sidebar =
             sidebarEl.classList.remove "collapsed"
             sidebarResizerEl.classList.remove "collapsed"
 
-        sidebarToggleBtn.textContent <- (if collapsed then "▶" else "◀")
-        sidebarToggleBtn.setAttribute ("title", (if collapsed then "Show sidebar" else "Hide sidebar"))
+        window.localStorage.setItem (collapsedKey, (if collapsed then "1" else "0"))
 
-    let init () : unit =
-        apply (window.localStorage.getItem collapsedKey = "1")
-
-        sidebarToggleBtn.onmousedown <- fun ev -> ev.stopPropagation () |> ignore
-
-        sidebarToggleBtn.onclick <-
-            fun _ ->
-                let collapsed = not (sidebarEl.classList.contains "collapsed")
-                window.localStorage.setItem (collapsedKey, (if collapsed then "1" else "0"))
-                apply collapsed
+    let init () : unit = setCollapsed (window.localStorage.getItem collapsedKey = "1")
 
 /// Remembers the last-used player name/password in localStorage so a
 /// returning visit can log straight back in, instead of retyping "connect
@@ -505,6 +503,7 @@ type private SidebarView =
     | DeadVerbsView
     | GotchasView
     | DocsView
+    | EvalScratchpadView
 
 let mutable private activeSidebarView: SidebarView = TreeView
 
@@ -832,7 +831,7 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
 
-/// The seven mutually-exclusive views under `#sidebar` - same `activateOnly`
+/// The eight mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
 let private allSidebarViews =
     [ sidebarViewTreeEl
@@ -841,7 +840,8 @@ let private allSidebarViews =
       sidebarViewErrorsEl
       sidebarViewDeadVerbsEl
       sidebarViewGotchasEl
-      sidebarViewDocsEl ]
+      sidebarViewDocsEl
+      sidebarViewScratchpadEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -2767,6 +2767,10 @@ and private switchToSidebarView (view: SidebarView) : unit =
                 renderDocsList (docsSearchInputEl.value)
             }
             |> Async.StartImmediate
+    | EvalScratchpadView ->
+        // Nothing to load - the result area only ever shows the last
+        // expression's own outcome, not something fetched per-view-switch.
+        activateOnlySidebarView sidebarViewScratchpadEl
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -2775,7 +2779,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewErrorsBtn, ErrorsView
           viewDeadVerbsBtn, DeadVerbsView
           viewGotchasBtn, GotchasView
-          viewDocsBtn, DocsView ] do
+          viewDocsBtn, DocsView
+          viewScratchpadBtn, EvalScratchpadView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -3490,15 +3495,43 @@ outputEl.onclick <-
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
 
-viewTreeBtn.onclick <- fun _ -> switchToSidebarView TreeView
-viewHistoryBtn.onclick <- fun _ -> switchToSidebarView HistoryView
-viewTasksBtn.onclick <- fun _ -> switchToSidebarView TasksView
-viewErrorsBtn.onclick <- fun _ -> switchToSidebarView ErrorsView
-viewDeadVerbsBtn.onclick <- fun _ -> switchToSidebarView DeadVerbsView
-viewGotchasBtn.onclick <- fun _ -> switchToSidebarView GotchasView
-viewDocsBtn.onclick <- fun _ -> switchToSidebarView DocsView
+// Clicking the already-active view's own icon collapses the sidebar
+// instead of (pointlessly) re-switching to the view already showing -
+// clicking a *different* icon un-collapses first if needed, so the newly
+// chosen view is actually visible. Matches VS Code's own activity-bar
+// behavior - the dedicated collapse/expand button this replaced is gone
+// entirely (see `Sidebar` module's own comment).
+let private onActivityBtnClick (view: SidebarView) : unit =
+    if activeSidebarView = view && not (Sidebar.isCollapsed ()) then
+        Sidebar.setCollapsed true
+    else
+        if Sidebar.isCollapsed () then
+            Sidebar.setCollapsed false
+
+        switchToSidebarView view
+
+viewTreeBtn.onclick <- fun _ -> onActivityBtnClick TreeView
+viewHistoryBtn.onclick <- fun _ -> onActivityBtnClick HistoryView
+viewTasksBtn.onclick <- fun _ -> onActivityBtnClick TasksView
+viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
+viewDeadVerbsBtn.onclick <- fun _ -> onActivityBtnClick DeadVerbsView
+viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
+viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
+viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
+
+/// Runs whatever's typed in the "Eval scratchpad" input as a MOO
+/// expression - see `IdeActions.evalScratchpad`'s own comment for how the
+/// result gets reported.
+let private runScratchpadEval () : unit =
+    let expr = scratchpadInputEl.value.Trim()
+
+    if expr <> "" then
+        scratchpadResultEl.textContent <- "Running..."
+        sendAction [ "action" ==> "eval-scratchpad"; "expr" ==> expr ]
+
+scratchpadInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runScratchpadEval ()
 
 errorsClearBtn.onclick <-
     fun _ ->
@@ -4219,6 +4252,9 @@ ws.onmessage <-
                     if activeSidebarView = TasksView then loadTasks ()
                 elif not (Array.isEmpty lines) then
                     window.alert (String.concat "\n" lines)
+            elif header.StartsWith("moodev-scratchpad-result") then
+                let ok = headerField "ok: " header = Some "1"
+                scratchpadResultEl.textContent <- (if ok then "" else "Error: ") + String.concat "\n" lines
             elif header.StartsWith("moodev-error") then
                 // Unsolicited push from `#0:handle_uncaught_error`/
                 // `handle_task_timeout` (see moo-dev/CLAUDE.md's bootstrap

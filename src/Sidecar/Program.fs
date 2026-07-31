@@ -533,6 +533,9 @@ let private buildTryDispatch
                 | "kill-task" ->
                     do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
                     return true
+                | "eval-scratchpad" ->
+                    do! IdeActions.evalScratchpad session webSocket (getStr "expr") ct
+                    return true
                 | "checkpoint" ->
                     do! IdeActions.checkpoint config webSocket ct
                     return true

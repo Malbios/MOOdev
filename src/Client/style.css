@@ -159,10 +159,6 @@ html, body {
   cursor: col-resize;
 }
 
-#sidebar-resizer {
-  position: relative;
-}
-
 .resizer-updown {
   height: 6px;
   cursor: row-resize;
@@ -411,25 +407,6 @@ html, body {
 }
 
 .tree-icon-object {
-  color: #6cf;
-}
-
-.sidebar-toggle-btn {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  background: none;
-  border: none;
-  color: #999;
-  cursor: pointer;
-  padding: 0.3em 0.4em;
-  font-family: inherit;
-  font-size: 0.9em;
-  line-height: 1;
-}
-
-.sidebar-toggle-btn:hover {
   color: #6cf;
 }
 
@@ -698,6 +675,21 @@ html, body {
 .docs-detail-description {
   white-space: pre-wrap;
   line-height: 1.4;
+}
+
+/* --- Eval scratchpad view ----------------------------------------------- */
+
+#sidebar-view-scratchpad {
+  padding: 0.8em 1em;
+}
+
+#scratchpad-result {
+  margin: 0.6em 0 0;
+  padding: 0.6em;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  white-space: pre-wrap;
+  overflow-y: auto;
 }
 
 /* --- Object inspector ------------------------------------------------- */

@@ -1380,6 +1380,51 @@ let killTask (webSocket: WebSocket) (session: Session) (taskId: int64) (ct: Canc
                 ct
     }
 
+/// The "Eval scratchpad" panel's one action: evaluates an arbitrary,
+/// caller-typed MOO expression and reports its value, independent of
+/// notify()-based terminal output (unlike the Game tab's own command
+/// input, which is raw terminal pass-through with no structured response).
+/// Same `eval("return " + <literal> + ";")` precedent `setProperty` already
+/// uses for an arbitrary expression string, over the browser's own session
+/// (`evalOnSession`, not a new `MooEval` connection - a second wizard login
+/// would kick this very session, exactly the bug the "Configurable MOO
+/// server target" feature's own `reconfigure-target` action hit and fixed).
+/// Reports the value via `tostr()`, not `generate_json()` - some MOO value
+/// types (WAIF, ANON) aren't safely JSON-renderable, while `tostr()` never
+/// throws and reads as the same literal syntax MOO programmers already
+/// write, a better fit for "show me the value" than forcing a JSON tree.
+let evalScratchpad (session: Session) (webSocket: WebSocket) (expr: string) (ct: CancellationToken) : Task<unit> =
+    task {
+        let exprLit = "\"" + expr.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""ok = 0; errtext = ""; resulttext = "";
+try
+  result = eval("return " + {exprLit} + ";");
+  if (result[1])
+    resulttext = tostr(result[2]);
+    ok = 1;
+  else
+    errtext = "parse error";
+  endif
+except err (ANY)
+  errtext = tostr(err[2]);
+endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "result" -> resulttext, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let resultText = root.GetProperty("result").GetString()
+        let errtext = root.GetProperty("errtext").GetString()
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-scratchpad-result ok: %d" (if ok then 1 else 0))
+                [ (if ok then resultText else errtext) ]
+                ct
+    }
+
 /// The inspector's sole source of structural data (owner, flags,
 /// parents/children, verbs, properties) - always live, never a static
 /// export, so it reflects edits made moments ago. Owner/parent/child refs

@@ -63,6 +63,7 @@
       <button id="view-dead-verbs" class="activity-btn" title="Find dead verbs" aria-label="Find dead verbs">🔎</button>
       <button id="view-gotchas" class="activity-btn" title="MOOcode gotchas" aria-label="MOOcode gotchas">🐛</button>
       <button id="view-docs" class="activity-btn" title="MOOcode docs" aria-label="MOOcode docs">📖</button>
+      <button id="view-scratchpad" class="activity-btn" title="Eval scratchpad" aria-label="Eval scratchpad">🧮</button>
     </div>
     <div id="sidebar">
       <div id="sidebar-view-tree" class="sidebar-view">
@@ -115,10 +116,12 @@
         <ul id="docs-list" class="picker-list"></ul>
         <div id="docs-detail"></div>
       </div>
+      <div id="sidebar-view-scratchpad" class="sidebar-view">
+        <input id="scratchpad-input" type="text" class="sidebar-filter" placeholder="MOO expression, e.g. #123.location" autocomplete="off" spellcheck="false" />
+        <pre id="scratchpad-result"></pre>
+      </div>
     </div>
-    <div id="sidebar-resizer" class="resizer resizer-leftright">
-      <button id="sidebar-toggle" class="sidebar-toggle-btn" title="Hide sidebar">◀</button>
-    </div>
+    <div id="sidebar-resizer" class="resizer resizer-leftright"></div>
     <div id="main-pane">
       <div id="main-tabs">
         <button id="tab-game" class="main-tab pinned">Game</button>
