@@ -1593,9 +1593,18 @@ let private resolveVerbPath
     task {
         let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
 
-        match Map.tryFind objRef corponymsByObjnum with
+        // #0 (System Object) is always versioned regardless of corponym -
+        // FORMAT.md §1's exception, directory "0" - matching
+        // `exportAndCommitObject`'s own special case. Without this, a #0
+        // verb saves and commits fine (that path already handles it) but
+        // history/search could never find it again: #0 never appears in
+        // `corponymsByObjnum`, so the lookup below would always report
+        // "not tracked" for it.
+        let dirNameOpt = if objRef = 0L then Some "0" else Map.tryFind objRef corponymsByObjnum
+
+        match dirNameOpt with
         | None -> return None
-        | Some name ->
+        | Some dirName ->
             let! dataOpt = Exporter.getObjectExport evalRunner objRef ct
 
             match dataOpt with
@@ -1606,7 +1615,7 @@ let private resolveVerbPath
                 match verbFileNames |> List.tryFind (fun (v, _) -> v.Names.Split(' ') |> Array.contains verbName) with
                 | None -> return None
                 | Some(_, fileName) ->
-                    return Some(name, System.IO.Path.Combine("objects", name, "verbs", fileName).Replace('\\', '/'))
+                    return Some(dirName, System.IO.Path.Combine("objects", dirName, "verbs", fileName).Replace('\\', '/'))
     }
 
 /// `verb-history {obj, verb}` - Q1/Q2's "what did this look like before" /
