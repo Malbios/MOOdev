@@ -30,6 +30,27 @@
         <button id="setting-forget-login">Forget saved login</button>
         <span id="setting-forget-login-status"></span>
       </div>
+      <div class="settings-section-title">MOO server target</div>
+      <label class="settings-row">
+        Host
+        <input type="text" id="setting-moo-host" spellcheck="false" />
+      </label>
+      <label class="settings-row">
+        Port
+        <input type="number" id="setting-moo-port" min="1" max="65535" />
+      </label>
+      <label class="settings-row">
+        LSP bridge port
+        <input type="number" id="setting-moo-lsp-bridge-port" min="1" max="65535" />
+      </label>
+      <label class="settings-row">
+        Content tree
+        <input type="text" id="setting-moo-tree-dir" spellcheck="false" />
+      </label>
+      <div class="settings-row">
+        <button id="setting-moo-switch">Switch &amp; Reload</button>
+        <span id="setting-moo-switch-status"></span>
+      </div>
     </div>
   </div>
 

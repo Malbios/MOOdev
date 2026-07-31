@@ -5,6 +5,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <Compile Include="GraphStore.fs" />
     <Compile Include="AstQuery.fs" />
     <Compile Include="SidecarBridge.fs" />
     <Compile Include="Handlers.fs" />

@@ -53,6 +53,12 @@ let private settingFontSizeEl = document.getElementById ("setting-fontsize") :?>
 let private settingMinimapEl = document.getElementById ("setting-minimap") :?> HTMLInputElement
 let private settingForgetLoginBtn = document.getElementById ("setting-forget-login")
 let private settingForgetLoginStatusEl = document.getElementById ("setting-forget-login-status")
+let private settingMooHostEl = document.getElementById ("setting-moo-host") :?> HTMLInputElement
+let private settingMooPortEl = document.getElementById ("setting-moo-port") :?> HTMLInputElement
+let private settingMooLspBridgePortEl = document.getElementById ("setting-moo-lsp-bridge-port") :?> HTMLInputElement
+let private settingMooTreeDirEl = document.getElementById ("setting-moo-tree-dir") :?> HTMLInputElement
+let private settingMooSwitchBtn = document.getElementById ("setting-moo-switch")
+let private settingMooSwitchStatusEl = document.getElementById ("setting-moo-switch-status")
 
 let private layoutEl = document.getElementById ("layout")
 
@@ -705,6 +711,13 @@ let mutable private failedSaveTabs: Set<int64 * string> = Set.empty
 /// response arrives. A list, not a single slot, since more than one caller
 /// can end up waiting on the same in-flight save (see `saveIfDirtyAsync`).
 let mutable private pendingSaveResolvers: Map<int64 * string, (bool -> unit) list> = Map.empty
+
+/// The continuation waiting on the current `"reconfigure-target"` request's
+/// `moodev-reconfigure-target-result`, if one is in flight - a single slot,
+/// not a map keyed by anything, since only one "Switch & Reload" click can
+/// meaningfully be in flight at a time (the button's own handler awaits this
+/// before doing anything else).
+let mutable private pendingReconfigureResolver: (bool * string -> unit) option = None
 
 /// Which verb needs saving and what its content was, captured at the exact
 /// moment of the edit that dirtied it (every `onDidChangeModelContent`
@@ -3559,8 +3572,58 @@ ws.onopen <-
         Sidebar.init ()
         Login.init (fun cmd -> ws.send cmd)
 
+        // Fetched once per connection (page load), not on every Settings
+        // panel open - the target rarely changes except through this same
+        // panel's own "Switch & Reload", which updates these fields itself
+        // once it succeeds.
+        sendAction [ "action" ==> "get-moo-target" ]
+
 ws.onclose <- fun _ -> appendOutput "\n[disconnected]\n"
 ws.onerror <- fun _ -> appendOutput "\n[connection error]\n"
+
+// "Configurable MOO server target" feature's switch sequence: validate +
+// swap the sidecar's own live connection/tree ("reconfigure-target"), then
+// bring the language server's static graph in sync
+// (LspClient.reloadGraphAsync), then reload the page - the simplest way to
+// reset every other piece of this client's own session state (tree, tabs,
+// inspector) rather than hand-resetting each mutable one by one.
+settingMooSwitchBtn.onclick <-
+    fun _ ->
+        async {
+            settingMooSwitchStatusEl.textContent <- "Switching..."
+
+            let host = settingMooHostEl.value.Trim()
+            let treeDir = settingMooTreeDirEl.value.Trim()
+
+            let port =
+                match System.Int32.TryParse settingMooPortEl.value with
+                | true, n -> n
+                | false, _ -> 7777
+
+            let lspBridgePort =
+                match System.Int32.TryParse settingMooLspBridgePortEl.value with
+                | true, n -> n
+                | false, _ -> 7780
+
+            let! ok, message =
+                Async.FromContinuations(fun (resolve, _, _) ->
+                    pendingReconfigureResolver <- Some resolve
+
+                    sendAction
+                        [ "action" ==> "reconfigure-target"
+                          "host" ==> host
+                          "port" ==> port
+                          "lspBridgePort" ==> lspBridgePort
+                          "treeDir" ==> treeDir ])
+
+            if ok then
+                settingMooSwitchStatusEl.textContent <- "Reloading language server graph..."
+                do! LspClient.reloadGraphAsync treeDir
+                window.location.reload ()
+            else
+                settingMooSwitchStatusEl.textContent <- sprintf "Failed: %s" message
+        }
+        |> Async.StartImmediate
 
 /// Arrow-up/down command history for the terminal input, same convention
 /// as a normal shell: -1 means "not currently browsing history" (the live
@@ -4167,6 +4230,26 @@ ws.onmessage <-
 
                 if activeSidebarView = ErrorsView then
                     renderErrorsList ()
+            elif header.StartsWith("moodev-moo-target-result") then
+                match
+                    headerField "host: " header,
+                    headerField "port: " header,
+                    headerField "lspBridgePort: " header,
+                    headerField "treeDir: " header
+                with
+                | Some host, Some port, Some lspBridgePort, Some treeDir ->
+                    settingMooHostEl.value <- host
+                    settingMooPortEl.value <- port
+                    settingMooLspBridgePortEl.value <- lspBridgePort
+                    settingMooTreeDirEl.value <- treeDir
+                | _ -> ()
+            elif header.StartsWith("moodev-reconfigure-target-result") then
+                match pendingReconfigureResolver with
+                | Some resolve ->
+                    pendingReconfigureResolver <- None
+                    let ok = headerField "ok: " header = Some "1"
+                    resolve (ok, (if ok then "" else String.concat "\n" lines))
+                | None -> ()
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text

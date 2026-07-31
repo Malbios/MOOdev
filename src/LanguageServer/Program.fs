@@ -13,8 +13,8 @@ let main args =
 
     let surviveRoot = app.Configuration.GetValue<string>("Survive:Root", "../../../Survive")
     printfn "Loading metadata graph from %s..." surviveRoot
-    let graph = Metadata.Loader.load surviveRoot
-    printfn "Loaded %d objects." graph.Objects.Count
+    GraphStore.init surviveRoot
+    printfn "Loaded %d objects." (GraphStore.get ()).Objects.Count
 
     // The Sidecar's own `/lsp-bridge` endpoint (see `Sidecar/LspBridge.fs`),
     // never the browser-facing `/ws` - a single shared bridge for every
@@ -32,11 +32,16 @@ let main args =
             task {
                 if ctx.WebSockets.IsWebSocketRequest then
                     use! webSocket = ctx.WebSockets.AcceptWebSocketAsync()
-                    // `Server.startWs` blocks for the connection's lifetime
-                    // running its own message loop - off the async
-                    // continuation thread via Task.Run so it doesn't tie up
-                    // a thread-pool thread for the whole session.
-                    do! Task.Run(fun () -> WsTransport.run webSocket graph bridge)
+                    // `GraphStore.get ()` is read fresh per connection, not
+                    // captured once at process start - so a connection
+                    // accepted after a `moodev/reloadGraph` call (i.e. the
+                    // browser's own post-target-switch page reload) gets the
+                    // up-to-date graph. `Server.startWs` blocks for the
+                    // connection's lifetime running its own message loop -
+                    // off the async continuation thread via Task.Run so it
+                    // doesn't tie up a thread-pool thread for the whole
+                    // session.
+                    do! Task.Run(fun () -> WsTransport.run webSocket (GraphStore.get ()) bridge)
                 else
                     ctx.Response.StatusCode <- StatusCodes.Status400BadRequest
             })

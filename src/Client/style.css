@@ -95,6 +95,17 @@ html, body {
   font-size: inherit;
 }
 
+.settings-row input[type="text"] {
+  flex: 1;
+  min-width: 0;
+  background: #222;
+  color: #ddd;
+  border: 1px solid #444;
+  padding: 0.2em 0.4em;
+  font-family: inherit;
+  font-size: inherit;
+}
+
 .settings-row button {
   background: #2a2a2a;
   color: #ddd;
@@ -110,6 +121,18 @@ html, body {
 }
 
 #setting-forget-login-status {
+  color: #999;
+  font-size: 0.9em;
+}
+
+.settings-section-title {
+  font-weight: bold;
+  padding-top: 0.6em;
+  margin-top: 0.4em;
+  border-top: 1px solid #333;
+}
+
+#setting-moo-switch-status {
   color: #999;
   font-size: 0.9em;
 }

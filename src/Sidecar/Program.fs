@@ -12,6 +12,28 @@ open Microsoft.Extensions.Configuration
 open LibGit2Sharp
 open Sidecar.BridgeHandler
 
+/// Everything that identifies "which MOO world" the sidecar's live
+/// WebSocket bridge currently points at - see `currentTarget` (the always-on
+/// bridge's mutable copy of this, reconfigurable via `"reconfigure-target"`).
+type private MooTarget =
+    { Host: string
+      Port: int
+      LspBridgePort: int
+      TreeDir: string }
+
+/// The sidecar's one shared, live-reconfigurable connection target - read
+/// fresh by `buildTryDispatch`'s `"reconfigure-target"`/`"get-moo-target"`
+/// arms and by every new `/ws`/`/lsp-bridge` connection accepted in `main`
+/// below, instead of a value fixed for the whole process lifetime. Starts
+/// out holding hardcoded placeholder defaults - `main` overwrites it with
+/// the real `Moo:*` config values the moment `app.Configuration` exists,
+/// before any connection can be accepted.
+let mutable private currentTarget: MooTarget =
+    { Host = "127.0.0.1"
+      Port = 7777
+      LspBridgePort = 7780
+      TreeDir = "../../../Survive" }
+
 /// `export <outputDir> [host] [port]` runs the Phase 1 exporter
 /// (`Sidecar.Exporter`) against a wizard connection and exits - a one-shot
 /// batch tool, distinct from the always-on WebSocket bridge below. Host/port
@@ -256,6 +278,91 @@ let private runPromote (treeDir: string) (host: string) (port: int) (toSha: stri
 
     work.GetAwaiter().GetResult()
 
+/// The `"reconfigure-target"` action's actual work - validates *before*
+/// touching `currentTarget`, so a failure (bad host/port, an unwritable
+/// `newTreeDir`, ...) never leaves the sidecar half-configured:
+/// 1. Connects through the new target's *LSP-bridge* port, not its ordinary
+///    player port - confirmed live this must NOT reuse `newPort`: this
+///    action runs *while the calling browser tab's own `/ws` connection is
+///    still live* (unlike `runExport`'s one-shot CLI usage, always run
+///    before any browser connects), and `MooEval.connect` logs in as the
+///    same `wizard` character that connection almost certainly already is
+///    (there's no real accounting on a bare `Minimal.db` world - see
+///    moo-dev's CLAUDE.md). ToastStunt kicks a *repeated* login of the same
+///    character, so connecting via `newPort` would disconnect the very
+///    session that triggered the switch. The LSP-bridge port's listener
+///    always logs in as its own dedicated service character regardless of
+///    the text sent (see `LspBridge.fs`'s own doc comment) - reusing it here
+///    sidesteps the collision entirely with no new bootstrap objects, and
+///    doubles as a stricter reachability check (confirms the target has
+///    this project's own bootstrap objects set up, not just that some MOO
+///    process is listening on `newPort`).
+/// 2. `git init`s `newTreeDir` if it has no `.git` yet (LibGit2Sharp has no
+///    `--initial-branch` equivalent, so a fresh init's default branch -
+///    whatever this machine's `init.defaultBranch` is - gets renamed to
+///    `main` after its first commit, since `GitStore.fs` hardcodes
+///    `refs/heads/main` with no fallback). An *existing* `.git` is left
+///    exactly as-is - no re-init, no history loss.
+/// 3. Re-exports (`Exporter.exportTree`, the same function `runExport`/
+///    `test-instance-start.ps1`'s `Sidecar.exe export` already call) and
+///    commits whatever changed directly onto the checked-out branch (unlike
+///    `GitStore.fs`'s own commits, which deliberately avoid touching HEAD -
+///    this one *should*, since "switch to this target" is meant to leave a
+///    real, checked-out `main` reflecting exactly what's live there now).
+/// Only on full success does `currentTarget` actually change.
+let private reconfigureTarget
+    (webSocket: WebSocket)
+    (newHost: string)
+    (newPort: int)
+    (newLspBridgePort: int)
+    (newTreeDir: string)
+    (gitAuthorName: string)
+    (gitAuthorEmail: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let mutable errorMessage = None
+
+        try
+            let! conn = MooEval.connect newHost newLspBridgePort ct
+
+            try
+                let isFreshTree = not (Directory.Exists(Path.Combine(newTreeDir, ".git")))
+
+                if not (Directory.Exists newTreeDir) then
+                    Directory.CreateDirectory newTreeDir |> ignore
+
+                if isFreshTree then
+                    Repository.Init(newTreeDir, false) |> ignore
+
+                do! Exporter.exportTree conn newTreeDir ct
+
+                use repo = new Repository(newTreeDir)
+                Commands.Stage(repo, "*")
+
+                if repo.RetrieveStatus().IsDirty then
+                    let author = Signature(gitAuthorName, gitAuthorEmail, DateTimeOffset.Now)
+                    repo.Commit(sprintf "Sync on switch to %s:%d" newHost newPort, author, author, CommitOptions()) |> ignore
+
+                    if isFreshTree && repo.Head.FriendlyName <> "main" then
+                        repo.Branches.Rename(repo.Head.FriendlyName, "main") |> ignore
+            finally
+                MooEval.disconnect conn
+        with ex ->
+            errorMessage <- Some ex.Message
+
+        match errorMessage with
+        | None ->
+            currentTarget <-
+                { Host = newHost
+                  Port = newPort
+                  LspBridgePort = newLspBridgePort
+                  TreeDir = newTreeDir }
+
+            do! IdeActions.sendWire webSocket "moodev-reconfigure-target-result ok: 1" [] ct
+        | Some msg -> do! IdeActions.sendWire webSocket "moodev-reconfigure-target-result ok: 0" [ msg ] ct
+    }
+
 /// Recognizes Phase 4's structured IDE-action envelope on a WebSocket Text
 /// frame and dispatches to `IdeActions` - returns `false` (meaning "forward
 /// this raw, as before") on a JSON parse failure or an unrecognized
@@ -441,6 +548,33 @@ let private buildTryDispatch
                 | "corponym-history" ->
                     do! IdeActions.corponymHistory config webSocket ct
                     return true
+                | "get-moo-target" ->
+                    do!
+                        IdeActions.sendWire
+                            webSocket
+                            (sprintf
+                                "moodev-moo-target-result host: %s port: %d lspBridgePort: %d treeDir: %s"
+                                currentTarget.Host
+                                currentTarget.Port
+                                currentTarget.LspBridgePort
+                                currentTarget.TreeDir)
+                            []
+                            ct
+
+                    return true
+                | "reconfigure-target" ->
+                    do!
+                        reconfigureTarget
+                            webSocket
+                            (getStr "host")
+                            (root.GetProperty("port").GetInt32())
+                            (root.GetProperty("lspBridgePort").GetInt32())
+                            (getStr "treeDir")
+                            config.GitAuthorName
+                            config.GitAuthorEmail
+                            ct
+
+                    return true
                 | _ -> return false
     }
 
@@ -500,21 +634,18 @@ let main args =
         let builder = WebApplication.CreateBuilder(args)
         let app = builder.Build()
 
-        let endpoint =
+        // `currentTarget` (module-level, above) starts out holding hardcoded
+        // placeholder defaults - this is its one real initialization, now
+        // that `app.Configuration` actually exists. `gitAuthorName`/
+        // `gitAuthorEmail`/`wipRetentionDays` are process identity/policy,
+        // not part of the target, so they stay separate, ordinary immutable
+        // bindings (never reconfigured live).
+        currentTarget <-
             { Host = app.Configuration.GetValue<string>("Moo:Host", "127.0.0.1")
-              Port = app.Configuration.GetValue<int>("Moo:Port", 7777) }
+              Port = app.Configuration.GetValue<int>("Moo:Port", 7777)
+              LspBridgePort = app.Configuration.GetValue<int>("Moo:LspBridgePort", 7780)
+              TreeDir = app.Configuration.GetValue<string>("Moo:TreeDir", "../../../Survive") }
 
-        // The world's dedicated LSP-service listener (see moo-dev's CLAUDE.md
-        // bootstrap docs) - a separate port, bound to a separate player
-        // character, so the LSP's own live connection here never collides
-        // with a browser tab's Wizard session on `endpoint` above (ToastStunt
-        // kicks a *repeated login of the same character*, not "more than one
-        // live connection").
-        let lspBridgeEndpoint: LspBridge.MooEndpoint =
-            { Host = app.Configuration.GetValue<string>("Moo:Host", "127.0.0.1")
-              Port = app.Configuration.GetValue<int>("Moo:LspBridgePort", 7780) }
-
-        let treeDir = app.Configuration.GetValue<string>("Moo:TreeDir", "../../../Survive")
         let gitAuthorName = app.Configuration.GetValue<string>("Moo:GitAuthorName", "moo-dev")
         let gitAuthorEmail = app.Configuration.GetValue<string>("Moo:GitAuthorEmail", "moo-dev@localhost")
         let wipRetentionDays = app.Configuration.GetValue<float>("Moo:WipRetentionDays", 14.0)
@@ -527,7 +658,7 @@ let main args =
         // before any export has happened) shouldn't block the sidecar from
         // starting.
         try
-            use repo = new Repository(treeDir)
+            use repo = new Repository(currentTarget.TreeDir)
             let pruned = GitStore.pruneStaleWipRefs repo (TimeSpan.FromDays(wipRetentionDays))
 
             if pruned.IsEmpty then
@@ -535,7 +666,7 @@ let main args =
             else
                 printfn "Prune-on-startup: pruned %d stale wip ref(s): %s" pruned.Length (String.concat ", " pruned)
         with ex ->
-            eprintfn "Prune-on-startup skipped (%s): %s" treeDir ex.Message
+            eprintfn "Prune-on-startup skipped (%s): %s" currentTarget.TreeDir ex.Message
 
         app.UseWebSockets() |> ignore
 
@@ -546,13 +677,19 @@ let main args =
                     if ctx.WebSockets.IsWebSocketRequest then
                         use! webSocket = ctx.WebSockets.AcceptWebSocketAsync()
 
+                        // Read fresh here, not captured once at process
+                        // start - so a connection accepted *after* a
+                        // successful `"reconfigure-target"` (i.e. the
+                        // Client's own post-switch page reload) picks up
+                        // whatever `currentTarget` holds right now.
                         let ideConfig: IdeActions.Config =
-                            { TreeDir = treeDir
+                            { TreeDir = currentTarget.TreeDir
                               SessionId = Guid.NewGuid().ToString("N")
                               GitAuthorName = gitAuthorName
                               GitAuthorEmail = gitAuthorEmail }
 
                         let tryDispatch = buildTryDispatch ideConfig
+                        let endpoint: MooEndpoint = { Host = currentTarget.Host; Port = currentTarget.Port }
 
                         do! handleConnection endpoint webSocket tryDispatch ctx.RequestAborted
                     else
@@ -567,6 +704,10 @@ let main args =
                 task {
                     if ctx.WebSockets.IsWebSocketRequest then
                         use! webSocket = ctx.WebSockets.AcceptWebSocketAsync()
+
+                        let lspBridgeEndpoint: LspBridge.MooEndpoint =
+                            { Host = currentTarget.Host; Port = currentTarget.LspBridgePort }
+
                         do! LspBridge.handleConnection lspBridgeEndpoint webSocket ctx.RequestAborted
                     else
                         ctx.Response.StatusCode <- StatusCodes.Status400BadRequest

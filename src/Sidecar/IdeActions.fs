@@ -22,7 +22,11 @@ type Config =
       GitAuthorName: string
       GitAuthorEmail: string }
 
-let private sendWire (webSocket: WebSocket) (header: string) (lines: string list) (ct: CancellationToken) : Task =
+/// Not `private` - `Program.fs`'s `"get-moo-target"`/`"reconfigure-target"`
+/// actions send responses this same way but don't operate on a live MOO
+/// object, so they live directly in `Program.fs` rather than here, and need
+/// this helper too.
+let sendWire (webSocket: WebSocket) (header: string) (lines: string list) (ct: CancellationToken) : Task =
     task {
         if webSocket.State = WebSocketState.Open then
             let json = JsonSerializer.Serialize<McpWireMessage>({ header = header; lines = lines })

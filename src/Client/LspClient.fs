@@ -219,6 +219,16 @@ let findReferencesToObjectAsync (objRef: int64) : Async<(string * int64 * string
             return items |> Array.map (fun o -> (o?kind: string), int64 (o?objRef: float), (o?detail: string))
     }
 
+/// Custom method (`moodev/reloadGraph`, `{surviveRoot}`) - reloads the
+/// language server's static analysis graph in place from `surviveRoot`,
+/// without restarting its process (matches
+/// `Handlers.MooLspServer.ReloadGraph`). Part of the "Configurable MOO
+/// server target" feature's switch sequence: after the sidecar's own
+/// `"reconfigure-target"` action succeeds, this brings the *next* `/lsp`
+/// connection's graph in sync too, before the page reload that opens it.
+let reloadGraphAsync (surviveRoot: string) : Async<unit> =
+    async { do! requestAsync "moodev/reloadGraph" (createObj [ "surviveRoot" ==> surviveRoot ]) |> Async.Ignore }
+
 /// Custom method (`moodev/findGotchas`, no params) - manually triggered
 /// corpus-wide "MOOcode gotchas" static-check scan (matches
 /// `Handlers.MooLspServer.FindGotchas`/`Handlers.findGotchas`). `kind` is

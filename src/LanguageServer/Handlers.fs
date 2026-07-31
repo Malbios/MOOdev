@@ -67,6 +67,12 @@ type ObjectReferenceEntry =
 /// corpus-wide scan).
 type FindReferencesToObjectParams = { ObjRef: ObjRef }
 
+/// `moodev/reloadGraph`'s params - the path to reload `GraphStore` from,
+/// matching whatever content tree the sidecar's own `"reconfigure-target"`
+/// action just switched to (see `moo-dev`'s "Configurable MOO server
+/// target" feature).
+type ReloadGraphParams = { SurviveRoot: string }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
@@ -1515,6 +1521,20 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// reference `findReferencesToObject` can confirm statically.
     member _.FindReferencesToObject(p: FindReferencesToObjectParams) : Async<Result<ObjectReferenceEntry[], JsonRpc.Error>> =
         async { return Ok(findReferencesToObject graph p.ObjRef) }
+
+    /// Custom method (`moodev/reloadGraph`, `{surviveRoot}`) - reloads
+    /// `GraphStore` from `surviveRoot` in place, without restarting the
+    /// process. This connection's own `graph` (the ctor-captured field every
+    /// other member reads) stays whatever it was for the rest of its short
+    /// remaining lifetime - the *next* `/lsp` connection (i.e. the browser's
+    /// own reload right after a successful sidecar target switch) is what
+    /// actually picks up the fresh graph, via `Program.fs`'s per-connection
+    /// `GraphStore.get ()` read.
+    member _.ReloadGraph(p: ReloadGraphParams) : Async<Result<unit, JsonRpc.Error>> =
+        async {
+            GraphStore.reload p.SurviveRoot
+            return Ok()
+        }
 
     /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
     /// gotchas" static-check report: every verb `findGotchas` flags for a
