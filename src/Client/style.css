@@ -78,6 +78,52 @@ html, body {
   color: #fff;
 }
 
+/* --- Command palette (Ctrl+P jump-to-anything) - same backdrop-modal
+   idiom as the Settings overlay above -------------------------------- */
+
+#command-palette-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  background: rgba(0, 0, 0, 0.5);
+  align-items: flex-start;
+  justify-content: center;
+}
+
+#command-palette-overlay.visible {
+  display: flex;
+}
+
+#command-palette-panel {
+  margin-top: 15vh;
+  background: #1a1a1a;
+  border: 1px solid #444;
+  border-radius: 6px;
+  width: 32em;
+  max-width: 90vw;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+#command-palette-input {
+  box-sizing: border-box;
+  width: 100%;
+  background: #222;
+  color: #ddd;
+  border: none;
+  border-bottom: 1px solid #444;
+  padding: 0.6em 0.8em;
+  font-family: inherit;
+  font-size: 1.05em;
+}
+
+#command-palette-input:focus {
+  outline: none;
+}
+
 .settings-row {
   display: flex;
   align-items: center;

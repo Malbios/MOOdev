@@ -44,6 +44,11 @@ let private loginUserEl = document.getElementById ("login-user") :?> HTMLInputEl
 let private loginPassEl = document.getElementById ("login-pass") :?> HTMLInputElement
 let private loginConnectBtn = document.getElementById ("login-connect")
 
+let private commandPaletteOverlayEl = document.getElementById ("command-palette-overlay")
+let private commandPalettePanelEl = document.getElementById ("command-palette-panel")
+let private commandPaletteInputEl = document.getElementById ("command-palette-input") :?> HTMLInputElement
+let private commandPaletteListEl = document.getElementById ("command-palette-list")
+
 let private settingsBtn = document.getElementById ("settings-btn")
 let private settingsOverlayEl = document.getElementById ("settings-overlay")
 let private settingsPanelEl = document.getElementById ("settings-panel")
@@ -1122,7 +1127,12 @@ type private TreeNode =
       Name: string
       Parents: int64[]
       Children: int64[]
-      HasOwnContent: bool }
+      HasOwnContent: bool
+      /// Own verb names only (not inherited) - just enough for the command
+      /// palette's jump-to-verb search (Part 6). The login payload already
+      /// carries full `TreeVerb[]` per object; this is the only field this
+      /// type previously discarded everything from except `HasOwnContent`.
+      Verbs: string[] }
 
 let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
 
@@ -1193,7 +1203,8 @@ let private buildTree
               Name = name
               Parents = parents
               Children = children
-              HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) })
+              HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties)
+              Verbs = verbs |> Array.map (fun v -> v.Name) })
         |> Map.ofArray
 
     rootRefs <-
@@ -1227,7 +1238,8 @@ let private mergeLiveChildren
                       Name = name
                       Parents = parents
                       Children = [||]
-                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) }
+                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties)
+                      Verbs = verbs |> Array.map (fun v -> v.Name) }
                     treeNodes
 
     match Map.tryFind parentRef treeNodes with
@@ -1254,7 +1266,8 @@ let private mergeLiveRoots (roots: (int64 * string * int64[] * LspClient.TreeVer
                       Name = name
                       Parents = parents
                       Children = [||]
-                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties) }
+                      HasOwnContent = not (Array.isEmpty verbs) || not (Array.isEmpty properties)
+                      Verbs = verbs |> Array.map (fun v -> v.Name) }
                     treeNodes
 
     rootRefs <- Array.append rootRefs (roots |> Array.map (fun (r, _, _, _, _) -> r)) |> Array.distinct
@@ -3897,6 +3910,113 @@ and private revealAndOpenVerb (objRef: int64) (verbName: string) : unit =
     expandedRefs <- Set.union expandedRefs (Set.add objRef (ancestorsOf Set.empty objRef))
     renderTree ()
     openOrSwitchToVerb objRef verbName
+
+/// Command palette (Ctrl+P jump-to-anything) - one entry per object plus
+/// one per own verb (`objname:verbname`), built fresh from `treeNodes` on
+/// every open - object-model-scale, not corpus-of-documents scale, so
+/// there's no need for a smarter index than a flat list, same tradeoff the
+/// tree's own live filter already makes.
+type private PaletteEntry =
+    | PaletteObject of objRef: int64 * label: string
+    | PaletteVerb of objRef: int64 * verbName: string * label: string
+
+let private paletteEntryLabel (entry: PaletteEntry) : string =
+    match entry with
+    | PaletteObject(_, label) -> label
+    | PaletteVerb(_, _, label) -> label
+
+let private allPaletteEntries () : PaletteEntry list =
+    treeNodes
+    |> Map.toList
+    |> List.collect (fun (objRef, node) ->
+        PaletteObject(objRef, node.Name)
+        :: (node.Verbs |> Array.toList |> List.map (fun v -> PaletteVerb(objRef, v, sprintf "%s:%s" node.Name v))))
+
+let mutable private paletteAllEntries: PaletteEntry list = []
+let mutable private paletteVisibleEntries: PaletteEntry list = []
+let mutable private paletteSelectedIndex = 0
+
+let private closeCommandPalette () : unit =
+    commandPaletteOverlayEl.classList.remove "visible"
+
+let private activatePaletteEntry (entry: PaletteEntry) : unit =
+    closeCommandPalette ()
+
+    match entry with
+    | PaletteObject(objRef, _) -> openOrSwitchToInspector objRef
+    | PaletteVerb(objRef, verbName, _) -> openOrSwitchToVerb objRef verbName
+
+let private renderCommandPaletteResults () : unit =
+    commandPaletteListEl.innerHTML <- ""
+
+    if List.isEmpty paletteVisibleEntries then
+        let li = document.createElement ("li")
+        li.textContent <- "no matches"
+        li.classList.add "placeholder"
+        commandPaletteListEl.appendChild li |> ignore
+    else
+        paletteVisibleEntries
+        |> List.iteri (fun i entry ->
+            let li = document.createElement ("li")
+            li.textContent <- paletteEntryLabel entry
+            if i = paletteSelectedIndex then li.classList.add "selected"
+            li.onclick <- fun _ -> activatePaletteEntry entry
+            commandPaletteListEl.appendChild li |> ignore)
+
+/// Re-filters from `paletteAllEntries` (the full, unfiltered snapshot taken
+/// at open time), not from `paletteVisibleEntries` - each keystroke filters
+/// fresh from the whole set, same as the tree's own filter box.
+let private filterCommandPalette () : unit =
+    paletteVisibleEntries <-
+        paletteAllEntries |> List.filter (fun e -> matchesFilter commandPaletteInputEl.value (paletteEntryLabel e))
+
+    paletteSelectedIndex <- 0
+    renderCommandPaletteResults ()
+
+let private openCommandPalette () : unit =
+    paletteAllEntries <- allPaletteEntries () |> List.sortBy paletteEntryLabel
+    paletteVisibleEntries <- paletteAllEntries
+    paletteSelectedIndex <- 0
+    commandPaletteInputEl.value <- ""
+    renderCommandPaletteResults ()
+    commandPaletteOverlayEl.classList.add "visible"
+    commandPaletteInputEl.focus ()
+
+commandPaletteInputEl.oninput <- fun _ -> filterCommandPalette ()
+
+commandPaletteInputEl.onkeydown <-
+    fun ev ->
+        match ev.key with
+        | "ArrowDown" ->
+            ev.preventDefault ()
+
+            if not (List.isEmpty paletteVisibleEntries) then
+                paletteSelectedIndex <- min (paletteSelectedIndex + 1) (paletteVisibleEntries.Length - 1)
+                renderCommandPaletteResults ()
+        | "ArrowUp" ->
+            ev.preventDefault ()
+
+            if not (List.isEmpty paletteVisibleEntries) then
+                paletteSelectedIndex <- max (paletteSelectedIndex - 1) 0
+                renderCommandPaletteResults ()
+        | "Enter" ->
+            ev.preventDefault ()
+            paletteVisibleEntries |> List.tryItem paletteSelectedIndex |> Option.iter activatePaletteEntry
+        | "Escape" ->
+            ev.preventDefault ()
+            closeCommandPalette ()
+        | _ -> ()
+
+commandPaletteOverlayEl.onclick <- fun _ -> closeCommandPalette ()
+commandPalettePanelEl.onclick <- fun ev -> ev.stopPropagation () |> ignore
+
+// The first `document.onkeydown` in this app - `preventDefault()` is
+// required to beat the browser's own Ctrl+P print dialog.
+document.onkeydown <-
+    fun ev ->
+        if ev.ctrlKey && (ev.key = "p" || ev.key = "P") then
+            ev.preventDefault ()
+            openCommandPalette ()
 
 // Clicking anywhere in the scrollback should feel like clicking into the
 // terminal itself, not require a precise click on the (visually tiny) input
