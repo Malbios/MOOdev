@@ -331,6 +331,23 @@ let findGotchasAsync () : Async<(int64 * string * string)[]> =
             return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string), (o?kind: string))
     }
 
+/// Custom method (`moodev/findPermissionRisks`, no params) - the permission
+/// flag audit report (matches `Handlers.MooLspServer.FindPermissionRisks`/
+/// `Handlers.findPermissionRisks`). `Kind` is one of the plain-string tags
+/// `PermissionRiskEntry.Kind` uses server-side (`"wizard-writable-verb"` /
+/// `"world-writable-property"`) - the client's `permissionRiskKindLabel`
+/// turns it into display text.
+let findPermissionRisksAsync () : Async<(int64 * string * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findPermissionRisks" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+            return items |> Array.map (fun o -> int64 (o?objRef: float), (o?name: string), (o?kind: string))
+    }
+
 /// Custom method (`moodev/getMoocodeDocs`, no params) - the full docs
 /// catalog (matches `Handlers.MooLspServer.GetMoocodeDocs`/
 /// `Handlers.moocodeDocs`): every control keyword, implicit variable, and

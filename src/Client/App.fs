@@ -76,6 +76,7 @@ let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
 let private viewDeadPropertiesBtn = document.getElementById ("view-dead-properties")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
+let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
 
@@ -135,6 +136,9 @@ let private treeDeadPropertiesListEl = document.getElementById ("tree-dead-prope
 let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
 let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
 let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
+let private sidebarViewPermissionRisksEl = document.getElementById ("sidebar-view-permission-risks")
+let private treePermissionRisksSummaryEl = document.getElementById ("tree-permission-risks-summary")
+let private treePermissionRisksListEl = document.getElementById ("tree-permission-risks-list")
 let private sidebarViewDocsEl = document.getElementById ("sidebar-view-docs")
 let private docsSearchInputEl = document.getElementById ("docs-search-input") :?> HTMLInputElement
 let private docsListEl = document.getElementById ("docs-list")
@@ -519,6 +523,7 @@ type private SidebarView =
     | DeadVerbsView
     | DeadPropertiesView
     | GotchasView
+    | PermissionRisksView
     | DocsView
     | EvalScratchpadView
 
@@ -967,7 +972,7 @@ let private showPaneFor (tab: OpenTab) : unit =
         editor.focus ()
     | InspectorTab _ -> activateOnly inspectorPaneEl
 
-/// The eight mutually-exclusive views under `#sidebar` - same `activateOnly`
+/// The mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
 let private allSidebarViews =
     [ sidebarViewTreeEl
@@ -978,6 +983,7 @@ let private allSidebarViews =
       sidebarViewDeadVerbsEl
       sidebarViewDeadPropertiesEl
       sidebarViewGotchasEl
+      sidebarViewPermissionRisksEl
       sidebarViewDocsEl
       sidebarViewScratchpadEl ]
 
@@ -3276,6 +3282,16 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderGotchasResults results
         }
         |> Async.StartImmediate
+    | PermissionRisksView ->
+        activateOnlySidebarView sidebarViewPermissionRisksEl
+        treePermissionRisksSummaryEl.textContent <- "Scanning..."
+        treePermissionRisksListEl.innerHTML <- ""
+
+        async {
+            let! results = LspClient.findPermissionRisksAsync ()
+            renderPermissionRisksResults results
+        }
+        |> Async.StartImmediate
     | DocsView ->
         activateOnlySidebarView sidebarViewDocsEl
 
@@ -3304,6 +3320,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewDeadVerbsBtn, DeadVerbsView
           viewDeadPropertiesBtn, DeadPropertiesView
           viewGotchasBtn, GotchasView
+          viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
           viewScratchpadBtn, EvalScratchpadView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
@@ -3604,6 +3621,7 @@ and private gotchaKindLabel (kind: string) : string =
     | "missing-x-bit" -> "missing the x (executable) bit despite a likely caller"
     | "unbounded-loop" -> "loop with no suspend() anywhere in its body"
     | "zero-index" -> "list[0] indexing - always raises E_RANGE"
+    | "arg-shape-mismatch" -> "called somewhere with an argument count its own arg-spec can't accept"
     | other -> other
 
 /// Renders `moodev/findGotchas`' results into the Gotchas sidebar view -
@@ -3627,6 +3645,46 @@ and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
         li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
 
         treeGotchasListEl.appendChild li |> ignore
+
+/// Human-readable label for one of `Handlers.PermissionRiskEntry`'s
+/// plain-string `Kind` tags - same client-side-presentation reasoning as
+/// `gotchaKindLabel` above.
+and private permissionRiskKindLabel (kind: string) : string =
+    match kind with
+    | "wizard-writable-verb" -> "writable verb owned by a wizard - anyone can overwrite its code"
+    | "world-writable-property" -> "world-writable property - anyone can overwrite its value"
+    | other -> other
+
+/// Renders `moodev/findPermissionRisks`' results into the Permission risks
+/// sidebar view - same shape as `renderGotchasResults`, one entry per
+/// (object, name, kind) triple. A `"wizard-writable-verb"` entry's `Name` is
+/// a verb name (clicks through to that verb, like the Gotchas view); a
+/// `"world-writable-property"` entry's `Name` is a property name (clicks
+/// through to the object's inspector, like `renderDeadPropertiesResults`).
+and private renderPermissionRisksResults (results: (int64 * string * string)[]) : unit =
+    treePermissionRisksSummaryEl.textContent <-
+        if results.Length = 0 then
+            "No permission risks found."
+        else
+            sprintf "%d permission risk(s) found." results.Length
+
+    treePermissionRisksListEl.innerHTML <- ""
+
+    for objRef, name, kind in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+
+        li.onclick <-
+            fun _ ->
+                if kind = "wizard-writable-verb" then
+                    openOrSwitchToVerb objRef name
+                else
+                    openOrSwitchToInspector objRef
+
+        li.textContent <- sprintf "#%d.%s - %s" objRef name (permissionRiskKindLabel kind)
+
+        treePermissionRisksListEl.appendChild li |> ignore
 
 /// Shows one docs entry's full signature + description in the detail pane -
 /// the only thing clicking a row in the docs list does. Unlike every other
@@ -4299,6 +4357,7 @@ viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
 viewDeadVerbsBtn.onclick <- fun _ -> onActivityBtnClick DeadVerbsView
 viewDeadPropertiesBtn.onclick <- fun _ -> onActivityBtnClick DeadPropertiesView
 viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
+viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
 

@@ -177,3 +177,81 @@ let ``list[0] nested inside a deeper expression is still found`` () =
     let graph = graphOf [ objNode 1L [ v ] ]
     let gotchas = findGotchas graph
     Assert.Contains(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "peek" && g.Kind = "zero-index"))
+
+// --- arg-shape-mismatch ---------------------------------------------------
+
+let private boundName (n: string) : BoundName = { Name = n; Line = 1; Col = 1 }
+
+let private callerCalling (args: Arg list) : VerbNode =
+    verbNode 1L (verbMeta 1 "caller" "rxd") [ ExprStmt(VerbCall(ObjLit 2L, StrLit "target", args, 1, 1)) ]
+
+[<Fact>]
+let ``a call with too few args for the callee's required scatter vars is flagged arg-shape-mismatch`` () =
+    let target =
+        verbNode 2L (verbMeta 1 "target" "rxd") [ ExprStmt(Scatter([ Required(boundName "who") ], Ident("args", 1, 1))) ]
+
+    let graph = graphOf [ objNode 1L [ callerCalling [] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "caller" && g.Kind = "arg-shape-mismatch"))
+
+[<Fact>]
+let ``a call matching the callee's required + optional scatter vars is not flagged`` () =
+    let target =
+        verbNode
+            2L
+            (verbMeta 1 "target" "rxd")
+            [ ExprStmt(Scatter([ Required(boundName "who"); Optional(boundName "what", None) ], Ident("args", 1, 1))) ]
+
+    let graph = graphOf [ objNode 1L [ callerCalling [ Normal(IntLit 1L) ] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "caller" && g.Kind = "arg-shape-mismatch"))
+
+[<Fact>]
+let ``a call with too many args and no rest var is flagged arg-shape-mismatch`` () =
+    let target =
+        verbNode 2L (verbMeta 1 "target" "rxd") [ ExprStmt(Scatter([ Required(boundName "who") ], Ident("args", 1, 1))) ]
+
+    let graph =
+        graphOf [ objNode 1L [ callerCalling [ Normal(IntLit 1L); Normal(IntLit 2L) ] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "caller" && g.Kind = "arg-shape-mismatch"))
+
+[<Fact>]
+let ``a call with more args than required is not flagged when the callee has a rest var`` () =
+    let target =
+        verbNode
+            2L
+            (verbMeta 1 "target" "rxd")
+            [ ExprStmt(Scatter([ Required(boundName "who"); Rest(boundName "rest") ], Ident("args", 1, 1))) ]
+
+    let graph =
+        graphOf [ objNode 1L [ callerCalling [ Normal(IntLit 1L); Normal(IntLit 2L); Normal(IntLit 3L) ] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "caller" && g.Kind = "arg-shape-mismatch"))
+
+[<Fact>]
+let ``a call with a splice argument is never flagged (unsound to count exactly)`` () =
+    let target =
+        verbNode 2L (verbMeta 1 "target" "rxd") [ ExprStmt(Scatter([ Required(boundName "who") ], Ident("args", 1, 1))) ]
+
+    let graph = graphOf [ objNode 1L [ callerCalling [ Splice(Ident("empty_list", 1, 1)) ] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "arg-shape-mismatch"))
+
+[<Fact>]
+let ``a callee using the args[N]-index idiom is never flagged (no arity bound implied)`` () =
+    let target =
+        verbNode
+            2L
+            (verbMeta 1 "target" "rxd")
+            [ ExprStmt(Assign(Ident("who", 1, 1), Index(Ident("args", 1, 1), IntLit 1L))) ]
+
+    let graph = graphOf [ objNode 1L [ callerCalling [] ]; objNode 2L [ target ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "arg-shape-mismatch"))

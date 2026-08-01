@@ -13,6 +13,7 @@
     <Compile Include="PropertyDeadReferenceFinderTests.fs" />
     <Compile Include="ObjectReferenceFinderTests.fs" />
     <Compile Include="GotchaFinderTests.fs" />
+    <Compile Include="PermissionRiskFinderTests.fs" />
     <Compile Include="VerbSummaryTests.fs" />
   </ItemGroup>
 

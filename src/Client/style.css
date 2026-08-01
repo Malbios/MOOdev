@@ -680,6 +680,18 @@ html, body {
   margin-bottom: 0.6em;
 }
 
+/* --- Permission risks view ---------------------------------------------- */
+
+#sidebar-view-permission-risks {
+  overflow-y: auto;
+  padding: 0.8em 1em;
+}
+
+#tree-permission-risks-summary {
+  color: #999;
+  margin-bottom: 0.6em;
+}
+
 /* --- MOOcode docs view -------------------------------------------------
    List and detail split the view's height 50/50, each scrolling
    independently - same idea as the tree/inspector split, applied here

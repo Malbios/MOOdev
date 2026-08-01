@@ -1209,12 +1209,14 @@ let private hoverForResolvedVerbLive (verbName: string) (result: SidecarBridge.V
 
     (baseText :: extraSections) |> String.concat "\n\n" |> mkHover
 
-/// One of the three catalogued "MOOcode gotchas" (the project plan's own
-/// MOOcode gotchas section) `findGotchas` checks for, exhaustively across
-/// every parsed verb in the graph. `Kind` is a plain string tag rather than
-/// a DU - simpler to send over the wire, matching `Dobj`/`Prep`/`Iobj`'s own
+/// One of the catalogued "MOOcode gotchas" (the project plan's own
+/// MOOcode gotchas section, plus the call-site arg-spec mismatch check
+/// added later) `findGotchas` checks for, exhaustively across every parsed
+/// verb in the graph. `Kind` is a plain string tag rather than a DU -
+/// simpler to send over the wire, matching `Dobj`/`Prep`/`Iobj`'s own
 /// plain-string convention on `DeadVerbEntry` above - one of
-/// `"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"`.
+/// `"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"` /
+/// `"arg-shape-mismatch"`.
 type GotchaEntry = { ObjRef: ObjRef; VerbName: string; Kind: string }
 
 /// True if `target` is `start` itself or reachable by walking `start`'s
@@ -1251,6 +1253,23 @@ let private allResolvableCallSites (graph: Graph) : (ObjRef * string) seq =
             Metadata.Resolver.resolveReceiverInContext graph containingObj receiver
             |> Option.map (fun receiverStart -> receiverStart, callName)
         | _ -> None)
+
+/// Whether a callee's scatter-recovered parameter shape (`{who, ?what = 0,
+/// @rest} = args;`) could possibly accept `argCount` positional arguments -
+/// mirrors MOO's own scatter-assignment arity check (`E_ARGS` if too few
+/// values for the required vars, or too many with no `@rest` to absorb the
+/// overflow). Only meaningful for the scatter idiom - `inferredParams`'
+/// `args[N]`-index fallback doesn't imply any arity bound (a verb reading
+/// `args[1]` and `args[3]` doesn't preclude a caller passing one argument or
+/// ten), so callers must exclude that case first (checking for the absence
+/// of any `IndexParam` is enough - `inferredParams` never mixes the two
+/// idioms in one result).
+let private scatterArityAllows (calleeParams: InferredParam list) (argCount: int) : bool =
+    let reqCount = calleeParams |> List.filter (function ReqParam _ -> true | _ -> false) |> List.length
+    let optCount = calleeParams |> List.filter (function OptParam _ -> true | _ -> false) |> List.length
+    let hasRest = calleeParams |> List.exists (function RestParam _ -> true | _ -> false)
+
+    argCount >= reqCount && (hasRest || argCount <= reqCount + optCount)
 
 /// Static, whole-corpus checks for the gotchas already catalogued in the
 /// project plan doc but never turned into tooling - cheap to check
@@ -1309,7 +1328,80 @@ let findGotchas (graph: Graph) : GotchaEntry[] =
                     }
                 | _ -> Seq.empty))
 
-    Seq.append missingXBit structural |> Array.ofSeq
+    // Call-site arg-spec mismatch: a call whose actual argument count can't
+    // satisfy the callee's own scatter-recovered `{who, ?what = 0, @rest} =
+    // args;` shape, e.g. `player:tell(x, y)` where `tell`'s scatter has no
+    // `@rest` and only one required/optional slot. Reuses `inferredParams`
+    // (hover's own auto-inferred parameter recovery) and the same
+    // resolve-callee pattern `TextDocumentInlayHint` already demonstrates.
+    // Bails on any `Splice` (`@expr`) argument - it fans out into an unknown
+    // number of real arguments, making exact counting unsound.
+    let argShapeMismatches =
+        allVerbCallReferences graph
+        |> Seq.choose (fun (containingObj, containingVerbName, r) ->
+            match r.Ref with
+            | AstQuery.RefVerbCall(receiver, StrLit callName, args) when args |> List.forall (function Normal _ -> true | Splice _ -> false) ->
+                Metadata.Resolver.resolveReceiverInContext graph containingObj receiver
+                |> Option.bind (fun startObj -> Metadata.Resolver.findCallableVerb graph startObj callName)
+                |> Option.bind (fun (_, callee) -> callee.Ast)
+                |> Option.bind inferredParams
+                |> Option.filter (List.forall (function IndexParam _ -> false | _ -> true))
+                |> Option.filter (fun ps -> not (scatterArityAllows ps (List.length args)))
+                |> Option.map (fun _ -> { ObjRef = containingObj; VerbName = containingVerbName; Kind = "arg-shape-mismatch" })
+            | _ -> None)
+
+    [ missingXBit; structural; argShapeMismatches ] |> Seq.concat |> Array.ofSeq
+
+/// One verb or property `findPermissionRisks` flagged as a risky permission
+/// combination, corpus-wide. `Kind` is a plain string tag, same convention
+/// as `GotchaEntry.Kind` above - `"wizard-writable-verb"` or
+/// `"world-writable-property"`.
+type PermissionRiskEntry = { ObjRef: ObjRef; Name: string; Kind: string }
+
+/// True if `owner` is a real object in the graph with its `wizard` flag set
+/// - the object a verb/property's `Owner` field points at, not the object
+/// the verb/property is defined ON.
+let private isWizardOwned (graph: Graph) (owner: ObjRef) : bool =
+    match Map.tryFind owner graph.Objects with
+    | Some o -> o.Flags |> Option.map (fun f -> f.Wizard) |> Option.defaultValue false
+    | None -> false
+
+/// Corpus-wide scan for risky permission-flag combinations - distinct from
+/// `ResolveEffectiveMember` (a per-symbol effective-owner lookup); this is
+/// an aggregate report across the whole tree, closer in spirit to
+/// `findGotchas` but scoped to permissions specifically. Fully static-graph
+/// (`VerbMeta`/`PropertyMeta.Perms`, `ObjectNode.Flags`), no live eval
+/// needed. Deliberately doesn't re-flag the already-covered missing-x-bit
+/// gotcha above - that's `findGotchas`'s own report.
+///
+/// Two checks, verified against ToastStunt's real enforcement
+/// (`db_verbs.cc`/`db_properties.cc`: access granted if the flag is set, OR
+/// `progr == owner`, OR `is_wizard(progr)`):
+/// - A verb with its `w` bit set, owned by a wizard-flagged object - any
+///   programmer can overwrite that verb's code, which then runs with the
+///   (wizard) owner's permissions. The single most exploitable-looking
+///   pattern this scan catches.
+/// - Any world-writable (`w`-set) property - lower severity (data, not
+///   code) but the same "anyone can overwrite this" shape, regardless of
+///   who owns it.
+let findPermissionRisks (graph: Graph) : PermissionRiskEntry[] =
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        let riskyVerbs =
+            o.Verbs
+            |> Seq.choose (fun v ->
+                match v.Meta.Names with
+                | primary :: _ when v.Meta.Perms.Contains 'w' && isWizardOwned graph v.Meta.Owner ->
+                    Some { ObjRef = num; Name = primary; Kind = "wizard-writable-verb" }
+                | _ -> None)
+
+        let riskyProps =
+            o.Properties
+            |> Seq.choose (fun p -> if p.Perms.Contains 'w' then Some { ObjRef = num; Name = p.Name; Kind = "world-writable-property" } else None)
+
+        Seq.append riskyVerbs riskyProps)
+    |> Array.ofSeq
 
 /// Minimal client stub - this phase never needs to push notifications or
 /// send server-initiated requests back to the editor (no diagnostics, no
@@ -1887,6 +1979,12 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// `suspend()`, or a `list[0]`-shaped index, corpus-wide.
     member _.FindGotchas(_p: obj) : Async<Result<GotchaEntry[], JsonRpc.Error>> =
         async { return Ok(findGotchas graph) }
+
+    /// Custom method (`moodev/findPermissionRisks`, no params) - the
+    /// permission flag audit report: every verb/property `findPermissionRisks`
+    /// flags for a risky writable/ownership combination, corpus-wide.
+    member _.FindPermissionRisks(_p: obj) : Async<Result<PermissionRiskEntry[], JsonRpc.Error>> =
+        async { return Ok(findPermissionRisks graph) }
 
     /// Custom method (`moodev/getMoocodeDocs`, no params) - the full catalog
     /// for the client's docs sidebar: every control keyword, implicit
