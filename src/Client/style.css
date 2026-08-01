@@ -951,6 +951,43 @@ html, body {
   font-size: 0.9em;
 }
 
+.inspector-graph-svg {
+  display: block;
+  margin-top: 0.3em;
+}
+
+.inspector-graph-svg line.inspector-graph-edge {
+  stroke: #555;
+  stroke-width: 1.5;
+}
+
+.inspector-graph-svg g.inspector-graph-node {
+  cursor: pointer;
+}
+
+.inspector-graph-svg g.inspector-graph-node rect {
+  fill: #222;
+  stroke: #555;
+  stroke-width: 1;
+}
+
+.inspector-graph-svg g.inspector-graph-node:hover rect {
+  stroke: #6cf;
+}
+
+.inspector-graph-svg g.inspector-graph-node-root rect {
+  fill: #17324a;
+  stroke: #6cf;
+  stroke-width: 1.5;
+}
+
+.inspector-graph-svg g.inspector-graph-node text {
+  fill: #ddd;
+  font-size: 11px;
+  font-family: inherit;
+  pointer-events: none;
+}
+
 .inspector-add-property-btn {
   background: none;
   border: none;

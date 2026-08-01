@@ -1343,6 +1343,53 @@ let rec private ancestorsOf (visited: Set<int64>) (objRef: int64) : Set<int64> =
         | None -> Set.empty
         | Some node -> node.Parents |> Array.fold (fun acc p -> Set.add p acc |> Set.union (ancestorsOf visited p)) Set.empty
 
+/// BFS ancestor depths for the inheritance graph (Part 7) - the full
+/// upward chain, unlike `ancestorsOf`'s flat set: an ancestor reachable via
+/// more than one path (diamond inheritance) keeps its *shallowest* depth,
+/// matching how it'd naturally sit in a layered top-down drawing. Also
+/// returns every (moreDerived, ancestor) edge actually walked, deduped -
+/// each real parent link becomes exactly one line in the rendered graph.
+let private ancestorLayers (rootRef: int64) : Map<int64, int> * (int64 * int64) list =
+    let mutable depths = Map.empty
+    let mutable edges = []
+    let mutable frontier = [ rootRef ]
+    let mutable depth = 0
+
+    while not (List.isEmpty frontier) do
+        let next =
+            frontier
+            |> List.collect (fun objRef ->
+                match Map.tryFind objRef treeNodes with
+                | None -> []
+                | Some node ->
+                    node.Parents
+                    |> Array.toList
+                    |> List.map (fun p ->
+                        edges <- (objRef, p) :: edges
+                        p))
+            |> List.filter (fun p -> not (Map.containsKey p depths))
+            |> List.distinct
+
+        depth <- depth + 1
+
+        for p in next do
+            depths <- Map.add p depth depths
+
+        frontier <- next
+
+    depths, edges
+
+/// Direct children only (Part 7's graph goes one level down, not the whole
+/// reachable-descendant set, which has no natural bound the way the
+/// ancestor chain does) - as `(child, rootRef)` pairs, matching
+/// `ancestorLayers`' own `(moreDerived, ancestor)` edge direction so both
+/// edge lists can be drawn by the same generic "connect the lower node's
+/// top to the upper node's bottom" logic.
+let private directChildEdges (rootRef: int64) : (int64 * int64) list =
+    match Map.tryFind rootRef treeNodes with
+    | None -> []
+    | Some node -> node.Children |> Array.toList |> List.map (fun c -> c, rootRef)
+
 /// Reveals `lastFilterSelectedObjRef` (if anything was selected while
 /// filtering) by merging its own ancestor path into the persistent
 /// `expandedRefs` - the same set a plain click on an already-visible object
@@ -1948,6 +1995,134 @@ and private renderObjRefList
     section.appendChild list |> ignore
     container.appendChild section |> ignore
 
+/// Object inheritance graph (Part 7) - a hand-rolled inline SVG rooted at
+/// `rootRef`: its full ancestor chain upward (`ancestorLayers`) and direct
+/// children only downward (`directChildEdges`), laid out in horizontal
+/// layers by BFS depth. Deliberately no new npm dependency (confirmed:
+/// zero SVG/canvas/diagram-library usage anywhere in this codebase or its
+/// dependencies) - the graphs here are object-model-scale, not
+/// thousands-of-nodes scale, so a hand-rolled layered layout is enough.
+/// Skips rendering the section entirely when there's nothing beyond the
+/// root itself (a parentless, childless object) - an empty graph would
+/// just be noise.
+and private renderInheritanceGraph (container: HTMLElement) (rootRef: int64) : unit =
+    let ancestorDepths, ancestorEdges = ancestorLayers rootRef
+    let childEdges = directChildEdges rootRef
+
+    let allNodeLayers =
+        ([ for KeyValue(objRef, depth) in ancestorDepths -> objRef, -depth ]
+         @ [ rootRef, 0 ]
+         @ [ for childRef, _ in childEdges -> childRef, 1 ])
+        |> List.distinctBy fst
+
+    if List.length allNodeLayers > 1 then
+        let labelFor (objRef: int64) : string =
+            Map.tryFind objRef treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" objRef)
+
+        let nodeHeight = 26.0
+        let hGap = 14.0
+        let vGap = 46.0
+        let topPadding = 10.0
+        let sidePadding = 10.0
+        let charWidth = 6.3
+
+        let widthFor (objRef: int64) : float = max 50.0 (float (labelFor objRef).Length * charWidth + 16.0)
+
+        let layers =
+            allNodeLayers
+            |> List.groupBy snd
+            |> List.map (fun (layer, entries) -> layer, entries |> List.map fst)
+            |> List.sortBy fst
+
+        let minLayer = layers |> List.map fst |> List.min
+
+        let layerTotalWidth (objRefs: int64 list) : float =
+            (objRefs |> List.sumBy widthFor) + hGap * float (List.length objRefs - 1)
+
+        let svgWidth = (layers |> List.map (snd >> layerTotalWidth) |> List.max) + sidePadding * 2.0
+        let svgHeight = topPadding * 2.0 + nodeHeight + vGap * float (List.length layers - 1)
+
+        // Each node's box: (x, y, width) - centered within its own layer,
+        // and every layer centered within the SVG's overall width, so a
+        // layer with fewer/narrower nodes than its neighbors doesn't look
+        // left-aligned.
+        let positions =
+            layers
+            |> List.collect (fun (layer, objRefs) ->
+                let totalWidth = layerTotalWidth objRefs
+                let startX = (svgWidth - totalWidth) / 2.0
+                let y = topPadding + float (layer - minLayer) * vGap
+
+                objRefs
+                |> List.fold
+                    (fun (x, acc) objRef ->
+                        let w = widthFor objRef
+                        x + w + hGap, (objRef, (x, y, w)) :: acc)
+                    (startX, [])
+                |> snd)
+            |> Map.ofList
+
+        let svgNs = "http://www.w3.org/2000/svg"
+        let svg = document.createElementNS (svgNs, "svg")
+        svg.setAttribute ("width", string svgWidth)
+        svg.setAttribute ("height", string svgHeight)
+        svg.setAttribute ("class", "inspector-graph-svg")
+
+        // Every edge is `(moreDerived, ancestor)` - `moreDerived` sits in a
+        // strictly higher layer number (drawn lower), so this single rule
+        // (its top edge to the ancestor's bottom edge) covers both the
+        // upward ancestor chain and the root-to-child edges without a
+        // separate case for either.
+        for fromRef, toRef in ancestorEdges @ childEdges do
+            match Map.tryFind fromRef positions, Map.tryFind toRef positions with
+            | Some(fx, fy, fw), Some(tx, ty, tw) ->
+                let line = document.createElementNS (svgNs, "line")
+                line.setAttribute ("x1", string (fx + fw / 2.0))
+                line.setAttribute ("y1", string fy)
+                line.setAttribute ("x2", string (tx + tw / 2.0))
+                line.setAttribute ("y2", string (ty + nodeHeight))
+                line.setAttribute ("class", "inspector-graph-edge")
+                svg.appendChild line |> ignore
+            | _ -> ()
+
+        for KeyValue(objRef, (x, y, w)) in positions do
+            let g = document.createElementNS (svgNs, "g")
+
+            g.setAttribute (
+                "class",
+                (if objRef = rootRef then
+                     "inspector-graph-node inspector-graph-node-root"
+                 else
+                     "inspector-graph-node")
+            )
+
+            g?onclick <- fun (_: Event) -> openOrSwitchToInspector objRef
+
+            let rect = document.createElementNS (svgNs, "rect")
+            rect.setAttribute ("x", string x)
+            rect.setAttribute ("y", string y)
+            rect.setAttribute ("width", string w)
+            rect.setAttribute ("height", string nodeHeight)
+            rect.setAttribute ("rx", "4")
+            g.appendChild rect |> ignore
+
+            let text = document.createElementNS (svgNs, "text")
+            text.setAttribute ("x", string (x + w / 2.0))
+            text.setAttribute ("y", string (y + nodeHeight / 2.0 + 4.0))
+            text.setAttribute ("text-anchor", "middle")
+            text.textContent <- labelFor objRef
+            g.appendChild text |> ignore
+
+            svg.appendChild g |> ignore
+
+        let section = document.createElement ("div")
+        let title = document.createElement ("div")
+        title.classList.add "inspector-section-title"
+        title.textContent <- "Inheritance graph"
+        section.appendChild title |> ignore
+        section.appendChild svg |> ignore
+        container.appendChild section |> ignore
+
 /// Builds the inspector pane's DOM from a `moodev/getObjectInfo` result:
 /// header, a clickable owner link, permission-flag badges, clickable
 /// parents/children lists, a read-only verbs table, and a properties table
@@ -2284,6 +2459,8 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         (toRefList (unbox info?children))
         None
         (Some("child", fun expr -> sendAction [ "action" ==> "add-child"; "obj" ==> int objRef; "childExpr" ==> expr ]))
+
+    renderInheritanceGraph inspectorContentEl objRef
 
     let propsSection = document.createElement ("div")
     let propsTitle = document.createElement ("div")
