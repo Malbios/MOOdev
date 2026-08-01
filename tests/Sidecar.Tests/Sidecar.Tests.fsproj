@@ -14,6 +14,7 @@
     <Compile Include="GitStoreTests.fs" />
     <Compile Include="PromotionTests.fs" />
     <Compile Include="HistoryTests.fs" />
+    <Compile Include="PropertyLiteralParserTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

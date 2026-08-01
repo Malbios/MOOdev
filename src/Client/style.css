@@ -974,6 +974,44 @@ html, body {
   display: none;
 }
 
+.inspector-structured-toggle-btn {
+  background: none;
+  border: 1px solid #444;
+  color: #ccc;
+  cursor: pointer;
+  padding: 0.1em 0.4em;
+  margin-top: 0.3em;
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.inspector-structured-toggle-btn:hover {
+  border-color: #6cf;
+  color: #fff;
+}
+
+.inspector-structured-editor {
+  margin-top: 0.3em;
+  padding: 0.4em;
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 3px;
+}
+
+.inspector-structured-row {
+  display: flex;
+  align-items: center;
+  gap: 0.3em;
+  margin-bottom: 0.3em;
+}
+
+.inspector-structured-actions {
+  display: flex;
+  gap: 0.4em;
+  margin-top: 0.3em;
+}
+
 @keyframes inspector-prop-flash {
   from {
     background: #6cf5;

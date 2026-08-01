@@ -533,6 +533,9 @@ let private buildTryDispatch
                 | "get-server-status" ->
                     do! IdeActions.getServerStatus config session webSocket ct
                     return true
+                | "parse-property-literal" ->
+                    do! IdeActions.parsePropertyLiteralAction webSocket (getObj ()) (getStr "name") (getStr "valueText") ct
+                    return true
                 | "kill-task" ->
                     do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
                     return true

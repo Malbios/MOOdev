@@ -14,6 +14,7 @@ open System.Text
 open System.Text.Json
 open System.Threading
 open System.Threading.Tasks
+open Language.Ast
 open Sidecar.BridgeHandler
 
 type Config =
@@ -1484,6 +1485,124 @@ result = out;"""
             |> List.ofSeq
 
         do! sendWire webSocket "moodev-server-status" lines ct
+    }
+
+type PropertyLiteralParse =
+    | ListLiteral of string list
+    | MapLiteral of (string * string) list
+    | NotAListOrMap
+
+/// A property's raw value text comes from `toliteral()` (see `getProperties`
+/// above) - the printed form of an already-evaluated runtime value, never
+/// re-typed source code - so it can only ever contain literal scalars and
+/// literal-nested lists/maps, never an identifier, operator, splice, or call.
+/// This renders exactly that closed set back to literal text; anything else
+/// (which can only arise if the user hand-typed a non-literal expression into
+/// the raw input before ever toggling structured mode) makes the *whole*
+/// value fall back to `NotAListOrMap` rather than rendering a lossy partial
+/// row - there's no original source span to fall back to for a non-literal
+/// element, so silently reconstructing "the parts we understood" would risk
+/// discarding the parts we didn't on the next save.
+let rec private literalText (e: Expr) : string option =
+    match e with
+    | IntLit n -> Some(string n)
+    | FloatLit f ->
+        // `string f` alone drops the decimal point for whole-number floats
+        // (.NET's default double->string, e.g. `1.0` -> "1") - fine for the
+        // read-only hover rendering `LanguageServer/Handlers.fs`'s own
+        // `exprBrief` uses this same shape for, but not here: this text can
+        // be resubmitted through `set-property`'s `eval()`, where a bare "1"
+        // parses as an INT literal, silently changing the property's type.
+        let s = string f
+        Some(if s.Contains "." || s.Contains "e" || s.Contains "E" then s else s + ".0")
+    | StrLit s -> Some(sprintf "\"%s\"" (s.Replace("\\", "\\\\").Replace("\"", "\\\"")))
+    | ObjLit n -> Some(sprintf "#%d" n)
+    | ErrLit s -> Some s
+    | Unary(Neg, inner) -> literalText inner |> Option.map (sprintf "-%s")
+    | ListLit args ->
+        args
+        |> List.map (function
+            | Normal e -> literalText e
+            | Splice _ -> None)
+        |> sequenceAll
+        |> Option.map (String.concat ", " >> sprintf "{%s}")
+    | MapLit pairs ->
+        pairs
+        |> List.map (fun (k, v) ->
+            match literalText k, literalText v with
+            | Some kt, Some vt -> Some(kt + " -> " + vt)
+            | _ -> None)
+        |> sequenceAll
+        |> Option.map (String.concat ", " >> sprintf "[%s]")
+    | _ -> None
+
+and private sequenceAll (xs: string option list) : string list option =
+    if xs |> List.forall Option.isSome then Some(xs |> List.map Option.get) else None
+
+/// Parses a property's raw MOO-literal value text as a list or map literal,
+/// for the client's structured property editor toggle. Lexes/parses
+/// `"return " + valueText + ";"` - the same "eval as a return statement"
+/// trick `saveVerb`/hover already lean on elsewhere in this codebase,
+/// applied to *parsing* instead of *evaluating* - and matches the single
+/// resulting `Return(Some(ListLit args))`/`Return(Some(MapLit pairs))`.
+let parsePropertyLiteral (valueText: string) : PropertyLiteralParse =
+    let lexResult = Language.Lexer.tokenize ("return " + valueText + ";")
+
+    match lexResult.Error with
+    | Some _ -> NotAListOrMap
+    | None ->
+        let stmts = Language.Parser.parse lexResult.Tokens
+
+        if countErrors stmts > 0 then
+            NotAListOrMap
+        else
+            match stmts with
+            | [ Return(Some(ListLit args)) ] ->
+                match
+                    args
+                    |> List.map (function
+                        | Normal e -> literalText e
+                        | Splice _ -> None)
+                    |> sequenceAll
+                with
+                | Some texts -> ListLiteral texts
+                | None -> NotAListOrMap
+            | [ Return(Some(MapLit pairs)) ] ->
+                let rendered =
+                    pairs
+                    |> List.map (fun (k, v) ->
+                        match literalText k, literalText v with
+                        | Some kt, Some vt -> Some(kt, vt)
+                        | _ -> None)
+
+                if rendered |> List.forall Option.isSome then
+                    MapLiteral(rendered |> List.map Option.get)
+                else
+                    NotAListOrMap
+            | _ -> NotAListOrMap
+
+let parsePropertyLiteralAction
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (pname: string)
+    (valueText: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let json =
+            match parsePropertyLiteral valueText with
+            | ListLiteral texts -> JsonSerializer.Serialize({| kind = "list"; elements = texts |})
+            | MapLiteral pairs ->
+                let elements = pairs |> List.map (fun (k, v) -> {| key = k; value = v |})
+                JsonSerializer.Serialize({| kind = "map"; elements = elements |})
+            | NotAListOrMap -> JsonSerializer.Serialize({| kind = "none" |})
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-property-literal-parsed object: #%d name: %s" objRef pname)
+                [ json ]
+                ct
     }
 
 /// `kill-task {task}` - `kill_task(id)`, wizard-eval'd so it always has

@@ -614,6 +614,25 @@ let mutable private inspectorPropertyLastValues: Map<string, string> = Map.empty
 /// back - see `renderLiteralPreview`'s call site).
 let mutable private inspectorPropertyPreviews: Map<string, HTMLElement> = Map.empty
 
+/// Each currently-rendered inspector's structured-editor toggle button and
+/// its (hidden until toggled on) container `<div>`, by property name -
+/// populated by `renderInspectorStructure`. The toggle button's own
+/// visibility (only shown when the raw text looks list/map-shaped) is
+/// updated both here at row-build time and by the `moodev-prop-content`
+/// handler once the live value arrives; the container is read by the
+/// `moodev-property-literal-parsed` handler to know where to render the
+/// parsed rows for that property. Mirrors `inspectorPropertyInputs`'s own
+/// population/reset points.
+let mutable private inspectorPropertyStructuredToggles: Map<string, HTMLElement * HTMLElement> = Map.empty
+
+/// Whether raw property-value text looks like it might be a list/map literal
+/// worth offering structured editing for - a cheap client-side prefilter
+/// (real confirmation comes from the server actually parsing it) so the
+/// toggle button doesn't show for values that obviously aren't one.
+let private looksListOrMapShaped (text: string) : bool =
+    let trimmed = text.Trim()
+    trimmed.StartsWith("{") || trimmed.StartsWith("[")
+
 /// Each open tab's last-known content - populated when a verb is first
 /// fetched, refreshed with the live editor value right before switching
 /// away from it. Lets switching between already-open tabs be instant (no
@@ -1298,6 +1317,119 @@ let mutable private treeFilterText = ""
 /// "Children" grouping node.
 type private TreeRow = int64 * int * bool
 
+/// Builds the structured (list/map) inline editor for one property's value
+/// cell, replacing the plain `<input>` with one row per element/pair - a
+/// text input each (plus a key input too, for a map), a `🗑` per row
+/// mirroring `renderObjRefList`'s own add/remove-row idiom, and a "+ Add
+/// element" row. "Done" re-serializes every row's current text back into one
+/// literal-text string and sends the ordinary `set-property` action (so the
+/// MOO-side format is untouched - only this parse/re-render round trip is
+/// new), then reverts to the plain `<input>` view; "Cancel" reverts without
+/// saving anything.
+let private renderStructuredEditor
+    (objRef: int64)
+    (pname: string)
+    (input: HTMLInputElement)
+    (toggleBtn: HTMLElement)
+    (container: HTMLElement)
+    (isMap: bool)
+    (elements: obj[])
+    : unit =
+    container.innerHTML <- ""
+
+    let rows = ResizeArray<HTMLInputElement option * HTMLInputElement>()
+    let rowsEl = document.createElement ("div")
+    rowsEl.classList.add "inspector-structured-rows"
+
+    let addRow (keyText: string option) (valueText: string) : unit =
+        let rowEl = document.createElement ("div")
+        rowEl.classList.add "inspector-structured-row"
+
+        let keyInput =
+            keyText
+            |> Option.map (fun kt ->
+                let ki = document.createElement ("input") :?> HTMLInputElement
+                ki.classList.add "inspector-property-value"
+                ki.value <- kt
+                rowEl.appendChild ki |> ignore
+
+                let arrow = document.createElement ("span")
+                arrow.textContent <- " -> "
+                rowEl.appendChild arrow |> ignore
+                ki)
+
+        let valueInput = document.createElement ("input") :?> HTMLInputElement
+        valueInput.classList.add "inspector-property-value"
+        valueInput.value <- valueText
+        rowEl.appendChild valueInput |> ignore
+
+        let removeBtn = document.createElement ("button")
+        removeBtn.classList.add "inspector-row-delete-btn"
+        removeBtn.textContent <- "🗑"
+        removeBtn.title <- "Remove element"
+
+        removeBtn.onclick <-
+            fun _ ->
+                rows.Remove((keyInput, valueInput)) |> ignore
+                rowsEl.removeChild rowEl |> ignore
+
+        rowEl.appendChild removeBtn |> ignore
+        rowsEl.appendChild rowEl |> ignore
+        rows.Add((keyInput, valueInput))
+
+    for el in elements do
+        if isMap then
+            addRow (Some(el?key: string)) (el?value: string)
+        else
+            addRow None (unbox el: string)
+
+    let addElementBtn = document.createElement ("button")
+    addElementBtn.classList.add "inspector-add-property-btn"
+    addElementBtn.textContent <- "+ Add element"
+    addElementBtn.onclick <- fun _ -> addRow (if isMap then Some "" else None) ""
+
+    let actionsEl = document.createElement ("div")
+    actionsEl.classList.add "inspector-structured-actions"
+
+    let revertToPlainInput () : unit =
+        container.setAttribute ("style", "display:none")
+        input.removeAttribute "style"
+        toggleBtn.setAttribute ("style", (if looksListOrMapShaped input.value then "" else "display:none"))
+
+    let doneBtn = document.createElement ("button")
+    doneBtn.textContent <- "Done"
+
+    doneBtn.onclick <-
+        fun _ ->
+            let combined =
+                if isMap then
+                    rows
+                    |> Seq.map (fun (k, v) -> (Option.get k).value + " -> " + v.value)
+                    |> String.concat ", "
+                    |> sprintf "[%s]"
+                else
+                    rows |> Seq.map (fun (_, v) -> v.value) |> String.concat ", " |> sprintf "{%s}"
+
+            input.value <- combined
+            inspectorPropertyLastValues <- Map.add pname combined inspectorPropertyLastValues
+            sendAction [ "action" ==> "set-property"; "obj" ==> int objRef; "name" ==> pname; "valueExpr" ==> combined ]
+            revertToPlainInput ()
+
+    let cancelBtn = document.createElement ("button")
+    cancelBtn.textContent <- "Cancel"
+    cancelBtn.onclick <- fun _ -> revertToPlainInput ()
+
+    actionsEl.appendChild doneBtn |> ignore
+    actionsEl.appendChild cancelBtn |> ignore
+
+    container.appendChild rowsEl |> ignore
+    container.appendChild addElementBtn |> ignore
+    container.appendChild actionsEl |> ignore
+
+    input.setAttribute ("style", "display:none")
+    toggleBtn.setAttribute ("style", "display:none")
+    container.removeAttribute "style"
+
 /// Switches the main area to `tab`, caching whatever was showing before the
 /// switch. A no-op if `tab` is already active (e.g. clicking the tab you're
 /// already on).
@@ -1784,6 +1916,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     inspectorPropertyInputs <- Map.empty
     inspectorPropertyLastValues <- Map.empty
     inspectorPropertyPreviews <- Map.empty
+    inspectorPropertyStructuredToggles <- Map.empty
 
     // Whoever is connected on *this* session - shown in the "You" button's
     // own label (e.g. "You (Wizard (#3))") and used as its actual quick-fill
@@ -2267,8 +2400,32 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let preview = document.createElement ("div")
         preview.classList.add "inspector-property-ansi-preview"
 
+        // Structured (list/map) editor toggle - only shown once the raw
+        // value text actually looks list/map-shaped (see
+        // `moodev-prop-content` below, which rechecks this once the live
+        // value arrives; empty at this point, so hidden here too).
+        let structuredContainer = document.createElement ("div")
+        structuredContainer.classList.add "inspector-structured-editor"
+        structuredContainer.setAttribute ("style", "display:none")
+
+        let structuredToggleBtn = document.createElement ("button")
+        structuredToggleBtn.classList.add "inspector-structured-toggle-btn"
+        structuredToggleBtn.textContent <- "☰"
+        structuredToggleBtn.title <- "Edit as list/map"
+        structuredToggleBtn.setAttribute ("style", "display:none")
+
+        structuredToggleBtn.onclick <-
+            fun _ ->
+                sendAction
+                    [ "action" ==> "parse-property-literal"
+                      "obj" ==> int objRef
+                      "name" ==> pname
+                      "valueText" ==> input.value ]
+
         valueTd.appendChild input |> ignore
         valueTd.appendChild preview |> ignore
+        valueTd.appendChild structuredToggleBtn |> ignore
+        valueTd.appendChild structuredContainer |> ignore
         tr.appendChild valueTd |> ignore
 
         // Deleting only makes sense at the true definer - an inherited row
@@ -2295,6 +2452,9 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         propsTable.appendChild tr |> ignore
         inspectorPropertyInputs <- Map.add pname input inspectorPropertyInputs
         inspectorPropertyPreviews <- Map.add pname preview inspectorPropertyPreviews
+
+        inspectorPropertyStructuredToggles <-
+            Map.add pname (structuredToggleBtn, structuredContainer) inspectorPropertyStructuredToggles
 
         if highlightProp = Some pname then
             highlightRow <- Some tr
@@ -4148,6 +4308,14 @@ ws.onmessage <-
                                         if literal.IndexOf('\x1b') >= 0 || literal.IndexOf('\x07') >= 0 then
                                             Ansi.renderLiteralPreview literal |> Ansi.renderInto preview
                                     | None -> ()
+
+                                    match Map.tryFind pname inspectorPropertyStructuredToggles with
+                                    | Some(toggleBtn, _) ->
+                                        toggleBtn.setAttribute (
+                                            "style",
+                                            (if looksListOrMapShaped literal then "" else "display:none")
+                                        )
+                                    | None -> ()
                                 | None -> ()
                     | _ -> ()
                 | None -> ()
@@ -4160,6 +4328,25 @@ ws.onmessage <-
                         inspectorDiagnosticsEl.textContent <- (if ok then "" else String.concat "\n" lines)
                     | _ -> ()
                 | None -> ()
+            elif header.StartsWith("moodev-property-literal-parsed") then
+                match headerField "object: #" header, headerField "name: " header with
+                | Some objNum, Some pname ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        match Map.tryFind pname inspectorPropertyInputs, Map.tryFind pname inspectorPropertyStructuredToggles with
+                        | Some input, Some(toggleBtn, container) ->
+                            let result: obj = JS.JSON.parse lines.[0]
+
+                            match result?kind: string with
+                            | "list" -> renderStructuredEditor objRef pname input toggleBtn container false (unbox result?elements)
+                            | "map" -> renderStructuredEditor objRef pname input toggleBtn container true (unbox result?elements)
+                            | _ ->
+                                window.alert (
+                                    "This property's value has content too complex to edit structurally - edit it as text instead."
+                                )
+                        | _ -> ()
+                    | _ -> ()
+                | _ -> ()
             elif header.StartsWith("moodev-prop-add-result") then
                 // A successful add needs a full inspector refresh (a new
                 // row now exists) rather than just clearing diagnostics -
