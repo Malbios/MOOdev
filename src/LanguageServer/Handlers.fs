@@ -53,6 +53,21 @@ type DeadVerbEntry =
       Iobj: string
       PossiblyDynamic: bool }
 
+/// One property `FindDeadProperties` found no confirmed read of,
+/// corpus-wide. `PossiblyDynamic` mirrors `DeadVerbEntry`'s own flag, but
+/// covers two distinct dynamic-access shapes properties have that verb
+/// dispatch doesn't need separately (verb dispatch only ever has
+/// "unresolvable receiver" to worry about; property access also has
+/// "resolvable receiver, but a computed name"):
+///   - some `obj.(name)` occurrence whose receiver couldn't be resolved at
+///     all, with a literal name matching this property, or
+///   - some `obj.(expr)` occurrence (a genuinely computed name) whose
+///     receiver DID resolve to this exact property's own declaring object.
+type DeadPropertyEntry =
+    { ObjRef: ObjRef
+      PropertyName: string
+      PossiblyDynamic: bool }
+
 /// One reference `FindReferencesToObject` found to a candidate recycle
 /// target - used by the recycle-safety precheck (see `findReferencesToObject`
 /// below for what each `Kind` means and what this deliberately doesn't
@@ -574,6 +589,88 @@ let findDeadVerbs (graph: Graph) : DeadVerbEntry[] =
                       Iobj = v.Meta.Iobj
                       PossiblyDynamic = possiblyDynamic }
             | _ -> None))
+    |> Array.ofSeq
+
+/// Every `RefProp` reference across every parsed verb in the graph, tagged
+/// with the (object, primary verb name) it's found inside - same shape as
+/// `allVerbCallReferences` above, filtered to property access instead of
+/// verb calls.
+let private allPropertyReferences (graph: Graph) : (ObjRef * string * AstQuery.FoundReference) seq =
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Verbs
+        |> Seq.collect (fun v ->
+            match v.Ast, v.Meta.Names with
+            | Some stmts, primary :: _ ->
+                AstQuery.collectReferences stmts
+                |> Seq.filter (fun r ->
+                    match r.Ref with
+                    | AstQuery.RefProp _ -> true
+                    | _ -> false)
+                |> Seq.map (fun r -> num, primary, r)
+            | _ -> Seq.empty))
+
+/// Corpus-wide "what's safe to delete" scan for properties, mirroring
+/// `findDeadVerbs`'s exact shape (every occurrence resolves independently
+/// against every property in the graph). A property only counts as read for
+/// a *literal*-name `RefProp` whose receiver resolves
+/// (`resolveReceiverInContext`) to a start object from which
+/// `findDeclaringObjectForProperty` reaches this exact property, and whose
+/// occurrence position isn't one of its containing verb's own
+/// `Assign(Prop(...), _)` targets (`AstQuery.assignedPropertyPositions`,
+/// computed once per verb up front) - an assignment alone doesn't prove
+/// anything downstream ever reads the value back. Deliberately not
+/// `private` (like `findDeadVerbs`), so `LanguageServer.Tests` can call it
+/// directly.
+let findDeadProperties (graph: Graph) : DeadPropertyEntry[] =
+    let assignedPositionsByVerb =
+        graph.Objects
+        |> Map.toSeq
+        |> Seq.collect (fun (num, o) ->
+            o.Verbs
+            |> Seq.choose (fun v ->
+                match v.Ast, v.Meta.Names with
+                | Some stmts, primary :: _ -> Some((num, primary), AstQuery.assignedPropertyPositions stmts)
+                | _ -> None))
+        |> Map.ofSeq
+
+    let confirmedReads = System.Collections.Generic.HashSet<ObjRef * string>()
+    let unresolvedReceiverNames = System.Collections.Generic.HashSet<string>()
+    let computedNameStartObjects = System.Collections.Generic.HashSet<ObjRef>()
+
+    for containingObj, containingVerbName, r in allPropertyReferences graph do
+        match r.Ref with
+        | AstQuery.RefProp(receiver, StrLit propName) ->
+            match Metadata.Resolver.resolveReceiverInContext graph containingObj receiver with
+            | Some startObj ->
+                match Metadata.Resolver.findDeclaringObjectForProperty graph startObj propName with
+                | Some declaringObj ->
+                    let isAssignTarget =
+                        assignedPositionsByVerb
+                        |> Map.tryFind (containingObj, containingVerbName)
+                        |> Option.map (Set.contains (r.Line, r.Col))
+                        |> Option.defaultValue false
+
+                    if not isAssignTarget then
+                        confirmedReads.Add(declaringObj, propName) |> ignore
+                | None -> ()
+            | None -> unresolvedReceiverNames.Add propName |> ignore
+        | AstQuery.RefProp(receiver, _) ->
+            Metadata.Resolver.resolveReceiverInContext graph containingObj receiver
+            |> Option.iter (fun startObj -> computedNameStartObjects.Add startObj |> ignore)
+        | _ -> ()
+
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Properties
+        |> Seq.choose (fun p ->
+            if confirmedReads.Contains(num, p.Name) then
+                None
+            else
+                let possiblyDynamic = unresolvedReceiverNames.Contains p.Name || computedNameStartObjects.Contains num
+                Some { ObjRef = num; PropertyName = p.Name; PossiblyDynamic = possiblyDynamic }))
     |> Array.ofSeq
 
 /// Recycle-safety precheck: every statically-confirmable reference to
@@ -1635,6 +1732,11 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// at a time via `TextDocumentReferences`.
     member _.FindDeadVerbs(_p: obj) : Async<Result<DeadVerbEntry[], JsonRpc.Error>> =
         async { return Ok(findDeadVerbs graph) }
+
+    /// Custom method (`moodev/findDeadProperties`, no params) - the same
+    /// "what's safe to delete" report as `FindDeadVerbs`, for properties.
+    member _.FindDeadProperties(_p: obj) : Async<Result<DeadPropertyEntry[], JsonRpc.Error>> =
+        async { return Ok(findDeadProperties graph) }
 
     /// Custom method (`moodev/findReferencesToObject`, `{objRef}`) - the
     /// recycle-safety precheck report for one candidate object: every

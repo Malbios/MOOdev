@@ -68,6 +68,7 @@ let private viewHistoryBtn = document.getElementById ("view-history")
 let private viewTasksBtn = document.getElementById ("view-tasks")
 let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
+let private viewDeadPropertiesBtn = document.getElementById ("view-dead-properties")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
@@ -118,6 +119,9 @@ let private errorsClearBtn = document.getElementById ("errors-clear-btn")
 let private sidebarViewDeadVerbsEl = document.getElementById ("sidebar-view-dead-verbs")
 let private treeDeadVerbsSummaryEl = document.getElementById ("tree-dead-verbs-summary")
 let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list")
+let private sidebarViewDeadPropertiesEl = document.getElementById ("sidebar-view-dead-properties")
+let private treeDeadPropertiesSummaryEl = document.getElementById ("tree-dead-properties-summary")
+let private treeDeadPropertiesListEl = document.getElementById ("tree-dead-properties-list")
 let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
 let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
 let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
@@ -501,6 +505,7 @@ type private SidebarView =
     | TasksView
     | ErrorsView
     | DeadVerbsView
+    | DeadPropertiesView
     | GotchasView
     | DocsView
     | EvalScratchpadView
@@ -903,6 +908,7 @@ let private allSidebarViews =
       sidebarViewTasksEl
       sidebarViewErrorsEl
       sidebarViewDeadVerbsEl
+      sidebarViewDeadPropertiesEl
       sidebarViewGotchasEl
       sidebarViewDocsEl
       sidebarViewScratchpadEl ]
@@ -2810,6 +2816,16 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderDeadVerbsResults results
         }
         |> Async.StartImmediate
+    | DeadPropertiesView ->
+        activateOnlySidebarView sidebarViewDeadPropertiesEl
+        treeDeadPropertiesSummaryEl.textContent <- "Scanning..."
+        treeDeadPropertiesListEl.innerHTML <- ""
+
+        async {
+            let! results = LspClient.findDeadPropertiesAsync ()
+            renderDeadPropertiesResults results
+        }
+        |> Async.StartImmediate
     | GotchasView ->
         activateOnlySidebarView sidebarViewGotchasEl
         treeGotchasSummaryEl.textContent <- "Scanning..."
@@ -2845,6 +2861,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewTasksBtn, TasksView
           viewErrorsBtn, ErrorsView
           viewDeadVerbsBtn, DeadVerbsView
+          viewDeadPropertiesBtn, DeadPropertiesView
           viewGotchasBtn, GotchasView
           viewDocsBtn, DocsView
           viewScratchpadBtn, EvalScratchpadView ] do
@@ -3044,6 +3061,38 @@ and private renderDeadVerbsResults (results: (int64 * string * string * string *
                 call
 
         treeDeadVerbsListEl.appendChild li |> ignore
+
+/// Same shape as `renderDeadVerbsResults`, for `moodev/findDeadProperties`'
+/// results - clicking a row opens the *owning object's inspector*
+/// (`openOrSwitchToInspector`), not a verb tab, since properties don't have
+/// an editor of their own the way verbs do.
+and private renderDeadPropertiesResults (results: (int64 * string * bool)[]) : unit =
+    let dynamicCount = results |> Array.filter (fun (_, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
+
+    treeDeadPropertiesSummaryEl.textContent <-
+        if results.Length = 0 then
+            "No dead properties found."
+        else
+            let noun = if results.Length = 1 then "property" else "properties"
+            sprintf "%d dead %s, %d possibly referenced dynamically" results.Length noun dynamicCount
+
+    treeDeadPropertiesListEl.innerHTML <- ""
+
+    for objRef, propertyName, possiblyDynamic in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+        li.onclick <- fun _ -> openOrSwitchToInspector objRef
+
+        let label = sprintf "#%d.%s" objRef propertyName
+
+        li.textContent <-
+            if possiblyDynamic then
+                sprintf "%s (possibly referenced dynamically)" label
+            else
+                label
+
+        treeDeadPropertiesListEl.appendChild li |> ignore
 
 /// Human-readable label for one of `Handlers.GotchaEntry`'s plain-string
 /// `Kind` tags - kept client-side (like `renderDeadVerbsResults`'s own
@@ -3639,6 +3688,7 @@ viewHistoryBtn.onclick <- fun _ -> onActivityBtnClick HistoryView
 viewTasksBtn.onclick <- fun _ -> onActivityBtnClick TasksView
 viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
 viewDeadVerbsBtn.onclick <- fun _ -> onActivityBtnClick DeadVerbsView
+viewDeadPropertiesBtn.onclick <- fun _ -> onActivityBtnClick DeadPropertiesView
 viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView

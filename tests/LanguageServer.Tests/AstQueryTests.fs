@@ -141,3 +141,32 @@ let ``boundVariableNames still returns a plain distinct sorted name list`` () =
           ExprStmt(Assign(Ident("b", 3, 1), IntLit 3L)) ] // reassigned - must not duplicate
 
     Assert.Equal<string list>([ "a"; "b" ], boundVariableNames stmts)
+
+// --- assignedPropertyPositions -----------------------------------------
+
+[<Fact>]
+let ``assignedPropertyPositions marks a plain property assignment's own position`` () =
+    // this.foo = 1; - the Prop node's own (line, col) is what a bare read
+    // of the same property would report too (same underlying node).
+    let target = Prop(Ident("this", 1, 1), StrLit "foo", 1, 6)
+    let stmts = [ ExprStmt(Assign(target, IntLit 1L)) ]
+
+    Assert.Equal<Set<int * int>>(Set.ofList [ 1, 6 ], assignedPropertyPositions stmts)
+
+[<Fact>]
+let ``assignedPropertyPositions does not mark a bare read of the same property`` () =
+    let read = Prop(Ident("this", 1, 1), StrLit "foo", 1, 6)
+    let stmts = [ ExprStmt(Assign(Ident("x", 2, 1), read)) ] // x = this.foo; - a read, not a write
+
+    Assert.Empty(assignedPropertyPositions stmts)
+
+[<Fact>]
+let ``assignedPropertyPositions distinguishes a write from a read of the same property in the same verb`` () =
+    let writeTarget = Prop(Ident("this", 1, 1), StrLit "foo", 1, 6)
+    let readSite = Prop(Ident("this", 2, 1), StrLit "foo", 2, 6)
+
+    let stmts =
+        [ ExprStmt(Assign(writeTarget, IntLit 1L)) // this.foo = 1;
+          ExprStmt(Assign(Ident("x", 2, 1), readSite)) ] // x = this.foo;
+
+    Assert.Equal<Set<int * int>>(Set.ofList [ 1, 6 ], assignedPropertyPositions stmts)

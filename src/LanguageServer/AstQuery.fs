@@ -287,6 +287,125 @@ let allBoundNames (stmts: Stmt list) : BoundName list =
     stmts |> List.iter goStmt
     List.ofSeq acc
 
+/// Every `(line, col)` position of a `Prop` node that is the assignment
+/// *target* of `obj.prop = expr;` - `collectReferences`'s `RefProp` entries
+/// don't distinguish a read from a write (`collectExpr`'s `Assign` case
+/// recurses into both sides uniformly, so `x = obj.prop;` and
+/// `obj.prop = x;` produce the identical `RefProp` entry for the same
+/// `Prop` node), so a caller that needs to tell them apart (the
+/// property-level dead-reference finder) checks its occurrences' positions
+/// against this set instead. Mirrors `allBoundNames`'s own full-tree walk
+/// shape.
+let assignedPropertyPositions (stmts: Stmt list) : Set<int * int> =
+    let acc = ResizeArray<int * int>()
+
+    let rec goExpr (e: Expr) : unit =
+        match e with
+        | Assign(Prop(objE, nameE, line, col), rhs) ->
+            acc.Add(line, col)
+            goExpr objE
+            goExpr nameE
+            goExpr rhs
+        | Assign(lhs, rhs) ->
+            goExpr lhs
+            goExpr rhs
+        | Ident _
+        | IntLit _
+        | FloatLit _
+        | StrLit _
+        | ObjLit _
+        | ErrLit _
+        | FirstIndex
+        | LastIndex -> ()
+        | Call(_, args, _, _) -> args |> List.iter goArg
+        | Prop(a, b, _, _) ->
+            goExpr a
+            goExpr b
+        | VerbCall(a, b, args, _, _) ->
+            goExpr a
+            goExpr b
+            args |> List.iter goArg
+        | Index(a, b)
+        | Range(a, b)
+        | Binary(_, a, b) ->
+            goExpr a
+            goExpr b
+        | Unary(_, a) -> goExpr a
+        | Cond(a, b, c) ->
+            goExpr a
+            goExpr b
+            goExpr c
+        | Catch(a, codes, fallback) ->
+            goExpr a
+            goCodes codes
+            fallback |> Option.iter goExpr
+        | Scatter(items, rhs) ->
+            items
+            |> List.iter (function
+                | Optional(_, Some def) -> goExpr def
+                | Required _
+                | Optional(_, None)
+                | Rest _ -> ())
+
+            goExpr rhs
+        | ListLit args -> args |> List.iter goArg
+        | MapLit pairs ->
+            pairs
+            |> List.iter (fun (k, v) ->
+                goExpr k
+                goExpr v)
+
+    and goArg (a: Arg) : unit =
+        match a with
+        | Normal e
+        | Splice e -> goExpr e
+
+    and goCodes (c: Codes) : unit =
+        match c with
+        | AnyCode -> ()
+        | Codes args -> args |> List.iter goArg
+
+    let rec goStmt (s: Stmt) : unit =
+        match s with
+        | If(arms, elsePart) ->
+            arms
+            |> List.iter (fun (cond, body) ->
+                goExpr cond
+                body |> List.iter goStmt)
+
+            elsePart |> Option.iter (List.iter goStmt)
+        | ForList(_, _, source, body) ->
+            goExpr source
+            body |> List.iter goStmt
+        | ForRange(_, lo, hi, body) ->
+            goExpr lo
+            goExpr hi
+            body |> List.iter goStmt
+        | While(_, cond, body) ->
+            goExpr cond
+            body |> List.iter goStmt
+        | Fork(_, delay, body) ->
+            goExpr delay
+            body |> List.iter goStmt
+        | TryExcept(body, arms) ->
+            body |> List.iter goStmt
+
+            arms
+            |> List.iter (fun a ->
+                goCodes a.Codes
+                a.Body |> List.iter goStmt)
+        | TryFinally(body, handler) ->
+            body |> List.iter goStmt
+            handler |> List.iter goStmt
+        | ExprStmt e -> goExpr e
+        | Return eOpt -> eOpt |> Option.iter goExpr
+        | Break _
+        | Continue _
+        | ErrorStmt _ -> ()
+
+    stmts |> List.iter goStmt
+    Set.ofSeq acc
+
 /// Every distinct variable name bound anywhere in a verb's AST - see
 /// `allBoundNames` for exactly which binding shapes count. Used by
 /// completion, which only wants the set of names, not where they come from.

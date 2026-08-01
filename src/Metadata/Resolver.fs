@@ -103,6 +103,42 @@ let findCallableVerb (graph: Graph) (start: ObjRef) (verbName: string) : (ObjRef
 
         result
 
+/// Property analog of `findCallableVerb` above - MOO property lookup
+/// (`db_find_property`) is a plain existence check with no name-wildcarding
+/// and no permission-bit gate (unlike verb dispatch, properties don't carry
+/// per-lookup `x`-bit semantics), so this mirrors `findCallableVerb`'s exact
+/// ancestor-walk shape (self first, then depth-first left-to-right through
+/// `parents`, no de-duplication) with a simpler match test.
+let findDeclaringObjectForProperty (graph: Graph) (start: ObjRef) (propName: string) : ObjRef option =
+    let hasOwnProperty obj =
+        graph.Objects
+        |> Map.tryFind obj
+        |> Option.map (fun n -> n.Properties |> List.exists (fun p -> p.Name = propName))
+        |> Option.defaultValue false
+
+    if hasOwnProperty start then
+        Some start
+    else
+        let parentsOf obj =
+            graph.Objects
+            |> Map.tryFind obj
+            |> Option.map (fun n -> n.Parents)
+            |> Option.defaultValue []
+
+        let mutable stack = parentsOf start
+        let mutable result = None
+
+        while result.IsNone && not stack.IsEmpty do
+            let candidate = List.head stack
+            stack <- List.tail stack
+
+            if hasOwnProperty candidate then
+                result <- Some candidate
+            else
+                stack <- parentsOf candidate @ stack
+
+        result
+
 /// Every executable verb's primary name reachable from `start` via the
 /// full ancestor closure (self + all transitive parents) - for completion
 /// lists, not dispatch: unlike `findCallableVerb`, this collects the whole

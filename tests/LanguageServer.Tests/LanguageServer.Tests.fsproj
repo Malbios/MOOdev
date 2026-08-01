@@ -10,6 +10,7 @@
     <Compile Include="HandlerTests.fs" />
     <Compile Include="InlayHintTests.fs" />
     <Compile Include="DeadVerbFinderTests.fs" />
+    <Compile Include="PropertyDeadReferenceFinderTests.fs" />
     <Compile Include="ObjectReferenceFinderTests.fs" />
     <Compile Include="GotchaFinderTests.fs" />
     <Compile Include="VerbSummaryTests.fs" />

@@ -39,6 +39,11 @@ let private objNode (num: ObjRef) (parents: ObjRef list) (verbs: VerbNode list) 
       Properties = []
       Aliases = [] }
 
+let private propMeta (name: string) : PropertyMeta = { Name = name; Owner = 2L; Perms = "rc" }
+
+let private objNodeWithProps (num: ObjRef) (parents: ObjRef list) (properties: string list) : ObjectNode =
+    { objNode num parents [] with Properties = properties |> List.map propMeta }
+
 let private graphOf (objects: ObjectNode list) : Graph =
     { Objects = objects |> List.map (fun o -> o.Num, o) |> Map.ofList
       SystemObjectProperties = Map.empty
@@ -161,6 +166,47 @@ let ``verb order on the same object: first match wins`` () =
     match findCallableVerb graph 1L "get" with
     | Some(_, v) -> Assert.Equal(1, v.Meta.Index)
     | None -> Assert.Fail "expected a match"
+
+// --- findDeclaringObjectForProperty -----------------------------------
+
+[<Fact>]
+let ``finds a property declared directly on the starting object`` () =
+    let graph = graphOf [ objNodeWithProps 1L [] [ "foo" ] ]
+    Assert.Equal(Some 1L, findDeclaringObjectForProperty graph 1L "foo")
+
+[<Fact>]
+let ``walks a single-parent chain to find an inherited property`` () =
+    let root = objNodeWithProps 1L [] [ "foo" ]
+    let child = objNodeWithProps 2L [ 1L ] []
+    let grandchild = objNodeWithProps 3L [ 2L ] []
+    let graph = graphOf [ root; child; grandchild ]
+
+    Assert.Equal(Some 1L, findDeclaringObjectForProperty graph 3L "foo")
+
+[<Fact>]
+let ``findDeclaringObjectForProperty: diamond inheritance picks the first parent's ancestor over the second's`` () =
+    let a = objNodeWithProps 1L [] []
+    let b = objNodeWithProps 2L [ 1L ] [ "foo" ]
+    let c = objNodeWithProps 3L [ 1L ] [ "foo" ]
+    let d = objNodeWithProps 4L [ 2L; 3L ] []
+    let graph = graphOf [ a; b; c; d ]
+
+    Assert.Equal(Some 2L, findDeclaringObjectForProperty graph 4L "foo") // B, not C
+
+[<Fact>]
+let ``findDeclaringObjectForProperty: a dangling parent reference is skipped, not an error`` () =
+    let child = objNodeWithProps 1L [ 99L ] []
+    let graph = graphOf [ child ]
+
+    Assert.True((findDeclaringObjectForProperty graph 1L "foo").IsNone)
+
+[<Fact>]
+let ``findDeclaringObjectForProperty: no match anywhere in the ancestor chain returns None`` () =
+    let root = objNodeWithProps 1L [] [ "bar" ]
+    let child = objNodeWithProps 2L [ 1L ] []
+    let graph = graphOf [ root; child ]
+
+    Assert.True((findDeclaringObjectForProperty graph 2L "foo").IsNone)
 
 // --- resolveReceiver --------------------------------------------------
 

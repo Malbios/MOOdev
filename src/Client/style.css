@@ -607,12 +607,14 @@ html, body {
 
 /* --- Dead-verbs view -------------------------------------------------- */
 
-#sidebar-view-dead-verbs {
+#sidebar-view-dead-verbs,
+#sidebar-view-dead-properties {
   overflow-y: auto;
   padding: 0.8em 1em;
 }
 
-#tree-dead-verbs-summary {
+#tree-dead-verbs-summary,
+#tree-dead-properties-summary {
   color: #999;
   margin-bottom: 0.6em;
 }

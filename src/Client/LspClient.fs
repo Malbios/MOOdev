@@ -202,6 +202,24 @@ let findDeadVerbsAsync () : Async<(int64 * string * string * string * string * b
                     (o?possiblyDynamic: bool))
     }
 
+/// Custom method (`moodev/findDeadProperties`, no params) - the same
+/// "what's safe to delete" scan as `findDeadVerbsAsync`, for properties
+/// (matches `Handlers.MooLspServer.FindDeadProperties`/
+/// `Handlers.findDeadProperties`).
+let findDeadPropertiesAsync () : Async<(int64 * string * bool)[]> =
+    async {
+        let! result = requestAsync "moodev/findDeadProperties" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+
+            return
+                items
+                |> Array.map (fun o -> int64 (o?objRef: float), (o?propertyName: string), (o?possiblyDynamic: bool))
+    }
+
 /// Custom method (`moodev/findReferencesToObject`, `{objRef}`) - the
 /// recycle-safety precheck: every reference `Handlers.findReferencesToObject`
 /// can confirm statically for one candidate object (matches
