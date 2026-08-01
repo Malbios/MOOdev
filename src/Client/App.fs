@@ -4517,9 +4517,83 @@ ws.onmessage <-
                     let ok = headerField "ok: " header = Some "1"
                     resolve (ok, (if ok then "" else String.concat "\n" lines))
                 | None -> ()
+            elif header.StartsWith("moodev-rename-result") then
+                if headerField "ok: " header = Some "1" then
+                    if not (Array.isEmpty lines) then
+                        window.alert ("Renamed, with warnings:\n" + String.concat "\n" lines)
+
+                    // A rename's blast radius isn't limited to whichever verb
+                    // was open when F2 was pressed - refresh every currently
+                    // open verb tab rather than trying to track exactly which
+                    // ones the server touched. Inspector tabs don't need this
+                    // (`loadInspector`'s "always fresh" rule already re-fetches
+                    // on every activation, so a stale one self-corrects the
+                    // next time it's clicked).
+                    for renameObjRef, renameVerbName in openVerbTabs do
+                        fetchVerb renameObjRef renameVerbName
+                else
+                    window.alert ("Rename failed:\n" + String.concat "\n" lines)
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text
+
+/// F2 - resolves the verb call under the cursor via `moodev/prepareRename`,
+/// confirms the new name (and the unresolved-site caveat, if any) with the
+/// user, then sends the `"rename-verb"` Sidecar action with the server's
+/// own confirmed-site list. The client never edits anything itself here -
+/// it's purely a confirm-and-forward step; the actual rename is entirely
+/// server-side (see moo-dev's "server-orchestrated batch action" design
+/// note for why this doesn't go through Monaco's native
+/// `registerRenameProvider`/`textDocument/rename`).
+let private runRenameSymbolFlow () : unit =
+    match currentVerbDoc () with
+    | None -> ()
+    | Some(objRef, verbName) ->
+        let position = editor.getPosition ()
+
+        if not (isNullOrUndefined position) then
+            let lspLine = (position?lineNumber: int) - 1
+            let lspCol = (position?column: int) - 1
+
+            async {
+                match! LspClient.prepareRenameAsync objRef verbName lspLine lspCol with
+                | None -> window.alert "Nothing to rename here - place the cursor on a resolvable obj:verb(...) call."
+                | Some prepared ->
+                    let newName: string = window.prompt (sprintf "Rename \"%s\" to:" prepared.VerbName, prepared.VerbName)
+
+                    if not (isNull newName) && newName.Trim() <> "" && newName.Trim() <> prepared.VerbName then
+                        let proceed =
+                            if prepared.UnresolvedCount > 0 then
+                                window.confirm (
+                                    sprintf
+                                        "%d call site(s) will be updated. %d more call site(s) use this verb's name but couldn't be confirmed statically and won't be renamed. Continue?"
+                                        prepared.Sites.Length
+                                        prepared.UnresolvedCount
+                                )
+                            else
+                                window.confirm (sprintf "%d call site(s) will be updated. Continue?" prepared.Sites.Length)
+
+                        if proceed then
+                            let sitesJson =
+                                prepared.Sites
+                                |> Array.map (fun s ->
+                                    createObj
+                                        [ "objRef" ==> float s.ObjRef
+                                          "verbName" ==> s.VerbName
+                                          "line" ==> s.Line
+                                          "col" ==> s.Col
+                                          "length" ==> s.Length ])
+
+                            sendAction
+                                [ "action" ==> "rename-verb"
+                                  "obj" ==> int prepared.ObjRef
+                                  "oldName" ==> prepared.VerbName
+                                  "newName" ==> newName.Trim()
+                                  "sites" ==> sitesJson ]
+            }
+            |> Async.StartImmediate
+
+Monaco.registerRenameAction editor (fun () -> runRenameSymbolFlow ())
 
 Monaco.wireLsp
     (fun () -> currentVerbDoc ())

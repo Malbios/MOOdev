@@ -757,6 +757,44 @@ let ``references at a position with no VerbCall under it returns Ok None, not an
     | other -> Assert.Fail(sprintf "expected Ok None (no VerbCall under cursor), got %A" other)
 
 // ---------------------------------------------------------------------------
+// PrepareRename (custom method) - the server-orchestrated rename's own
+// resolution pipeline, almost identical to TextDocumentReferences above but
+// returning structured RenameCallSite data instead of Location[]. Reuses
+// the same `this:capture_verb(...)` fixture the "these used to only count
+// as unresolved" references regression test above already exercises.
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``PrepareRename resolves the verb under the cursor and finds every confirmed call site`` () =
+    let objRef, v = findVerb 40L "handle_verb_programmed"
+    let uri = uriFor objRef "handle_verb_programmed"
+    let stmts = v.Ast |> Option.get
+
+    let position =
+        stmts |> positionOf (function RefVerbCall(Ident("this", _, _), StrLit "capture_verb", _) -> true | _ -> false)
+
+    let p: PrepareRenameParams = { TextDocument = { Uri = uri }; Position = position }
+
+    match server.Value.PrepareRename(p) |> Async.RunSynchronously with
+    | Ok(Some result) ->
+        Assert.Equal(40L, result.ObjRef)
+        Assert.Equal("capture_verb", result.VerbName)
+        Assert.Contains(result.Sites, (fun s -> s.ObjRef = 40L && s.VerbName = "handle_verb_programmed"))
+        Assert.Contains(result.Sites, (fun s -> s.ObjRef = 40L && s.VerbName = "import_all"))
+        Assert.Equal(0, result.UnresolvedCount)
+    | other -> Assert.Fail(sprintf "expected Ok(Some _), got %A" other)
+
+[<Fact>]
+let ``PrepareRename at a position with no VerbCall under it returns Ok None, not an error`` () =
+    let objRef, v = findVerb 40L "export_builtins"
+    let uri = uriFor objRef "export_builtins"
+    let p: PrepareRenameParams = { TextDocument = { Uri = uri }; Position = { Line = 0u; Character = 0u } }
+
+    match server.Value.PrepareRename(p) |> Async.RunSynchronously with
+    | Ok None -> ()
+    | other -> Assert.Fail(sprintf "expected Ok None (no VerbCall under cursor), got %A" other)
+
+// ---------------------------------------------------------------------------
 // GetObjectTree (custom, non-LSP-spec method) - replaces the retired
 // ListObjects/ListVerbs (Handlers.fs no longer defines either; the unified
 // object tree view reads everything from this one call instead).

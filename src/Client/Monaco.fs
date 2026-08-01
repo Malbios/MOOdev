@@ -168,6 +168,23 @@ type IStandaloneCodeEditor =
     /// `position?lineNumber`/`position?column` convention.
     abstract onDidChangeCursorPosition: listener: (obj -> unit) -> obj
     abstract getAction: id: string -> IEditorAction
+    /// Binds `handler` to `keybinding` - unlike `addAction` (which merely
+    /// *contributes* an action that only gets a live keybinding if nothing
+    /// else already claims it), this *overrides* whatever was bound to that
+    /// exact key combo before, editor-instance-scoped (confirmed directly
+    /// against the installed package's own `editor.api.d.ts`, same as
+    /// `MarkerSeverity.Error = 8` above). Needed for F2 specifically: Monaco
+    /// ships a built-in "Rename Symbol" action already bound to F2 that
+    /// silently no-ops for a language with no registered rename provider
+    /// (`moocode` has none - this project's rename is a custom action, not
+    /// `textDocument/rename`) - `addAction` alone left that built-in
+    /// shadowing every keypress with no visible effect and no error,
+    /// confirmed live before switching to `addCommand` here.
+    abstract addCommand: keybinding: int * handler: System.Action -> unit
+    /// The cursor's current position (`{lineNumber, column}`, both 1-based)
+    /// - `null` if the editor has no model yet. Same shape
+    /// `onDidChangeCursorPosition`'s event object already carries.
+    abstract getPosition: unit -> obj
     /// Moves the cursor (no scrolling) - `lineNumber`/`column` both 1-based,
     /// same convention as everywhere else in this file. Used by go-to-
     /// definition's same-document case (a local variable's definition,
@@ -200,6 +217,16 @@ let create (container: Browser.Types.HTMLElement) : IStandaloneCodeEditor =
               "minimap" ==> createObj [ "enabled" ==> true ] ]
 
     monaco?editor?create (container, options)
+
+/// F2 - the universal "rename symbol" convention, not a context-menu item
+/// (`KeyCode.F2 = 60`, confirmed directly in the installed package's own
+/// `editor.api.d.ts`, same as `MarkerSeverity.Error = 8` above). `onRename`
+/// gets no arguments - callers already have `editor` itself in scope
+/// (this is called right after `create`) and read the cursor position via
+/// `editor.getPosition()` themselves, rather than this function threading
+/// it through.
+let registerRenameAction (editor: IStandaloneCodeEditor) (onRename: unit -> unit) : unit =
+    editor.addCommand (60, System.Action(onRename))
 
 /// Replaces every compile-error marker on `editor`'s current model with
 /// `lineErrors` (line number, message) - an empty list clears them. Owner

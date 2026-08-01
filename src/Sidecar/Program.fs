@@ -551,6 +551,19 @@ let private buildTryDispatch
                 | "search-content" ->
                     do! IdeActions.searchContent config session webSocket (getStr "query") ct
                     return true
+                | "rename-verb" ->
+                    let sites =
+                        root.GetProperty("sites").EnumerateArray()
+                        |> Seq.map (fun s ->
+                            s.GetProperty("objRef").GetInt64(),
+                            s.GetProperty("verbName").GetString(),
+                            s.GetProperty("line").GetInt32(),
+                            s.GetProperty("col").GetInt32(),
+                            s.GetProperty("length").GetInt32())
+                        |> List.ofSeq
+
+                    do! IdeActions.renameVerb config session webSocket (getObj ()) (getStr "oldName") (getStr "newName") sites ct
+                    return true
                 | "corponym-history" ->
                     do! IdeActions.corponymHistory config webSocket ct
                     return true

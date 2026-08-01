@@ -68,6 +68,43 @@ type DeadPropertyEntry =
       PropertyName: string
       PossiblyDynamic: bool }
 
+/// `moodev/prepareRename`'s params - a plain `{uri, position}` pair, same
+/// shape as the standard LSP `ReferenceParams` minus its unused `Context`
+/// field. A custom method (not `textDocument/prepareRename`) since this
+/// project's rename is a custom, server-orchestrated batch action, not a
+/// `textDocument/rename` implementation - see the top-five-todos plan's own
+/// "Known Hazards" note on why: Monaco runs one shared editor/model for
+/// whichever tab is active, so the standard rename protocol's "apply edits
+/// against already-open models" assumption doesn't hold here.
+type PrepareRenameParams =
+    { TextDocument: TextDocumentIdentifier
+      Position: Position }
+
+/// One confirmed call site `PrepareRename` found - everything
+/// `IdeActions.renameVerb` needs to splice `NewName` in at the right spot
+/// without re-resolving anything server-side a second time.
+/// `Line`/`Col`/`Length` are 1-based, matching `AstQuery.FoundReference`'s
+/// own convention directly (not re-based to LSP's 0-based `Position`, since
+/// this result is never rendered through Monaco - it goes straight into a
+/// `"rename-verb"` Sidecar action).
+type RenameCallSite =
+    { ObjRef: ObjRef
+      VerbName: string
+      Line: int
+      Col: int
+      Length: int }
+
+/// `moodev/prepareRename`'s result - `None` when the cursor isn't on a
+/// resolvable verb call at all (mirrors every other position-based query's
+/// "nothing here" case). `VerbName` is the resolved verb's own *current*
+/// primary name (not necessarily the alias the cursor's call site used), so
+/// the client's rename prompt shows what's actually being renamed.
+type PrepareRenameResult =
+    { ObjRef: ObjRef
+      VerbName: string
+      Sites: RenameCallSite[]
+      UnresolvedCount: int }
+
 /// One reference `FindReferencesToObject` found to a candidate recycle
 /// target - used by the recycle-safety precheck (see `findReferencesToObject`
 /// below for what each `Kind` means and what this deliberately doesn't
@@ -1617,6 +1654,62 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                                 )
 
                             return Ok(Some(confirmed.ToArray()))
+        }
+
+    /// Custom method (`moodev/prepareRename`) - almost verbatim the same
+    /// resolution pipeline `TextDocumentReferences` above uses, but returns
+    /// structured data (every confirmed call site as a `RenameCallSite`,
+    /// plus the resolved verb's own current name and the unresolved-site
+    /// count) instead of `Location[]`, so the client can build a confirm
+    /// dialog and the server-side patch list without a second round trip.
+    member _.PrepareRename(p: PrepareRenameParams) : Async<Result<PrepareRenameResult option, JsonRpc.Error>> =
+        async {
+            match verbAtUri graph p.TextDocument.Uri with
+            | None -> return Ok None
+            | Some(enclosingObj, verb) ->
+                match verb.Ast with
+                | None -> return Ok None
+                | Some stmts ->
+                    match resolvableVerbCallAt graph enclosingObj stmts (int p.Position.Line) (int p.Position.Character) with
+                    | None -> return Ok None
+                    | Some(startObj, verbName, _args) ->
+                        match Metadata.Resolver.findCallableVerb graph startObj verbName with
+                        | None -> return Ok None
+                        | Some(targetDefiner, targetVerb) ->
+                            let sites = ResizeArray<RenameCallSite>()
+                            let mutable unresolvedCount = 0
+
+                            for containingObj, containingVerbName, r in allVerbCallReferences graph do
+                                match r.Ref with
+                                | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
+                                    match Metadata.Resolver.resolveReceiverInContext graph containingObj receiver with
+                                    | Some receiverStart ->
+                                        match Metadata.Resolver.findCallableVerb graph receiverStart callName with
+                                        | Some(actualDefiner, actualVerb) when
+                                            actualDefiner = targetDefiner && actualVerb.Meta.Index = targetVerb.Meta.Index
+                                            ->
+                                            sites.Add
+                                                { ObjRef = containingObj
+                                                  VerbName = containingVerbName
+                                                  Line = r.Line
+                                                  Col = r.Col
+                                                  Length = r.Length }
+                                        | _ -> ()
+                                    | None ->
+                                        if Metadata.Resolver.verbNameMatchesAny targetVerb.Meta.Names callName then
+                                            unresolvedCount <- unresolvedCount + 1
+                                | _ -> ()
+
+                            let primaryName = targetVerb.Meta.Names |> List.tryHead |> Option.defaultValue verbName
+
+                            return
+                                Ok(
+                                    Some
+                                        { ObjRef = targetDefiner
+                                          VerbName = primaryName
+                                          Sites = sites.ToArray()
+                                          UnresolvedCount = unresolvedCount }
+                                )
         }
 
     /// Inline parameter-name hints for verb-call arguments, e.g. `move(who:

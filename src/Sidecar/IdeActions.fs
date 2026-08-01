@@ -439,6 +439,96 @@ let setVerbArgs
                 ct
     }
 
+/// `rename-verb {objRef, oldName, newName, sites}` - the custom, server-
+/// orchestrated batch rename (`moodev/prepareRename`'s own doc comment
+/// explains why this isn't `textDocument/rename`): renames the verb itself
+/// via `set_verb_info` (keeping its existing owner/perms, replacing only
+/// its name list with the single new name - a rename picks one canonical
+/// name, it doesn't try to preserve every other alias), then patches every
+/// confirmed call site directly by re-fetching that verb's *current* code,
+/// splicing `newName` in at the exact `(line, col, length)`
+/// `moodev/prepareRename` reported, and saving - entirely server-side, no
+/// client Monaco/tab involvement at all. `sites` is exactly what
+/// `moodev/prepareRename` returned. Per-site failures (the call site's text
+/// no longer matches, or the spliced result fails to compile) are collected
+/// and reported individually rather than aborting the whole batch - this
+/// project's existing per-action error-reporting convention, and
+/// appropriate given a rename's real blast radius across many verbs at
+/// once.
+let renameVerb
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (oldName: string)
+    (newName: string)
+    (sites: (int64 * string * int * int * int) list)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let o = sprintf "#%d" objRef
+        let oldNameLit = quote oldName
+        let newNameLit = quote newName
+
+        let renameStatements =
+            resolveVerbIndexStatements o oldNameLit
+            + $""" ok = 0; errtext = ""; if (idx == 0) errtext = "verb not found"; else try info = verb_info({o}, idx); set_verb_info({o}, idx, {{info[1], info[2], {newNameLit}}}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry endif;"""
+
+        let! renameJson = evalOnSession session renameStatements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let renameRoot = renameJson.RootElement
+        let renameOk = renameRoot.GetProperty("ok").GetInt32() = 1
+        let renameErrtext = renameRoot.GetProperty("errtext").GetString()
+
+        if not renameOk then
+            do! sendWire webSocket (sprintf "moodev-rename-result object: #%d ok: 0" objRef) [ renameErrtext ] ct
+        else
+            let! renameGitError = exportAndCommitObject config session objRef newName GitStore.Modified ct
+            let siteFailures = ResizeArray<string>()
+
+            for siteObj, siteVerb, line, col, length in sites do
+                let siteO = sprintf "#%d" siteObj
+                let siteVerbLit = quote siteVerb
+
+                let fetchStatements =
+                    resolveVerbIndexStatements siteO siteVerbLit
+                    + $""" code = (idx == 0) ? {{}} | verb_code({siteO}, idx, 0, 1);"""
+
+                let! codeJson = evalOnSession session fetchStatements "code" ct
+                let codeLines = codeJson.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> Array.ofSeq
+
+                if line < 1 || line > codeLines.Length then
+                    siteFailures.Add(sprintf "#%d:%s - line %d out of range, skipped" siteObj siteVerb line)
+                else
+                    let targetLine = codeLines.[line - 1]
+
+                    if col < 1 || col - 1 + length > targetLine.Length || targetLine.Substring(col - 1, length) <> oldName then
+                        siteFailures.Add(sprintf "#%d:%s - call site text no longer matches, skipped" siteObj siteVerb)
+                    else
+                        let splicedLine = targetLine.Remove(col - 1, length).Insert(col - 1, newName)
+                        let newCodeLines = codeLines |> Array.mapi (fun i l -> if i = line - 1 then splicedLine else l)
+                        let newCodeLiteral = "{" + (newCodeLines |> Array.map quote |> String.concat ", ") + "}"
+
+                        let saveStatements =
+                            resolveVerbIndexStatements siteO siteVerbLit
+                            + $""" errs = (idx == 0) ? {{"verb not found"}} | set_verb_code({siteO}, idx, {newCodeLiteral});"""
+
+                        let! errsJson = evalOnSession session saveStatements "errs" ct
+                        let errs = errsJson.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+
+                        if errs.IsEmpty then
+                            let! siteGitError = exportAndCommitObject config session siteObj siteVerb GitStore.Modified ct
+                            siteGitError |> Option.iter (fun m -> siteFailures.Add(sprintf "#%d:%s - saved, but git commit failed: %s" siteObj siteVerb m))
+                        else
+                            siteFailures.Add(sprintf "#%d:%s - %s" siteObj siteVerb (String.concat "; " errs))
+
+            let diagnostics =
+                (renameGitError |> Option.map (fun m -> [ "(renamed, but git commit failed: " + m + ")" ]) |> Option.defaultValue [])
+                @ (siteFailures |> List.ofSeq)
+
+            do! sendWire webSocket (sprintf "moodev-rename-result object: #%d ok: 1" objRef) diagnostics ct
+    }
+
 /// `ide_get_properties(objRef)` replacement. `properties(obj)` already
 /// only lists properties *defined* on `obj` (confirmed against
 /// `property.cc:bf_properties`, see `Importer.fs`'s own note on this) -

@@ -247,6 +247,57 @@ let findReferencesToObjectAsync (objRef: int64) : Async<(string * int64 * string
 let reloadGraphAsync (surviveRoot: string) : Async<unit> =
     async { do! requestAsync "moodev/reloadGraph" (createObj [ "surviveRoot" ==> surviveRoot ]) |> Async.Ignore }
 
+/// One confirmed call site from `moodev/prepareRename` - everything the
+/// `"rename-verb"` Sidecar action needs to splice the new name in, without
+/// the client re-resolving anything itself.
+type RenameCallSite =
+    { ObjRef: int64
+      VerbName: string
+      Line: int
+      Col: int
+      Length: int }
+
+/// `moodev/prepareRename`'s result (matches
+/// `Handlers.MooLspServer.PrepareRename`/`Handlers.PrepareRenameResult`) -
+/// the resolved verb's own current name plus every confirmed call site,
+/// everything the F2 rename flow needs to build a confirm dialog and the
+/// exact `"rename-verb"` patch list in one round trip.
+type PrepareRenameResult =
+    { ObjRef: int64
+      VerbName: string
+      Sites: RenameCallSite[]
+      UnresolvedCount: int }
+
+/// Custom method (`moodev/prepareRename`, `{textDocument, position}`) -
+/// resolves the verb call under the cursor and every confirmed call site to
+/// it, corpus-wide. `None` when the cursor isn't on a resolvable verb call
+/// at all (mirrors every other position-based query's "nothing here" case).
+let prepareRenameAsync (objRef: int64) (verbName: string) (lspLine: int) (lspCharacter: int) : Async<PrepareRenameResult option> =
+    async {
+        let! result = requestAsync "moodev/prepareRename" (textDocumentPositionParams objRef verbName lspLine lspCharacter)
+
+        if isNullOrUndefined result then
+            return None
+        else
+            let sitesArr: obj[] = result?sites
+
+            let sites =
+                sitesArr
+                |> Array.map (fun s ->
+                    { ObjRef = int64 (s?objRef: float)
+                      VerbName = s?verbName
+                      Line = int (s?line: float)
+                      Col = int (s?col: float)
+                      Length = int (s?length: float) })
+
+            return
+                Some
+                    { ObjRef = int64 (result?objRef: float)
+                      VerbName = result?verbName
+                      Sites = sites
+                      UnresolvedCount = int (result?unresolvedCount: float) }
+    }
+
 /// Custom method (`moodev/findGotchas`, no params) - manually triggered
 /// corpus-wide "MOOcode gotchas" static-check scan (matches
 /// `Handlers.MooLspServer.FindGotchas`/`Handlers.findGotchas`). `kind` is

@@ -19,6 +19,7 @@ let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge)
         |> Map.add "moodev/getObjectTree" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetObjectTree p))
         |> Map.add "moodev/findDeadVerbs" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.FindDeadVerbs p))
         |> Map.add "moodev/findDeadProperties" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.FindDeadProperties p))
+        |> Map.add "moodev/prepareRename" (Server.serverRequestHandling (fun (s: MooLspServer) (p: PrepareRenameParams) -> s.PrepareRename p))
         |> Map.add
             "moodev/findReferencesToObject"
             (Server.serverRequestHandling (fun (s: MooLspServer) (p: FindReferencesToObjectParams) -> s.FindReferencesToObject p))
