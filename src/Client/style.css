@@ -539,6 +539,7 @@ html, body {
 #editor-pane,
 #terminal-pane,
 #verb-history-pane,
+#verb-parent-diff-pane,
 #inspector-pane {
   flex: 1;
   min-height: 0;
@@ -549,6 +550,7 @@ html, body {
 #editor-pane.active,
 #terminal-pane.active,
 #verb-history-pane.active,
+#verb-parent-diff-pane.active,
 #inspector-pane.active {
   display: flex;
 }
@@ -602,6 +604,13 @@ html, body {
 #verb-history-restore-btn {
   margin: 0.6em;
   align-self: flex-start;
+}
+
+/* --- Compare-to-parent diff view --------------------------------------- */
+
+#verb-parent-diff-editor {
+  flex: 1;
+  min-height: 0;
 }
 
 /* --- History view (content search + corponym history) ----------------- */

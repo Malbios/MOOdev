@@ -406,6 +406,9 @@ let private buildTryDispatch
                 | "fetch-verb" ->
                     do! IdeActions.fetchVerb config session webSocket (getObj ()) (getStr "verb") ct
                     return true
+                | "verb-at-parent" ->
+                    do! IdeActions.verbAtParent session webSocket (getObj ()) (getStr "verb") ct
+                    return true
                 | "save-verb" ->
                     let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
                     do! IdeActions.saveVerb config session webSocket (getObj ()) (getStr "verb") code ct

@@ -2008,6 +2008,33 @@ let verbHistory
 /// assuming today's filename applied back then - a verb whose canonical
 /// first alias changed would otherwise resolve to the wrong (or missing)
 /// blob for its older commits.
+/// `verb-at-parent {obj, verb}` - fetches the *live* current code of `verb`
+/// as defined on `obj` (some ancestor of the object whose own copy is being
+/// compared against it), exactly like `fetchVerb`'s live `verb_code()` eval
+/// above, but under its own wire header so the client routes the result
+/// into the parent-comparison diff pane instead of `editor.setValue()`ing
+/// it into the live editor - same reasoning `verbAtCommit` below sends its
+/// historical code under `moodev-verb-at-commit` rather than reusing
+/// `moodev-edit-content`. No git/tree involvement at all (unlike
+/// `verbAtCommit`) - this is a pure live eval, nothing historical.
+let verbAtParent (session: Session) (webSocket: WebSocket) (objRef: int64) (verbName: string) (ct: CancellationToken) : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let verbLit = "\"" + verbName.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let statements = resolveVerbIndexStatements o verbLit
+        let resultExpr = """(idx == 0) ? ["error" -> "verb not found"] | ["code" -> verb_code(""" + o + ", idx, 0, 1)]"
+
+        let! json = evalOnSession session statements resultExpr ct
+        let root = json.RootElement
+        let hasError, _ = root.TryGetProperty("error")
+
+        if hasError then
+            do! sendWire webSocket (sprintf "moodev-verb-at-parent-result object: #%d verb: %s ok: 0" objRef verbName) [ "verb not found" ] ct
+        else
+            let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun l -> l.GetString()) |> List.ofSeq
+            do! sendWire webSocket (sprintf "moodev-verb-at-parent object: #%d verb: %s" objRef verbName) code ct
+    }
+
 let verbAtCommit
     (config: Config)
     (session: Session)

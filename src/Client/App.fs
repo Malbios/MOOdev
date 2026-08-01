@@ -114,6 +114,11 @@ let private verbHistoryDiffEditorEl = document.getElementById ("verb-history-dif
 let private verbHistoryRestoreBtn = document.getElementById ("verb-history-restore-btn")
 let private editorHistoryBtn = document.getElementById ("editor-history-btn")
 let private verbHistoryCloseBtn = document.getElementById ("verb-history-close-btn")
+let private editorCompareParentBtn = document.getElementById ("editor-compare-parent-btn")
+let private verbParentDiffPaneEl = document.getElementById ("verb-parent-diff-pane")
+let private verbParentDiffHeaderEl = document.getElementById ("verb-parent-diff-header")
+let private verbParentDiffEditorEl = document.getElementById ("verb-parent-diff-editor")
+let private verbParentDiffCloseBtn = document.getElementById ("verb-parent-diff-close-btn")
 let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
@@ -561,6 +566,17 @@ let mutable private selectedObjRef: int64 option = None
 /// always starts back in the normal editor view.
 let mutable private showingVerbHistory = false
 
+/// Same sub-mode idea as `showingVerbHistory` above, for the "compare to
+/// parent" diff view - mutually exclusive with it (only one of the two
+/// diff panes can replace the normal editor at a time), also reset to
+/// `false` on every tab switch. `parentDiffAncestorRef` is the ancestor
+/// object this tab's own verb would compare against, resolved lazily
+/// whenever the plain editor view for a `VerbTab` is shown (see
+/// `updateCompareParentButton`) - `None` until that resolution completes,
+/// or if no ancestor defines its own copy of this verb name at all.
+let mutable private showingParentDiff = false
+let mutable private parentDiffAncestorRef: int64 option = None
+
 /// Whether a real MOO login has succeeded this session - set by the
 /// `moodev-login-result` handler. Nothing client-side previously needed this
 /// as a standing boolean; the History tab uses it to skip firing
@@ -950,7 +966,12 @@ statusPositionEl.textContent <- "Ln 1, Col 1"
 /// activates exactly one (or, for a `VerbTab` in history mode, two: the
 /// verb-history pane replaces the plain editor pane, everything else stays
 /// hidden the same way).
-let private allPanes = [ terminalPaneEl; editorPaneEl; verbHistoryPaneEl; inspectorPaneEl ]
+let private allPanes =
+    [ terminalPaneEl
+      editorPaneEl
+      verbHistoryPaneEl
+      verbParentDiffPaneEl
+      inspectorPaneEl ]
 
 let private activateOnly (paneEl: HTMLElement) : unit =
     for p in allPanes do
@@ -964,6 +985,7 @@ let private showPaneFor (tab: OpenTab) : unit =
         activateOnly terminalPaneEl
         inputEl.focus ()
     | VerbTab _ when showingVerbHistory -> activateOnly verbHistoryPaneEl
+    | VerbTab _ when showingParentDiff -> activateOnly verbParentDiffPaneEl
     | VerbTab _ ->
         activateOnly editorPaneEl
         // The container was `display:none` a moment ago - force Monaco to
@@ -1007,6 +1029,19 @@ let private getOrCreateHistoryDiffEditor () : Monaco.IDiffEditor =
     | None ->
         let e = Monaco.createDiffEditor verbHistoryDiffEditorEl
         historyDiffEditor <- Some e
+        e
+
+let mutable private parentDiffEditor: Monaco.IDiffEditor option = None
+
+/// Same lazy-creation reasoning as `getOrCreateHistoryDiffEditor` above, a
+/// separate Monaco instance since it lives in its own pane
+/// (`verb-parent-diff-pane`, distinct from the history pane's own).
+let private getOrCreateParentDiffEditor () : Monaco.IDiffEditor =
+    match parentDiffEditor with
+    | Some e -> e
+    | None ->
+        let e = Monaco.createDiffEditor verbParentDiffEditorEl
+        parentDiffEditor <- Some e
         e
 
 /// Renders the verb-history pane's commit list - each entry, clicked,
@@ -1074,6 +1109,26 @@ editorHistoryBtn.onclick <-
 verbHistoryCloseBtn.onclick <-
     fun _ ->
         showingVerbHistory <- false
+        showPaneFor activeTab
+
+// Only reachable while a `VerbTab` is showing the plain editor and
+// `updateCompareParentButton` has already resolved a real ancestor for it
+// (the button stays hidden otherwise - see that function) - so both
+// `activeTab` and `parentDiffAncestorRef` are always populated here.
+editorCompareParentBtn.onclick <-
+    fun _ ->
+        match activeTab, parentDiffAncestorRef with
+        | VerbTab(objRef, verbName), Some ancestorRef ->
+            verbParentDiffHeaderEl.textContent <- sprintf "Comparing to parent #%d" ancestorRef
+            showingVerbHistory <- false
+            showingParentDiff <- true
+            showPaneFor activeTab
+            sendAction [ "action" ==> "verb-at-parent"; "obj" ==> int ancestorRef; "verb" ==> verbName ]
+        | _ -> ()
+
+verbParentDiffCloseBtn.onclick <-
+    fun _ ->
+        showingParentDiff <- false
         showPaneFor activeTab
 
 /// Snapshots whatever's currently in the editor into `tabContent`, if the
@@ -1541,6 +1596,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
         tabHistory <- activeTab :: (tabHistory |> List.filter (fun t -> t <> activeTab))
         activeTab <- tab
         showingVerbHistory <- false
+        showingParentDiff <- false
 
         match tab with
         | GameTab
@@ -1550,6 +1606,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
             // setValue above just re-fired onDidChangeModelContent - this
             // is a tab switch, not a user edit.
             setDirty false
+            updateCompareParentButton o v
 
         showPaneFor tab
         renderTabs ()
@@ -1574,6 +1631,59 @@ and private openOrSwitchToVerb (objRef: int64) (verbName: string) : unit =
         switchToTab (VerbTab(objRef, verbName))
     else
         fetchVerb objRef verbName
+
+/// Tries each of `parents` in turn (declaration order - the same order real
+/// MOO dispatch would eventually reach them in), asking
+/// `moodev/resolveEffectiveMember` which ancestor's own copy of `verbName`
+/// would win *starting the search from that parent* - the first `Some`
+/// found is the "old" version this object's own override is shadowing.
+/// Deliberately not resolved from the object itself (that call always
+/// trivially returns the object's own copy, per `resolveEffectiveMember`'s
+/// own doc comment) - starting from each parent in turn is what actually
+/// finds the ancestor whose behavior would apply if this object's own copy
+/// didn't exist.
+and private tryParentsForVerb (verbName: string) (parents: int64 list) : Async<int64 option> =
+    async {
+        match parents with
+        | [] -> return None
+        | p :: rest ->
+            let! winner = LspClient.resolveEffectiveMemberAsync p "verb" verbName
+
+            match winner with
+            | Some w -> return Some w
+            | None -> return! tryParentsForVerb verbName rest
+    }
+
+/// Shows/hides the editor status bar's "Compare to parent" button for
+/// whichever `VerbTab(objRef, verbName)` is now active, and resolves which
+/// ancestor it should compare against (`parentDiffAncestorRef`) - called
+/// once whenever the plain editor view for a verb tab is shown (see
+/// `showPaneFor`'s `VerbTab _` arm). Hidden immediately (synchronously) so
+/// switching tabs never briefly shows stale state from the previous verb
+/// while the real answer is still in flight.
+and private updateCompareParentButton (objRef: int64) (verbName: string) : unit =
+    editorCompareParentBtn.setAttribute ("style", "display:none")
+    parentDiffAncestorRef <- None
+
+    match Map.tryFind objRef treeNodes with
+    | None -> ()
+    | Some node ->
+        if not (Array.isEmpty node.Parents) then
+            async {
+                let! ancestor = tryParentsForVerb verbName (node.Parents |> Array.toList)
+
+                // Guards against a stale response landing after the user
+                // has already switched to a different verb tab - same
+                // `activeTab` check `annotateShadowedMember` uses.
+                if activeTab = VerbTab(objRef, verbName) then
+                    match ancestor with
+                    | Some ancestorRef ->
+                        parentDiffAncestorRef <- Some ancestorRef
+                        editorCompareParentBtn.removeAttribute "style"
+                        editorCompareParentBtn.title <- sprintf "Compare to parent's copy (#%d)" ancestorRef
+                    | None -> ()
+            }
+            |> Async.StartImmediate
 
 /// Actually tears down an open verb tab - no save-state check at all. Only
 /// safe to call once it's already known there's nothing worth saving left
@@ -4624,6 +4734,8 @@ ws.onmessage <-
                         tabHistory <- activeTab :: (tabHistory |> List.filter (fun t -> t <> activeTab))
                         activeTab <- VerbTab(objRef, verb)
                         showingVerbHistory <- false
+                        showingParentDiff <- false
+                        updateCompareParentButton objRef verb
                         showPaneFor activeTab
                         renderTabs ()
                         // Refresh the tree's highlight to follow whatever
@@ -5082,6 +5194,24 @@ ws.onmessage <-
                             verbHistoryRestoreBtn.setAttribute ("style", "")
                     | _ -> ()
                 | _ -> ()
+            elif header.StartsWith("moodev-verb-at-parent-result") then
+                () // parent's copy not found live - shouldn't normally happen (the button only shows once resolved), nothing more to show
+            elif header.StartsWith("moodev-verb-at-parent") then
+                // The header's own `object:` field is the *ancestor's*
+                // objRef (that's who we asked `verb-at-parent` to fetch
+                // from), not the tab's own object - so this only checks the
+                // verb name against whichever `VerbTab` is actually open,
+                // unlike `moodev-verb-at-commit`'s guard above.
+                match headerField "verb: " header with
+                | Some verb ->
+                    match activeTab with
+                    | VerbTab(_, activeVerb) when showingParentDiff && activeVerb = verb ->
+                        let parentCode = String.concat "\n" lines
+                        let currentCode = editor.getValue ()
+                        let diffEditor = getOrCreateParentDiffEditor ()
+                        Monaco.setDiffModel diffEditor parentCode currentCode
+                    | _ -> ()
+                | None -> ()
             elif header.StartsWith("moodev-search-result") then
                 if activeSidebarView = HistoryView then
                     let results =
