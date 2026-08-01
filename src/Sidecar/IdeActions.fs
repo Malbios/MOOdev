@@ -1398,6 +1398,87 @@ result = ["roots" -> out, "truncated" -> ((total > {maxLiveRoots}) ? 1 | 0)];"""
         do! sendWire webSocket (sprintf "moodev-live-roots truncated: %d" (if truncated then 1 else 0)) lines ct
     }
 
+/// Same cap reasoning as `maxLiveRoots` - a bound on the *result*, not the
+/// scan (the scan must still walk every valid object number to find every
+/// object carrying a matching property value; there's no builtin that
+/// queries "which objects have property X matching Y" directly).
+let private maxPropertySearchResults = 500
+
+/// `search-properties {pname, valueExpr}` - "find the object(s) whose
+/// `pname` property satisfies this" for the object-search sidebar view.
+/// `pname` is embedded as a string literal (same escaping discipline as
+/// `buildCheckVerbSyntaxStatements`); `valueExpr` is a raw MOO boolean
+/// expression referencing the bound variable `val` (the client's existing
+/// raw-expression-input idiom, e.g. `val == "wizard"` or
+/// `equal(val, {1, 2})`), embedded verbatim as code rather than as data -
+/// it's meant to be a comparison, not a value. Each candidate's `valueExpr`
+/// evaluation is individually `try`/`except`-guarded so one object with an
+/// incompatible property type (e.g. a numeric comparison against a string
+/// property) can't abort the whole scan - it's just skipped as a
+/// non-match, same as it not having the property at all.
+let searchPropertiesByValue
+    (session: Session)
+    (webSocket: WebSocket)
+    (pname: string)
+    (valueExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let evalRunner = evalOnSession session
+        let pnameLit = "\"" + pname.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+        let statements =
+            $"""total = 0;
+found = {{}};
+for i in [0..toint(max_object())]
+  o = toobj(i);
+  if (valid(o) && ({pnameLit} in properties(o)))
+    val = o.({pnameLit});
+    matched = 0;
+    try
+      matched = ({valueExpr}) ? 1 | 0;
+    except (ANY)
+      matched = 0;
+    endtry
+    if (matched)
+      total = total + 1;
+      if (total <= {maxPropertySearchResults})
+        oname = typeof(o.name) == STR ? o.name | "";
+        found = {{@found, ["objref" -> tostr(o), "name" -> oname, "value" -> toliteral(val)]}};
+      endif
+    endif
+  endif
+endfor
+result = ["matches" -> found, "truncated" -> ((total > {maxPropertySearchResults}) ? 1 | 0)];"""
+
+        let! json = evalRunner statements "result" ct
+        let root = json.RootElement
+        let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+        let truncated = root.GetProperty("truncated").GetInt32() = 1
+
+        let lines =
+            root.GetProperty("matches").EnumerateArray()
+            |> Seq.map (fun m ->
+                let mObjRef = int64 (m.GetProperty("objref").GetString().TrimStart('#'))
+                let liveName = m.GetProperty("name").GetString()
+                let displayName = formatLiveName corponymsByObjnum mObjRef liveName
+                let value = m.GetProperty("value").GetString()
+
+                JsonSerializer.Serialize(
+                    {| objRef = mObjRef
+                       name = displayName
+                       value = value |}
+                ))
+            |> List.ofSeq
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-property-search-result truncated: %d" (if truncated then 1 else 0))
+                lines
+                ct
+    }
+
 /// `get-tasks` - every forked/suspended/reading task (`queued_tasks()`,
 /// confirmed against `ToastStunt/src/tasks.cc`). Deliberately drops that
 /// list's 3rd/4th elements - both are dead placeholders from an old

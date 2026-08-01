@@ -79,6 +79,7 @@ let private viewGotchasBtn = document.getElementById ("view-gotchas")
 let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
+let private viewPropertySearchBtn = document.getElementById ("view-property-search")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -152,6 +153,10 @@ let private docsDetailEl = document.getElementById ("docs-detail")
 let private sidebarViewScratchpadEl = document.getElementById ("sidebar-view-scratchpad")
 let private scratchpadInputEl = document.getElementById ("scratchpad-input") :?> HTMLInputElement
 let private scratchpadResultEl = document.getElementById ("scratchpad-result")
+let private sidebarViewPropertySearchEl = document.getElementById ("sidebar-view-property-search")
+let private propertySearchNameInputEl = document.getElementById ("property-search-name-input") :?> HTMLInputElement
+let private propertySearchExprInputEl = document.getElementById ("property-search-expr-input") :?> HTMLInputElement
+let private propertySearchResultsEl = document.getElementById ("property-search-results")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -532,8 +537,15 @@ type private SidebarView =
     | PermissionRisksView
     | DocsView
     | EvalScratchpadView
+    | PropertySearchView
 
 let mutable private activeSidebarView: SidebarView = TreeView
+
+/// The property name the most recent Property search was run with -
+/// captured at dispatch time so the results handler can pass it through to
+/// `renderPropertySearchResults` for the "highlight this property" click
+/// behavior, without threading it through the wire response itself.
+let mutable private lastPropertySearchName = ""
 
 /// The full docs catalog (`moodev/getMoocodeDocs`), fetched at most once
 /// per session - unlike every other sidebar view here, it's static for the
@@ -1085,7 +1097,8 @@ let private allSidebarViews =
       sidebarViewGotchasEl
       sidebarViewPermissionRisksEl
       sidebarViewDocsEl
-      sidebarViewScratchpadEl ]
+      sidebarViewScratchpadEl
+      sidebarViewPropertySearchEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -3646,6 +3659,10 @@ and private switchToSidebarView (view: SidebarView) : unit =
         // Nothing to load - the result area only ever shows the last
         // expression's own outcome, not something fetched per-view-switch.
         activateOnlySidebarView sidebarViewScratchpadEl
+    | PropertySearchView ->
+        // Nothing to load - same reasoning as EvalScratchpadView, the
+        // results area only ever shows the last search's own outcome.
+        activateOnlySidebarView sidebarViewPropertySearchEl
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -3658,7 +3675,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewGotchasBtn, GotchasView
           viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
-          viewScratchpadBtn, EvalScratchpadView ] do
+          viewScratchpadBtn, EvalScratchpadView
+          viewPropertySearchBtn, PropertySearchView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -3713,6 +3731,40 @@ and private renderContentSearchResults (results: (int64 option * string * string
             | None -> ()
 
             contentSearchResultsEl.appendChild li |> ignore
+
+/// Renders `search-properties`' results into the Property search sidebar
+/// view - one row per matching object, clicking through to that object's
+/// inspector with the *searched* property highlighted
+/// (`openOrSwitchToInspectorWith`, same "jump straight to the relevant row"
+/// convention `renderDeadPropertiesResults` already uses for a
+/// property-shaped finding). `searchedName` is the property name the search
+/// was run with, captured at dispatch time (`lastPropertySearchName`) -
+/// distinct from each result tuple's own `name`, which is the *object's*
+/// display name for the result line's text, not the property.
+and private renderPropertySearchResults
+    (searchedName: string)
+    (truncated: bool)
+    (results: (int64 * string * string) list)
+    : unit =
+    propertySearchResultsEl.innerHTML <- ""
+
+    if results.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No matches."
+        propertySearchResultsEl.appendChild li |> ignore
+    else
+        for objRef, name, value in results do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            li.classList.add "inspector-link"
+            li.textContent <- sprintf "#%d / %s - %s" objRef name value
+            li.onclick <- fun _ -> openOrSwitchToInspectorWith objRef (Some searchedName)
+            propertySearchResultsEl.appendChild li |> ignore
+
+        if truncated then
+            let li = document.createElement ("li")
+            li.textContent <- sprintf "Showing the first %d matches - refine the search to see more." results.Length
+            propertySearchResultsEl.appendChild li |> ignore
 
 /// Renders `corponym-history`'s entries - each `repointed` entry's old/new
 /// objnum is clickable through to that object's inspector via the existing
@@ -4697,6 +4749,7 @@ viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
 viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
+viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
@@ -4711,6 +4764,26 @@ let private runScratchpadEval () : unit =
         sendAction [ "action" ==> "eval-scratchpad"; "expr" ==> expr ]
 
 scratchpadInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runScratchpadEval ()
+
+/// Runs the Property search view's two inputs (a property name, and a raw
+/// MOO comparison expression referencing `val` - see
+/// `IdeActions.searchPropertiesByValue`'s own comment) as a live corpus
+/// scan. Both fields must be non-empty - a comparison expression alone
+/// means nothing without a property name to fetch, and vice versa.
+let private runPropertySearch () : unit =
+    let name = propertySearchNameInputEl.value.Trim()
+    let valueExpr = propertySearchExprInputEl.value.Trim()
+
+    if name <> "" && valueExpr <> "" then
+        lastPropertySearchName <- name
+        propertySearchResultsEl.innerHTML <- ""
+        let li = document.createElement ("li")
+        li.textContent <- "Searching..."
+        propertySearchResultsEl.appendChild li |> ignore
+        sendAction [ "action" ==> "search-properties"; "name" ==> name; "valueExpr" ==> valueExpr ]
+
+propertySearchNameInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runPropertySearch ()
+propertySearchExprInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runPropertySearch ()
 
 errorsClearBtn.onclick <-
     fun _ ->
@@ -5481,6 +5554,18 @@ ws.onmessage <-
                         |> List.ofArray
 
                     renderContentSearchResults results
+            elif header.StartsWith("moodev-property-search-result") then
+                if activeSidebarView = PropertySearchView then
+                    let truncated = headerField "truncated: " header = Some "1"
+
+                    let results =
+                        lines
+                        |> Array.map (fun line ->
+                            let o: obj = JS.JSON.parse line
+                            int64 (o?objRef: float), (o?name: string), (o?value: string))
+                        |> List.ofArray
+
+                    renderPropertySearchResults lastPropertySearchName truncated results
             elif header.StartsWith("moodev-corponym-history") then
                 if activeSidebarView = HistoryView then
                     let entries =

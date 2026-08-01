@@ -777,6 +777,18 @@ html, body {
   overflow-y: auto;
 }
 
+/* --- Property search view ------------------------------------------------ */
+
+#sidebar-view-property-search {
+  gap: 0.4em;
+  padding: 0.8em 1em;
+}
+
+#property-search-results {
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
 /* --- Object inspector ------------------------------------------------- */
 
 #inspector-diagnostics {

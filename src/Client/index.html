@@ -72,6 +72,7 @@
       <button id="view-dead-properties" class="activity-btn" title="Find dead properties" aria-label="Find dead properties">🏷</button>
       <button id="view-gotchas" class="activity-btn" title="MOOcode gotchas" aria-label="MOOcode gotchas">🐛</button>
       <button id="view-permission-risks" class="activity-btn" title="Permission flag audit" aria-label="Permission flag audit">🔐</button>
+      <button id="view-property-search" class="activity-btn" title="Object search by property value" aria-label="Object search by property value">🔍</button>
       <button id="view-docs" class="activity-btn" title="MOOcode docs" aria-label="MOOcode docs">📖</button>
       <button id="view-scratchpad" class="activity-btn" title="Eval scratchpad" aria-label="Eval scratchpad">🧮</button>
     </div>
@@ -144,6 +145,11 @@
       <div id="sidebar-view-scratchpad" class="sidebar-view">
         <input id="scratchpad-input" type="text" class="sidebar-filter" placeholder="MOO expression, e.g. #123.location" autocomplete="off" spellcheck="false" />
         <pre id="scratchpad-result"></pre>
+      </div>
+      <div id="sidebar-view-property-search" class="sidebar-view">
+        <input id="property-search-name-input" type="text" class="sidebar-filter" placeholder="property name, e.g. wizard" autocomplete="off" spellcheck="false" />
+        <input id="property-search-expr-input" type="text" class="sidebar-filter" placeholder="comparison, e.g. val == 1" autocomplete="off" spellcheck="false" />
+        <ul id="property-search-results" class="picker-list"></ul>
       </div>
     </div>
     <div id="sidebar-resizer" class="resizer resizer-leftright"></div>

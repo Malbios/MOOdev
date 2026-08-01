@@ -564,6 +564,9 @@ let private buildTryDispatch
                 | "search-content" ->
                     do! IdeActions.searchContent config session webSocket (getStr "query") ct
                     return true
+                | "search-properties" ->
+                    do! IdeActions.searchPropertiesByValue session webSocket (getStr "name") (getStr "valueExpr") ct
+                    return true
                 | "rename-verb" ->
                     let sites =
                         root.GetProperty("sites").EnumerateArray()
