@@ -749,6 +749,17 @@ let private looksListOrMapShaped (text: string) : bool =
     let trimmed = text.Trim()
     trimmed.StartsWith("{") || trimmed.StartsWith("[")
 
+/// Whether raw property-value text looks like a waif's `toliteral()` shape
+/// (`[[class = #N, owner = #N]]` - the only representation a waif ever
+/// renders as, per ToastStunt `list.cc:511-513`; there's no real waif
+/// literal syntax to parse, so this is a dedicated prefilter rather than an
+/// extension of `parsePropertyLiteral`, which correctly falls through to
+/// `NotAListOrMap` for this text today). Checked before the generic
+/// `looksListOrMapShaped` (which is also true here, since `[[` starts with
+/// `[`) so the toggle click can route to the waif-specific live fetch
+/// instead of the plain list/map text parse.
+let private looksWaifShaped (text: string) : bool = text.Trim().StartsWith("[[")
+
 /// Each open tab's last-known content - populated when a verb is first
 /// fetched, refreshed with the live editor value right before switching
 /// away from it. Lets switching between already-open tabs be instant (no
@@ -1673,6 +1684,73 @@ let private renderStructuredEditor
     container.appendChild rowsEl |> ignore
     container.appendChild addElementBtn |> ignore
     container.appendChild actionsEl |> ignore
+
+    input.setAttribute ("style", "display:none")
+    toggleBtn.setAttribute ("style", "display:none")
+    container.removeAttribute "style"
+
+/// Renders `get-waif-properties`' results into the same structured-editor
+/// slot `renderStructuredEditor` uses for list/map, for a waif-shaped
+/// property value. Deliberately not shaped like a batched Done/Cancel -
+/// there's no single literal to reconstruct from the rows (no waif literal
+/// syntax exists at all), so each row saves itself immediately via
+/// `"set-waif-property"` instead. No "+ Add element" either - a waif's own
+/// properties are fixed by its class, unlike a list/map's element count.
+let private renderWaifEditor
+    (objRef: int64)
+    (pname: string)
+    (input: HTMLInputElement)
+    (toggleBtn: HTMLElement)
+    (container: HTMLElement)
+    (elements: obj[])
+    : unit =
+    container.innerHTML <- ""
+
+    let rowsEl = document.createElement ("div")
+    rowsEl.classList.add "inspector-structured-rows"
+
+    let revertToPlainInput () : unit =
+        container.setAttribute ("style", "display:none")
+        input.removeAttribute "style"
+        toggleBtn.removeAttribute "style"
+
+    for el in elements do
+        let waifPropName = el?name: string
+        let waifPropValue = el?value: string
+
+        let rowEl = document.createElement ("div")
+        rowEl.classList.add "inspector-structured-row"
+
+        let nameEl = document.createElement ("span")
+        nameEl.textContent <- waifPropName + ": "
+        rowEl.appendChild nameEl |> ignore
+
+        let valueInput = document.createElement ("input") :?> HTMLInputElement
+        valueInput.classList.add "inspector-property-value"
+        valueInput.value <- waifPropValue
+        rowEl.appendChild valueInput |> ignore
+
+        let saveBtn = document.createElement ("button")
+        saveBtn.textContent <- "Save"
+
+        saveBtn.onclick <-
+            fun _ ->
+                sendAction
+                    [ "action" ==> "set-waif-property"
+                      "obj" ==> int objRef
+                      "name" ==> pname
+                      "waifProp" ==> waifPropName
+                      "valueExpr" ==> valueInput.value ]
+
+        rowEl.appendChild saveBtn |> ignore
+        rowsEl.appendChild rowEl |> ignore
+
+    let closeBtn = document.createElement ("button")
+    closeBtn.textContent <- "Close"
+    closeBtn.onclick <- fun _ -> revertToPlainInput ()
+
+    container.appendChild rowsEl |> ignore
+    container.appendChild closeBtn |> ignore
 
     input.setAttribute ("style", "display:none")
     toggleBtn.setAttribute ("style", "display:none")
@@ -3039,11 +3117,14 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
         structuredToggleBtn.onclick <-
             fun _ ->
-                sendAction
-                    [ "action" ==> "parse-property-literal"
-                      "obj" ==> int objRef
-                      "name" ==> pname
-                      "valueText" ==> input.value ]
+                if looksWaifShaped input.value then
+                    sendAction [ "action" ==> "get-waif-properties"; "obj" ==> int objRef; "name" ==> pname ]
+                else
+                    sendAction
+                        [ "action" ==> "parse-property-literal"
+                          "obj" ==> int objRef
+                          "name" ==> pname
+                          "valueText" ==> input.value ]
 
         valueTd.appendChild input |> ignore
         valueTd.appendChild preview |> ignore
@@ -5208,6 +5289,35 @@ ws.onmessage <-
                                     "This property's value has content too complex to edit structurally - edit it as text instead."
                                 )
                         | _ -> ()
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-waif-properties") then
+                match headerField "object: #" header, headerField "name: " header with
+                | Some objNum, Some pname ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        match Map.tryFind pname inspectorPropertyInputs, Map.tryFind pname inspectorPropertyStructuredToggles with
+                        | Some input, Some(toggleBtn, container) ->
+                            let elements = lines |> Array.map (fun line -> JS.JSON.parse line: obj)
+                            renderWaifEditor objRef pname input toggleBtn container elements
+                        | _ -> ()
+                    | _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-waif-property-result") then
+                // Re-fetches rather than patching the row's own value
+                // locally - `valueExpr` is an arbitrary MOO expression, not
+                // necessarily the literal that ends up stored (e.g. `1+1`),
+                // so the canonical `toliteral()` form has to come back from
+                // the server, same "always fresh after a write" convention
+                // `moodev-prop-add-result` above already uses.
+                match headerField "object: #" header, headerField "name: " header with
+                | Some objNum, Some pname ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        if headerField "ok: " header = Some "1" then
+                            sendAction [ "action" ==> "get-waif-properties"; "obj" ==> int objRef; "name" ==> pname ]
+                        elif not (Array.isEmpty lines) then
+                            window.alert (String.concat "\n" lines)
                     | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-prop-add-result") then

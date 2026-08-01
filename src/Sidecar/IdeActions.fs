@@ -1479,6 +1479,111 @@ result = ["matches" -> found, "truncated" -> ((total > {maxPropertySearchResults
                 ct
     }
 
+/// `get-waif-properties {obj, name}` - reads a waif-shaped property's own
+/// properties for the client's structured "waif" editor. A waif's own
+/// properties are defined on its `class` object with a `:`-prefix
+/// (`WAIF_PROP_PREFIX`, ToastStunt `include/waif.h:27-28`) - `properties()`
+/// on the class lists those names *with* the leading colon. Reading a waif
+/// property, though, must be done *without* it: ToastStunt's own
+/// `waif_get_prop` (`src/waif.cc`) prepends `WAIF_PROP_PREFIX` itself before
+/// the propdef lookup, so passing a name that already has the colon (as the
+/// documented `waif.:name` sugar does, expanding to `waif.(":name")` per
+/// `parser.y:405-416`) looks up `"::name"` and always misses - confirmed
+/// live against this fork. Stripping the colon here before the `w.(n)`
+/// access is the correct, working form; each read is individually
+/// `try`/`except`-guarded (mirroring `searchPropertiesByValue`'s own
+/// per-item guard) so one unreadable property can't blank the whole list.
+let buildGetWaifPropertiesStatements (objRef: int64) (pname: string) : string =
+    let o = sprintf "#%d" objRef
+    let pnameLit = "\"" + pname.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+    $"""w = {o}.({pnameLit});
+names = properties(w.class);
+wprops = {{}};
+for n in (names)
+  if (n[1] == ":")
+    shortname = n[2..length(n)];
+    try
+      wprops = {{@wprops, ["name" -> shortname, "value" -> toliteral(w.(shortname))]}};
+    except (ANY)
+      wprops = {{@wprops, ["name" -> shortname, "value" -> "<unreadable>"]}};
+    endtry
+  endif
+endfor
+result = wprops;"""
+
+let getWaifProperties
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (pname: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let statements = buildGetWaifPropertiesStatements objRef pname
+        let! json = evalOnSession session statements "result" ct
+        let root = json.RootElement
+
+        let lines =
+            root.EnumerateArray()
+            |> Seq.map (fun p ->
+                JsonSerializer.Serialize(
+                    {| name = p.GetProperty("name").GetString()
+                       value = p.GetProperty("value").GetString() |}
+                ))
+            |> List.ofSeq
+
+        do! sendWire webSocket (sprintf "moodev-waif-properties object: #%d name: %s" objRef pname) lines ct
+    }
+
+/// `set-waif-property {obj, name, waifProp, valueExpr}` - writes one of a
+/// waif's own properties. Since a waif's property values must be written
+/// back through the *object* property that holds it (not the waif value
+/// directly - MOO variables holding a waif can be independent copies), the
+/// generated eval always ends with an explicit reassignment of the outer
+/// property (`{obj}.({name}) = w;`), safe regardless of the fork's actual
+/// by-ref/by-val waif semantics. `waifProp` is embedded without its leading
+/// colon (see `getWaifProperties`'s own comment for why `w.(waifProp)`,
+/// not `w.(":" + waifProp)`, is the correct form here).
+let buildSetWaifPropertyStatements (objRef: int64) (pname: string) (waifPropName: string) (valueExpr: string) : string =
+    let o = sprintf "#%d" objRef
+    let pnameLit = "\"" + pname.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+    let waifPropLit = "\"" + waifPropName.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+
+    $"""ok = 0; errtext = "";
+try
+  w = {o}.({pnameLit});
+  w.({waifPropLit}) = ({valueExpr});
+  {o}.({pnameLit}) = w;
+  ok = 1;
+except err (ANY)
+  errtext = tostr(err[2]);
+endtry"""
+
+let setWaifProperty
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (pname: string)
+    (waifPropName: string)
+    (valueExpr: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let statements = buildSetWaifPropertyStatements objRef pname waifPropName valueExpr
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-waif-property-result object: #%d name: %s ok: %d" objRef pname (if ok then 1 else 0))
+                (if ok then [] else [ errtext ])
+                ct
+    }
+
 /// `get-tasks` - every forked/suspended/reading task (`queued_tasks()`,
 /// confirmed against `ToastStunt/src/tasks.cc`). Deliberately drops that
 /// list's 3rd/4th elements - both are dead placeholders from an old

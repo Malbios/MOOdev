@@ -567,6 +567,21 @@ let private buildTryDispatch
                 | "search-properties" ->
                     do! IdeActions.searchPropertiesByValue session webSocket (getStr "name") (getStr "valueExpr") ct
                     return true
+                | "get-waif-properties" ->
+                    do! IdeActions.getWaifProperties session webSocket (getObj ()) (getStr "name") ct
+                    return true
+                | "set-waif-property" ->
+                    do!
+                        IdeActions.setWaifProperty
+                            session
+                            webSocket
+                            (getObj ())
+                            (getStr "name")
+                            (getStr "waifProp")
+                            (getStr "valueExpr")
+                            ct
+
+                    return true
                 | "rename-verb" ->
                     let sites =
                         root.GetProperty("sites").EnumerateArray()
