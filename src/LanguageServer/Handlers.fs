@@ -851,6 +851,66 @@ let private inferredParams (stmts: Stmt list) : InferredParam list option =
 
         if List.isEmpty indexed then None else Some indexed
 
+/// The display name inlay hints show for one inferred parameter - just the
+/// bare name in every case (unlike `renderParam`'s fuller hover rendering,
+/// which spells out optional/rest/`args[N]` status too - an inlay hint sits
+/// right before the argument itself, so that context is already visible at
+/// the call site and doesn't need repeating).
+let private inlayNameFor (p: InferredParam) : string =
+    match p with
+    | ReqParam name -> name
+    | OptParam(name, _) -> name
+    | RestParam name -> name
+    | IndexParam(_, name) -> name
+
+/// The starting `(line, col)` of each top-level argument in a call's
+/// parenthesized argument list, recovered from the *caller* verb's own
+/// token stream rather than the AST - `Arg` (`Ast.fs`) carries no position
+/// of its own, and only four `Expr` cases (`Ident`/`Prop`/`VerbCall`/`Call`)
+/// carry one at all, so a plain literal argument (`5`, `"foo"`) has nothing
+/// to anchor an inlay hint on without this. `callLine`/`callCol` is the
+/// call's own position (a `VerbCall`'s `line`/`col`, the verb-name token),
+/// immediately followed by the arg-list's opening `(`. Depth is tracked
+/// across all three bracket kinds together, so a nested call/list/map
+/// literal inside one argument isn't mistaken for that argument's own
+/// top-level comma.
+let private argStartPositions (tokens: Language.Lexer.Token[]) (callLine: int) (callCol: int) : (int * int) list =
+    let openParenIdx =
+        tokens
+        |> Array.tryFindIndex (fun t -> t.Line = callLine && t.Col >= callCol && t.Kind = Language.Lexer.TLParen)
+
+    match openParenIdx with
+    | None -> []
+    | Some openIdx ->
+        let positions = ResizeArray<int * int>()
+        let mutable depth = 1
+        let mutable i = openIdx + 1
+        let mutable expectStart = true
+        let mutable finished = i >= tokens.Length || tokens.[i].Kind = Language.Lexer.TRParen
+
+        while not finished && i < tokens.Length do
+            let t = tokens.[i]
+
+            if expectStart then
+                positions.Add(t.Line, t.Col)
+                expectStart <- false
+
+            match t.Kind with
+            | Language.Lexer.TLParen
+            | Language.Lexer.TLBracket
+            | Language.Lexer.TLBrace -> depth <- depth + 1
+            | Language.Lexer.TRParen
+            | Language.Lexer.TRBracket
+            | Language.Lexer.TRBrace ->
+                depth <- depth - 1
+                if depth = 0 then finished <- true
+            | Language.Lexer.TComma when depth = 1 -> expectStart <- true
+            | _ -> ()
+
+            i <- i + 1
+
+        List.ofSeq positions
+
 /// Which of the three interesting `AstQuery.Reference` kinds a call/prop/
 /// verb-call reference is - unused `RefIdent`s (local variables, the 12
 /// implicit built-ins) are deliberately dropped, since a verb touches
@@ -1164,7 +1224,7 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                   MonikerProvider = None
                   TypeHierarchyProvider = None
                   InlineValueProvider = None
-                  InlayHintProvider = None
+                  InlayHintProvider = Some(U3.C1 true)
                   DiagnosticProvider = None
                   Workspace = None
                   Experimental = None }
@@ -1460,6 +1520,66 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                                 )
 
                             return Ok(Some(confirmed.ToArray()))
+        }
+
+    /// Inline parameter-name hints for verb-call arguments, e.g. `move(who:
+    /// who, where: dest)`. Resolves each call's callee via the **static**
+    /// graph (`Metadata.Resolver.findCallableVerb`) rather than a live
+    /// `bridge.ResolveVerbDispatch` round-trip the way hover does -
+    /// deliberately: this fires far more often than a single hover (every
+    /// visible-range change, one call covering every call site in view),
+    /// and the static graph already has every callee's `Ast` loaded, so
+    /// there's no need to pay a live round-trip per call site. Same
+    /// static-only tradeoff `findDeadVerbs`/`findGotchas` already make.
+    ///
+    /// Scoped to `RefVerbCall` only (not builtin `Call`s - those already get
+    /// inline signature help from the editor itself) and skipped entirely
+    /// once either side's argument list stops being positionally reliable:
+    /// a `Splice` (`@expr`) argument fans out into an unknown number of real
+    /// arguments, and a callee's own `RestParam` (`@rest` in its scatter
+    /// assignment) captures everything remaining as one list - neither maps
+    /// to "this one argument gets this one name," so both truncate the
+    /// zip rather than mislabel anything past them.
+    override _.TextDocumentInlayHint(p: InlayHintParams) =
+        async {
+            match verbAtUri graph p.TextDocument.Uri with
+            | None -> return Ok None
+            | Some(enclosingObj, verb) ->
+                match verb.Ast, verb.Tokens with
+                | Some stmts, Some tokens ->
+                    let hints =
+                        AstQuery.collectReferences stmts
+                        |> List.collect (fun fr ->
+                            match fr.Ref with
+                            | AstQuery.RefVerbCall(receiver, StrLit callName, args) ->
+                                let calleeParams =
+                                    Metadata.Resolver.resolveReceiverInContext graph enclosingObj receiver
+                                    |> Option.bind (fun startObj -> Metadata.Resolver.findCallableVerb graph startObj callName)
+                                    |> Option.bind (fun (_, callee) -> callee.Ast)
+                                    |> Option.bind inferredParams
+
+                                match calleeParams with
+                                | None -> []
+                                | Some ps ->
+                                    let argsPrefix = args |> List.takeWhile (function Normal _ -> true | Splice _ -> false)
+                                    let psPrefix = ps |> List.takeWhile (function RestParam _ -> false | _ -> true)
+                                    let positions = argStartPositions tokens fr.Line fr.Col
+
+                                    Seq.zip3 argsPrefix positions psPrefix
+                                    |> Seq.map (fun (_, (line, col), param) ->
+                                        { Position = { Line = uint32 (line - 1); Character = uint32 (col - 1) }
+                                          Label = U2.C1(inlayNameFor param + ":")
+                                          Kind = Some InlayHintKind.Parameter
+                                          TextEdits = None
+                                          Tooltip = None
+                                          PaddingLeft = None
+                                          PaddingRight = Some true
+                                          Data = None })
+                                    |> List.ofSeq
+                            | _ -> [])
+
+                    return Ok(Some(hints |> Array.ofList))
+                | _ -> return Ok None
         }
 
     /// Custom method (`moodev/getObjectTree`, no params) - every object in

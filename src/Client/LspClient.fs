@@ -571,6 +571,64 @@ let wire
     )
     |> ignore
 
+    /// Monaco calls this on every visible-range change with the range
+    /// currently in view, unlike hover/references/etc which only fire on a
+    /// single cursor gesture - matches `textDocument/inlayHint`'s own LSP
+    /// shape, which takes a range rather than a position for the same
+    /// reason. Monaco's JS `InlayHintKind`/label/position shapes already
+    /// number-align with the LSP wire values `Handlers.fs`'s
+    /// `TextDocumentInlayHint` sends (`Parameter` = 2 on both sides), so
+    /// they pass straight through with no remapping - only the position's
+    /// 0-based-to-1-based line/column conversion every other provider here
+    /// already does.
+    let provideInlayHints (_model: obj) (range: obj) : JS.Promise<obj> =
+        async {
+            let noHints = createObj [ "hints" ==> [||]; "dispose" ==> System.Action(fun () -> ()) ]
+
+            match getCurrentDocument () with
+            | None -> return noHints
+            | Some(objRef, verbName) ->
+                let lspRange =
+                    createObj
+                        [ "start" ==>
+                            createObj [ "line" ==> ((range?startLineNumber: int) - 1); "character" ==> ((range?startColumn: int) - 1) ]
+                          "end" ==>
+                            createObj [ "line" ==> ((range?endLineNumber: int) - 1); "character" ==> ((range?endColumn: int) - 1) ] ]
+
+                let p =
+                    createObj
+                        [ "textDocument" ==> createObj [ "uri" ==> documentUri objRef verbName ]
+                          "range" ==> lspRange ]
+
+                let! result = requestAsync "textDocument/inlayHint" p
+
+                if isNullOrUndefined result then
+                    return noHints
+                else
+                    let lspHints: obj[] = unbox result
+
+                    let monacoHints =
+                        lspHints
+                        |> Array.map (fun h ->
+                            let pos: obj = h?position
+
+                            createObj
+                                [ "label" ==> (h?label: string)
+                                  "position" ==> createObj [ "lineNumber" ==> ((pos?line: int) + 1); "column" ==> ((pos?character: int) + 1) ]
+                                  "kind" ==> h?kind
+                                  "paddingLeft" ==> h?paddingLeft
+                                  "paddingRight" ==> h?paddingRight ])
+
+                    return createObj [ "hints" ==> monacoHints; "dispose" ==> System.Action(fun () -> ()) ]
+        }
+        |> Async.StartAsPromise
+
+    monaco?languages?registerInlayHintsProvider (
+        "moocode",
+        createObj [ "provideInlayHints" ==> System.Func<obj, obj, obj, JS.Promise<obj>>(fun m r _tok -> provideInlayHints m r) ]
+    )
+    |> ignore
+
     // Only fires on an actual "go to definition" commit (F12/Ctrl+click),
     // never from casual hovering - `moodev-verb://` isn't a scheme Monaco's
     // own model system knows how to open, so without this handler "go to
