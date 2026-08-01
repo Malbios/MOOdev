@@ -15,6 +15,7 @@
     <Compile Include="PromotionTests.fs" />
     <Compile Include="HistoryTests.fs" />
     <Compile Include="PropertyLiteralParserTests.fs" />
+    <Compile Include="CheckVerbSyntaxTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

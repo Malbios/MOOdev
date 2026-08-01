@@ -175,6 +175,8 @@ let registerSnippetProvider () : unit =
 type ITextModel =
     /// Confirmed in the installed package's own `editor.api.d.ts:2093`.
     abstract getLineMaxColumn: lineNumber: int -> int
+    /// Confirmed in the installed package's own `editor.api.d.ts:2064`.
+    abstract getLineCount: unit -> int
 
 /// Just enough of Monaco's `IEditorAction` to invoke a built-in action by
 /// id - see `reindentLinesActionId` below for the one this app actually
@@ -285,19 +287,31 @@ let registerRenameAction (editor: IStandaloneCodeEditor) (onRename: unit -> unit
 /// string is just a namespace so this diagnostic source can't collide with
 /// another one setting markers on the same model; there's only one source
 /// today. `MarkerSeverity.Error = 8`, confirmed in editor.api.d.ts:90-95.
+/// Clamps the reported line to the model's actual last line - confirmed
+/// live (via the debounced live-diagnostics check, which reports on
+/// mid-edit, not-yet-saved text far more often than the old save-time-only
+/// check ever did) that MOO's own compile errors can name a line number
+/// past the end of a short/incomplete buffer (e.g. an unterminated
+/// statement on the buffer's only line reported as "Line 2"), and
+/// `getLineMaxColumn` throws outright for an out-of-range line - this
+/// would otherwise silently abort the whole marker update, not just that
+/// one marker.
 let setErrorMarkers (editor: IStandaloneCodeEditor) (lineErrors: (int * string) list) : unit =
     let model = editor.getModel ()
+    let lineCount = model.getLineCount ()
 
     let markers =
         lineErrors
         |> List.map (fun (line, message) ->
+            let clampedLine = max 1 (min line lineCount)
+
             createObj
                 [ "severity" ==> 8
                   "message" ==> message
-                  "startLineNumber" ==> line
+                  "startLineNumber" ==> clampedLine
                   "startColumn" ==> 1
-                  "endLineNumber" ==> line
-                  "endColumn" ==> model.getLineMaxColumn line ])
+                  "endLineNumber" ==> clampedLine
+                  "endColumn" ==> model.getLineMaxColumn clampedLine ])
         |> List.toArray
 
     monaco?editor?setModelMarkers (model, "moocode-compile", markers)

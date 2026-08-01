@@ -828,6 +828,12 @@ let mutable private pendingReconfigureResolver: (bool * string -> unit) option =
 /// exactly when `isDirty` is `false` (cleared together, in `setDirty`).
 let mutable private dirtySave: (int64 * string * string) option = None
 
+/// Handle of the pending debounced live-diagnostics check (`None` when
+/// nothing's scheduled) - cancelled and re-armed on every real edit, and
+/// cancelled outright by `setDirty false` (a fresh load or a successful
+/// save both mean there's nothing left to check for).
+let mutable private syntaxCheckTimer: int option = None
+
 /// The single place `isDirty` ever changes - also keeps the status bar's
 /// dirty/saved indicator in sync, so every call site gets that for free
 /// instead of needing to remember to update the status bar itself.
@@ -842,11 +848,41 @@ let private setDirty (value: bool) : unit =
 
     if not value then
         dirtySave <- None
+        syntaxCheckTimer |> Option.iter JS.clearTimeout
+        syntaxCheckTimer <- None
+
+/// Debounced (~800ms idle) as-you-type compile probe - coexists with
+/// (doesn't replace) the existing save-time check. Takes the exact
+/// `(objRef, verbName, code)` snapshot the triggering edit already computed
+/// (`dirtySave`, right above) rather than re-reading it when the timer
+/// fires: if the user switches tabs before the delay elapses, `setDirty
+/// false`'s own cancellation (above) already invalidates the old timer, but
+/// capturing the snapshot up front also means a *new* edit in the same tab
+/// re-arms against its own latest text, never a stale one.
+let private scheduleSyntaxCheck (target: int64 * string * string) : unit =
+    syntaxCheckTimer |> Option.iter JS.clearTimeout
+
+    let objRef, verbName, code = target
+
+    syntaxCheckTimer <-
+        Some(
+            JS.setTimeout
+                (fun () ->
+                    syntaxCheckTimer <- None
+
+                    sendAction
+                        [ "action" ==> "check-verb-syntax"
+                          "obj" ==> int objRef
+                          "verb" ==> verbName
+                          "code" ==> codeLines code ])
+                800
+        )
 
 editor.onDidChangeModelContent (fun _ ->
     setDirty true
 
-    dirtySave <- currentVerbDoc () |> Option.map (fun (o, v) -> (o, v, editor.getValue ())))
+    dirtySave <- currentVerbDoc () |> Option.map (fun (o, v) -> (o, v, editor.getValue ()))
+    dirtySave |> Option.iter scheduleSyntaxCheck)
 |> ignore
 
 /// Autosaves the currently-open verb if it's actually been edited since it
@@ -4281,6 +4317,21 @@ ws.onmessage <-
                             let lineErrors = lines |> Array.toList |> List.choose parseErrorLine
                             Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
                     | false, _ -> ()
+                | _ -> ()
+            elif header.StartsWith("moodev-verb-syntax-check-result") then
+                // Live diagnostics - the debounced as-you-type compile
+                // probe's result (see `scheduleSyntaxCheck`). Only applied
+                // to the tab it's actually for, and only while still dirty
+                // - a response landing after a save or a tab switch has
+                // nothing left to annotate (the save-time check, or the
+                // freshly-loaded tab's own blank marker state, already
+                // owns the display at that point).
+                match headerField "object: #" header, headerField "verb: " header with
+                | Some objNum, Some verb ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = VerbTab(objRef, verb) && isDirty ->
+                        Monaco.setErrorMarkers editor (lines |> Array.toList |> List.choose parseErrorLine)
+                    | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-login-result") then
                 if headerField "ok: " header = Some "1" then

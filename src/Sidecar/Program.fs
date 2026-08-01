@@ -410,6 +410,10 @@ let private buildTryDispatch
                     let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
                     do! IdeActions.saveVerb config session webSocket (getObj ()) (getStr "verb") code ct
                     return true
+                | "check-verb-syntax" ->
+                    let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+                    do! IdeActions.checkVerbSyntax session webSocket (getObj ()) (getStr "verb") code ct
+                    return true
                 | "get-properties" ->
                     do! IdeActions.getProperties config session webSocket (getObj ()) ct
                     return true

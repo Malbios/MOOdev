@@ -1605,6 +1605,58 @@ let parsePropertyLiteralAction
                 ct
     }
 
+/// Fixed name for the hidden scratch verb `checkVerbSyntax` compiles
+/// candidate code against - never the real verb being edited, and never
+/// exported/committed. A single space-free name (not multi-word) so the
+/// existing `resolveVerbIndexStatements` alias-matching helper can find it
+/// with a plain `in` check, same as every other verb lookup in this file.
+let private syntaxCheckScratchVerbName = "moodev_syntax_check_scratch"
+
+/// Builds `checkVerbSyntax`'s eval statements - split out from the
+/// function itself purely so a unit test can assert the concatenated
+/// fragments are correctly separated (this exact shape broke once already:
+/// two `resolveVerbIndexStatements` calls glued directly against a
+/// no-trailing-space fragment produced the single malformed token
+/// `endifvlist`, which fails to compile - and since the *whole* eval
+/// (including its own trailing tag/notify epilogue) is one MOO statement
+/// sequence, that compile failure meant no response ever came back at
+/// all, not a visible error - live-verification found it as an indefinite
+/// hang, not a compile message, so this seemed worth guarding structurally
+/// rather than trusting spacing-by-eye alone next time this is touched).
+let buildCheckVerbSyntaxStatements (code: string list) : string =
+    let verbLit = "\"" + syntaxCheckScratchVerbName + "\""
+    let codeLiteral = "{" + (code |> List.map (fun l -> "\"" + l.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"") |> String.concat ", ") + "}"
+
+    resolveVerbIndexStatements "#0" verbLit
+    + $""" if (idx == 0) try add_verb(#0, {{#0, "rxd", {verbLit}}}, {{"this", "none", "this"}}); except err (ANY) endtry endif """
+    + resolveVerbIndexStatements "#0" verbLit
+    + $""" errs = (idx == 0) ? {{"could not create scratch verb for syntax check"}} | set_verb_code(#0, idx, {codeLiteral});"""
+
+/// Live-diagnostics compile probe: compiles `code` (the editor's *current,
+/// unsaved* text) against a dedicated, hidden scratch verb on `#0` -
+/// lazily created once (checked via the same `resolveVerbIndexStatements`
+/// idx-resolution helper `saveVerb`/`deleteVerb` already use, added if
+/// missing - the same `#0`-owned-bootstrap-verb convention this project's
+/// own login/eval-shim verbs already rely on), reused thereafter. Returns
+/// whatever real compile errors `set_verb_code()` reports - genuine
+/// ToastStunt compiler feedback, not a second MOOcode compiler
+/// reimplemented client-side. Never touches the real verb/tree: no export,
+/// no git commit, no `moodev-edit-result`-shaped response.
+let checkVerbSyntax
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (verbName: string)
+    (code: string list)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let! json = evalOnSession session (buildCheckVerbSyntaxStatements code) "errs" ct
+        let errors = json.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+
+        do! sendWire webSocket (sprintf "moodev-verb-syntax-check-result object: #%d verb: %s" objRef verbName) errors ct
+    }
+
 /// `kill-task {task}` - `kill_task(id)`, wizard-eval'd so it always has
 /// permission regardless of the task's own owner.
 let killTask (webSocket: WebSocket) (session: Session) (taskId: int64) (ct: CancellationToken) : Task<unit> =
