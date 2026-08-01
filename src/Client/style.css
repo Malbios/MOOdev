@@ -583,7 +583,8 @@ html, body {
 
 /* --- Tasks view ----------------------------------------------------------- */
 
-#sidebar-view-tasks {
+#sidebar-view-tasks,
+#sidebar-view-server-status {
   overflow-y: auto;
   padding: 0.8em 1em;
 }

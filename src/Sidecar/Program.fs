@@ -530,6 +530,9 @@ let private buildTryDispatch
                 | "get-tasks" ->
                     do! IdeActions.getTasks config session webSocket ct
                     return true
+                | "get-server-status" ->
+                    do! IdeActions.getServerStatus config session webSocket ct
+                    return true
                 | "kill-task" ->
                     do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
                     return true

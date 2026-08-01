@@ -1450,6 +1450,42 @@ result = out;"""
         do! sendWire webSocket "moodev-tasks" lines ct
     }
 
+/// `get-server-status` - every currently-bound listener (`listeners()`,
+/// confirmed against `ToastStunt/src/server.cc:3210-3240` - already returns
+/// a list of maps keyed `"object"`/`"port"`/`"interface"`/`"TLS"` per
+/// listener, zero new C-side work needed). Same "wrap the raw eval result
+/// into JSON-safe fields, one line per entry" shape `getTasks` above uses -
+/// `"object"` is `tostr()`'d before serializing for the same reason
+/// `getTasks` does it for its own obj-typed fields (a raw OBJ value isn't
+/// JSON-safe as-is). Room to grow with other live signals later (connected
+/// player count, uptime) without changing this response shape - not
+/// attempted here, matching the card's own framing.
+let getServerStatus (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
+    task {
+        let statements =
+            """out = {};
+for l in (listeners())
+  out = {@out, ["object" -> tostr(l["object"]), "port" -> l["port"], "interface" -> l["interface"], "tls" -> l["TLS"]]};
+endfor
+result = out;"""
+
+        let! json = evalOnSession session statements "result" ct
+        let root = json.RootElement
+
+        let lines =
+            root.EnumerateArray()
+            |> Seq.map (fun l ->
+                JsonSerializer.Serialize(
+                    {| objRef = int64 ((l.GetProperty("object").GetString()).TrimStart('#'))
+                       port = l.GetProperty("port").GetInt64()
+                       interfaceName = l.GetProperty("interface").GetString()
+                       tls = l.GetProperty("tls").GetInt32() = 1 |}
+                ))
+            |> List.ofSeq
+
+        do! sendWire webSocket "moodev-server-status" lines ct
+    }
+
 /// `kill-task {task}` - `kill_task(id)`, wizard-eval'd so it always has
 /// permission regardless of the task's own owner.
 let killTask (webSocket: WebSocket) (session: Session) (taskId: int64) (ct: CancellationToken) : Task<unit> =

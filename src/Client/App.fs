@@ -66,6 +66,7 @@ let private activityBarEl = document.getElementById ("activity-bar")
 let private viewTreeBtn = document.getElementById ("view-tree")
 let private viewHistoryBtn = document.getElementById ("view-history")
 let private viewTasksBtn = document.getElementById ("view-tasks")
+let private viewServerStatusBtn = document.getElementById ("view-server-status")
 let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
 let private viewDeadPropertiesBtn = document.getElementById ("view-dead-properties")
@@ -115,6 +116,8 @@ let private contentSearchResultsEl = document.getElementById ("content-search-re
 let private corponymHistoryListEl = document.getElementById ("corponym-history-list")
 let private sidebarViewTasksEl = document.getElementById ("sidebar-view-tasks")
 let private tasksListEl = document.getElementById ("tasks-list")
+let private sidebarViewServerStatusEl = document.getElementById ("sidebar-view-server-status")
+let private serverStatusListEl = document.getElementById ("server-status-list")
 let private sidebarViewErrorsEl = document.getElementById ("sidebar-view-errors")
 let private errorsListEl = document.getElementById ("errors-list")
 let private errorsClearBtn = document.getElementById ("errors-clear-btn")
@@ -505,6 +508,7 @@ type private SidebarView =
     | TreeView
     | HistoryView
     | TasksView
+    | ServerStatusView
     | ErrorsView
     | DeadVerbsView
     | DeadPropertiesView
@@ -908,6 +912,7 @@ let private allSidebarViews =
     [ sidebarViewTreeEl
       sidebarViewHistoryEl
       sidebarViewTasksEl
+      sidebarViewServerStatusEl
       sidebarViewErrorsEl
       sidebarViewDeadVerbsEl
       sidebarViewDeadPropertiesEl
@@ -2805,6 +2810,9 @@ and private switchToSidebarView (view: SidebarView) : unit =
     | TasksView ->
         activateOnlySidebarView sidebarViewTasksEl
         if isLoggedIn then loadTasks () else tasksListEl.innerHTML <- ""
+    | ServerStatusView ->
+        activateOnlySidebarView sidebarViewServerStatusEl
+        if isLoggedIn then loadServerStatus () else serverStatusListEl.innerHTML <- ""
     | ErrorsView ->
         activateOnlySidebarView sidebarViewErrorsEl
         renderErrorsList ()
@@ -2861,6 +2869,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
         [ viewTreeBtn, TreeView
           viewHistoryBtn, HistoryView
           viewTasksBtn, TasksView
+          viewServerStatusBtn, ServerStatusView
           viewErrorsBtn, ErrorsView
           viewDeadVerbsBtn, DeadVerbsView
           viewDeadPropertiesBtn, DeadPropertiesView
@@ -3028,6 +3037,41 @@ and private renderTasksList
 
             li.appendChild killBtn |> ignore
             tasksListEl.appendChild li |> ignore
+
+/// Refreshes the Server status view - same "always fresh" convention
+/// `loadTasks` uses, since bound listeners can change between views.
+and private loadServerStatus () : unit =
+    serverStatusListEl.innerHTML <- "Loading..."
+    sendAction [ "action" ==> "get-server-status" ]
+
+/// Renders `get-server-status`'s results - one row per bound listener
+/// (`IdeActions.getServerStatus`/ToastStunt's own `listeners()`). Room to
+/// grow with more live signals later (player count, uptime) without
+/// changing this render shape - not attempted here, matching the card's
+/// own framing.
+and private renderServerStatusResults (listeners: (int64 * int64 * string * bool) list) : unit =
+    serverStatusListEl.innerHTML <- ""
+
+    if listeners.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No bound listeners."
+        serverStatusListEl.appendChild li |> ignore
+    else
+        for objRef, port, interfaceName, tls in listeners do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+
+            let label = document.createElement ("span")
+            label.textContent <- sprintf "port %d (%s)%s  owner: " port interfaceName (if tls then ", TLS" else "")
+            li.appendChild label |> ignore
+
+            let ownerLink = document.createElement ("span")
+            ownerLink.classList.add "inspector-link"
+            ownerLink.textContent <- sprintf "#%d" objRef
+            ownerLink.onclick <- fun _ -> openOrSwitchToInspector objRef
+            li.appendChild ownerLink |> ignore
+
+            serverStatusListEl.appendChild li |> ignore
 
 /// Rebuilds the Errors view's list from `errorLog`. Traceback lines are
 /// plain text, not structured per-frame data yet - no click-to-jump in this
@@ -3713,6 +3757,7 @@ let private onActivityBtnClick (view: SidebarView) : unit =
 viewTreeBtn.onclick <- fun _ -> onActivityBtnClick TreeView
 viewHistoryBtn.onclick <- fun _ -> onActivityBtnClick HistoryView
 viewTasksBtn.onclick <- fun _ -> onActivityBtnClick TasksView
+viewServerStatusBtn.onclick <- fun _ -> onActivityBtnClick ServerStatusView
 viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
 viewDeadVerbsBtn.onclick <- fun _ -> onActivityBtnClick DeadVerbsView
 viewDeadPropertiesBtn.onclick <- fun _ -> onActivityBtnClick DeadPropertiesView
@@ -4476,6 +4521,16 @@ ws.onmessage <-
                                bytes = int64 (o?bytes: float) |})
 
                     renderTasksList tasks
+            elif header.StartsWith("moodev-server-status") then
+                if activeSidebarView = ServerStatusView then
+                    let listeners =
+                        lines
+                        |> Array.map (fun line ->
+                            let o: obj = JS.JSON.parse line
+                            int64 (o?objRef: float), int64 (o?port: float), (o?interfaceName: string), (o?tls: bool))
+                        |> List.ofArray
+
+                    renderServerStatusResults listeners
             elif header.StartsWith("moodev-kill-task-result") then
                 let ok = headerField "ok: " header = Some "1"
 
