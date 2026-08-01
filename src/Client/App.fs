@@ -2261,6 +2261,47 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
 
     let mutable highlightRow: HTMLElement option = None
 
+    // Permission-inheritance visualizer: for each verb/property row (own or
+    // inherited alike), asks the LSP which ancestor's copy actually wins by
+    // real MOO dispatch order (`moodev/resolveEffectiveMember`, reusing the
+    // already-proven, dispatch-order-faithful
+    // `Metadata.Resolver.findCallableVerb`/`findDeclaringObjectForProperty`
+    // against the static graph - `getLiveInfo`'s own live ancestor walk is
+    // BFS-ordered, not real dispatch order, and its own doc comment admits
+    // it doesn't compute this). A row whose own definer isn't the resolved
+    // winner gets a small "(shadowed by #N)" suffix - e.g. an inherited copy
+    // that a more-derived object's own override shadows. Same name can
+    // appear on multiple rows (an own row plus one or more inherited rows
+    // for the same overridden name), so results are cached per
+    // (kind, name) to avoid redundant identical requests within one render.
+    let effectiveMemberCache = System.Collections.Generic.Dictionary<string * string, int64 option>()
+
+    let annotateShadowedMember (kind: string) (name: string) (rowDefinerRef: int64) (nameTd: HTMLElement) : unit =
+        let applyIfShadowed (winner: int64 option) =
+            // Guards against a stale response landing after the user has
+            // navigated away or re-rendered this inspector - appending to a
+            // detached node would be harmless either way, but this matches
+            // this function's own `moodev-prop-content`-handler convention
+            // of checking `activeTab` first.
+            if activeTab = InspectorTab objRef then
+                match winner with
+                | Some w when w <> rowDefinerRef ->
+                    let suffix = document.createElement ("span")
+                    suffix.classList.add "inspector-shadowed-suffix"
+                    suffix.textContent <- sprintf " (shadowed by #%d)" w
+                    nameTd.appendChild suffix |> ignore
+                | _ -> ()
+
+        match effectiveMemberCache.TryGetValue((kind, name)) with
+        | true, cached -> applyIfShadowed cached
+        | false, _ ->
+            async {
+                let! winner = LspClient.resolveEffectiveMemberAsync objRef kind name
+                effectiveMemberCache.[(kind, name)] <- winner
+                applyIfShadowed winner
+            }
+            |> Async.StartImmediate
+
     for p in props do
         let pname: string = p?name
         let pPerms: string = p?perms
@@ -2311,6 +2352,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 td
 
         tr.appendChild nameTd |> ignore
+        annotateShadowedMember "property" pname pDefinerRef nameTd
 
         let ownerTd =
             if pIsOwn then
@@ -2689,6 +2731,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 td
 
         tr.appendChild nameTd |> ignore
+        annotateShadowedMember "verb" verbName vDefinerRef nameTd
 
         let ownerTd =
             if vIsOwn then

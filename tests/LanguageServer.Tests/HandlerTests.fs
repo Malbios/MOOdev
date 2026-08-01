@@ -105,7 +105,10 @@ let private fixtureDir =
         { Parents = [ 1L ] // raw, uncorponymed - like README.Minimal's "Root Class #1"
           Owner = 2L
           Flags = [ "r"; "f" ]
-          Properties = []
+          // Not overridden anywhere - the plain "inherited, not shadowed"
+          // case `ResolveEffectiveMember` tests need alongside the shadowed
+          // "say" verb below.
+          Properties = [ { Name = "description"; Owner = 2L; Perms = "r"; ValueLiteral = "\"A room.\"" } ]
           Verbs = [ verb "say" [ "\"Say something.\";"; "player:tell(\"You say, \\\"\", argstr, \"\\\"\");" ] ]
           LiveName = "Generic Room"
           Aliases = [ "room"; "generic room" ] }
@@ -116,7 +119,11 @@ let private fixtureDir =
           Owner = 2L
           Flags = []
           Properties = []
-          Verbs = []
+          // Shadows `room` (#3)'s own "say" - the one real override
+          // scenario `ResolveEffectiveMember` tests need: an object whose
+          // own copy of a name wins over an ancestor's, not just "some
+          // definer in the chain."
+          Verbs = [ verb "say" [ "\"Say something, child-style.\";"; "player:tell(\"You shout!\");" ] ]
           LiveName = ""
           Aliases = [] }
 
@@ -862,3 +869,73 @@ let ``GetObjectTree gives an object with no verbs of its own an empty Verbs arra
     match server.Value.GetObjectTree(null) |> Async.RunSynchronously with
     | Ok nodes -> Assert.Empty((nodes |> Array.find (fun n -> n.ObjRef = 2L)).Verbs)
     | other -> Assert.Fail(sprintf "expected Ok, got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on an object's own verb returns itself as the winning definer`` () =
+    match
+        server.Value.ResolveEffectiveMember({ ObjRef = 3L; Kind = "verb"; Name = "say" })
+        |> Async.RunSynchronously
+    with
+    | Ok(Some definer) -> Assert.Equal(3L, definer)
+    | other -> Assert.Fail(sprintf "expected Ok(Some 3L), got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on a shadowed verb resolves to the child's own copy, not the ancestor's`` () =
+    // room_child (#10) shadows room (#3)'s own "say" (see the fixture's own
+    // comment) - resolving from #10 must return #10, not #3, proving the
+    // winning definer (not just "some definer in the chain") is what's
+    // returned.
+    match
+        server.Value.ResolveEffectiveMember({ ObjRef = 10L; Kind = "verb"; Name = "say" })
+        |> Async.RunSynchronously
+    with
+    | Ok(Some definer) -> Assert.Equal(10L, definer)
+    | other -> Assert.Fail(sprintf "expected Ok(Some 10L), got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on a plain (not shadowed) inherited property resolves to the ancestor that defines it`` () =
+    match
+        server.Value.ResolveEffectiveMember(
+            { ObjRef = 10L
+              Kind = "property"
+              Name = "description" }
+        )
+        |> Async.RunSynchronously
+    with
+    | Ok(Some definer) -> Assert.Equal(3L, definer)
+    | other -> Assert.Fail(sprintf "expected Ok(Some 3L), got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on a property inherited from an ancestor resolves to the true owner, not the query object`` () =
+    match
+        server.Value.ResolveEffectiveMember(
+            { ObjRef = 40L
+              Kind = "property"
+              Name = "repo_root" }
+        )
+        |> Async.RunSynchronously
+    with
+    | Ok(Some definer) -> Assert.Equal(40L, definer)
+    | other -> Assert.Fail(sprintf "expected Ok(Some 40L), got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on a name that doesn't exist anywhere in the chain returns None, not an error`` () =
+    match
+        server.Value.ResolveEffectiveMember(
+            { ObjRef = 10L
+              Kind = "verb"
+              Name = "does_not_exist" }
+        )
+        |> Async.RunSynchronously
+    with
+    | Ok None -> ()
+    | other -> Assert.Fail(sprintf "expected Ok None, got %A" other)
+
+[<Fact>]
+let ``ResolveEffectiveMember on an unrecognized kind returns None rather than throwing`` () =
+    match
+        server.Value.ResolveEffectiveMember({ ObjRef = 3L; Kind = "bogus"; Name = "say" })
+        |> Async.RunSynchronously
+    with
+    | Ok None -> ()
+    | other -> Assert.Fail(sprintf "expected Ok None, got %A" other)

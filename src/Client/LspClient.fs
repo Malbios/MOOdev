@@ -237,6 +237,22 @@ let findReferencesToObjectAsync (objRef: int64) : Async<(string * int64 * string
             return items |> Array.map (fun o -> (o?kind: string), int64 (o?objRef: float), (o?detail: string))
     }
 
+/// Custom method (`moodev/resolveEffectiveMember`, `{objRef, kind, name}`) -
+/// the permission-inheritance visualizer's own lookup: which ancestor's copy
+/// of this verb/property actually wins by real MOO dispatch order (matches
+/// `Handlers.MooLspServer.ResolveEffectiveMember`). `kind` is `"verb"` or
+/// `"property"`. `None` when the name doesn't resolve at all against the
+/// static graph.
+let resolveEffectiveMemberAsync (objRef: int64) (kind: string) (name: string) : Async<int64 option> =
+    async {
+        let! result =
+            requestAsync
+                "moodev/resolveEffectiveMember"
+                (createObj [ "objRef" ==> float objRef; "kind" ==> kind; "name" ==> name ])
+
+        return if isNullOrUndefined result then None else Some(int64 (unbox result: float))
+    }
+
 /// Custom method (`moodev/reloadGraph`, `{surviveRoot}`) - reloads the
 /// language server's static analysis graph in place from `surviveRoot`,
 /// without restarting its process (matches

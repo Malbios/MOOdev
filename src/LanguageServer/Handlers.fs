@@ -125,6 +125,14 @@ type FindReferencesToObjectParams = { ObjRef: ObjRef }
 /// target" feature).
 type ReloadGraphParams = { SurviveRoot: string }
 
+/// `moodev/resolveEffectiveMember`'s params - `Kind` is `"verb"` or
+/// `"property"`; `Name` is the verb/property name as already shown in one
+/// of the inspector's own rows (not a pattern to match against).
+type ResolveEffectiveMemberParams =
+    { ObjRef: ObjRef
+      Kind: string
+      Name: string }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
@@ -1849,6 +1857,28 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
         async {
             GraphStore.reload p.SurviveRoot
             return Ok()
+        }
+
+    /// Custom method (`moodev/resolveEffectiveMember`, `{objRef, kind,
+    /// name}`) - the permission-inheritance visualizer's own lookup: which
+    /// ancestor's copy of this verb/property actually wins by real MOO
+    /// dispatch order, reusing the already-proven, dispatch-order-faithful
+    /// `Metadata.Resolver.findCallableVerb`/`findDeclaringObjectForProperty`
+    /// against the **static** graph - the same static-only tradeoff
+    /// `FindDeadVerbs`/inlay hints already make, appropriate here since this
+    /// is an on-demand per-row annotation, not a corpus-wide scan. `None`
+    /// when the name doesn't resolve at all (shouldn't happen for a name the
+    /// client already has a live row for, but the static graph could in
+    /// principle lag behind a very recent live edit).
+    member _.ResolveEffectiveMember(p: ResolveEffectiveMemberParams) : Async<Result<ObjRef option, JsonRpc.Error>> =
+        async {
+            let result =
+                match p.Kind with
+                | "verb" -> Metadata.Resolver.findCallableVerb graph p.ObjRef p.Name |> Option.map fst
+                | "property" -> Metadata.Resolver.findDeclaringObjectForProperty graph p.ObjRef p.Name
+                | _ -> None
+
+            return Ok result
         }
 
     /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
