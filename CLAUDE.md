@@ -27,11 +27,70 @@ convenience — see its own doc comment.
 - **Write unit tests where possible** for new logic, not just live/manual verification.
 - **Prefer self-documenting code over lengthy comments.** A well-named function/variable
   should carry the "what"; comments are for the non-obvious "why" only, and should stay short.
+- **Never special-case tooling behavior (tree view, inspector, etc.) by object number.** Any
+  fix or feature should key off structural properties (has a parent, has a corponym, matches a
+  filter) - never a hardcoded object number or object-number range. If something doesn't
+  show/work as expected, verify the actual live behavior directly (start a test instance, query
+  it, read the current code path) before explaining it from documentation or memory of prior
+  work - docs describe intent at a point in time, not necessarily the current mechanism after
+  later fixes.
+- **Prefer table-driven, generalized launch tooling over bespoke per-environment scripts.** A
+  new dev environment (which MOO database to boot, ports, content tree) should be a new entry
+  in `test.ps1`'s `$profiles` table, not a new script or a new hardcoded if/else branch. Keep
+  the automated Playwright test harness (`test-instance-start.ps1`) on the simplest/fastest DB
+  (`Minimal.db`) unless there's a concrete tooling need for more - a richer manually-launched
+  environment for exploration is a separate `test.ps1` profile, not something that should touch
+  the scripted test harness.
+- **During live-debug iteration against the test-instance stack, restart only the process whose
+  source actually changed** (just Client, or just LanguageServer, etc.) rather than re-running
+  the full `test-instance-start.ps1` each time - that always reboots the MOO instance and rebuilds
+  every piece from scratch, which is pure overhead when only one component changed.
 
 **MOOcode reference material should be verified against the live server or the C source in
 `ToastStunt/src/` (repo root) rather than trusted from training data** — the reference doc explains
 why (MOO documentation is sparse and much of what's findable describes LambdaMOO 1.8.1, not
 ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
+
+## Git workflow
+
+- **Commit and push finished, verified work without waiting to be asked.** Once a chunk of work
+  is implemented and verified (build/tests pass, and live verification too if that was part of
+  the task), commit it as part of finishing the task - "should I commit" isn't a separate open
+  question needing its own confirmation round-trip. Push immediately after, in the same turn -
+  don't leave a commit local waiting for a separate "push this."
+- This repo submodules `ToastStunt`; a related content project (e.g. `Survive`) has its own
+  separate `ToastStunt` submodule too. If a submodule commit and a parent-repo
+  submodule-pointer-bump commit both happen in the same round, push the submodule first, then
+  the parent - the parent's pointer only resolves once that commit is reachable on the
+  submodule's own remote.
+- Still use judgment for genuinely ambiguous or destructive git actions (force-push, rewriting
+  history, anything touching a shared/remote branch) - this is specifically about routine
+  commits of finished local work, not a blanket override of git safety judgment.
+
+## Tracking this project's work
+
+Feature/task tracking for this project lives in an Obsidian vault **outside any repo** (it used
+to be checked in at `vault/`, then was removed from git) - as of 2026-08-01,
+`C:\Users\abrae\Documents\MEGA\SmallVaults\MOOcode\boards\MOO IDE Development.md`. **Confirm this
+path fresh each session** rather than trusting this note - it has moved multiple times already.
+
+When a vault todo is implemented, built, tested, and live-verified, move its card to **Ready for
+Testing**, never straight to **Done** - the user reviews finished work manually and moves it to
+Done themselves. Any feature idea proposed during brainstorming that doesn't end up on the board
+by the next check-in is implicitly rejected - don't resurface it later.
+
+## External references
+
+- **[SindomeCorp/moo-for-llms](https://github.com/SindomeCorp/moo-for-llms)** — a public,
+  MIT-licensed MOOcode reference corpus purpose-built for LLM consumption: concise guides for
+  syntax/semantics, permissions, error handling, object lifecycle, core commands/utilities,
+  tasks, command parsing, algorithm patterns, verb doc-comment conventions, common mistakes, and
+  explicit dialect classification (LambdaMOO vs. Stunt vs. ToastStunt differences), plus runnable
+  examples and eval/dataset scaffolding. Useful as a broader, cross-dialect supplement to
+  `moocode-reference.md` above. It is *not* grounded against this project's own ToastStunt fork
+  the way `moocode-reference.md` is, though - where the two disagree, or where its dialect
+  classification doesn't clearly cover something, verify against `ToastStunt/src/` or a live
+  connection rather than trusting either document outright.
 
 **VCS ownership has moved to the sidecar.** `moo-vcs-plan.md` (repo root)'s phases 0-6 are
 complete: the in-MOO `$vcs` package is fully retired, and version control (export/import/history/
