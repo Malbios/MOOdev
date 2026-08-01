@@ -630,6 +630,70 @@ let mutable private previewTab: (int64 * string) option = None
 /// already-open tab (preview or pinned) never touches this.
 let mutable private previewInspectorTab: int64 option = None
 
+/// Round-trips `activeTab` through a small tagged JSON shape for
+/// `persistTabs`/`loadPersistedTabs` below - `GameTab` has no payload;
+/// `VerbTab`/`InspectorTab` carry their objRef (through `float`, the
+/// established int64-over-JSON discipline throughout this file) and, for
+/// verbs, the verb name.
+let private encodeActiveTab (tab: OpenTab) : obj =
+    match tab with
+    | GameTab -> createObj [ "kind" ==> "game" ]
+    | VerbTab(o, v) -> createObj [ "kind" ==> "verb"; "obj" ==> float o; "verb" ==> v ]
+    | InspectorTab o -> createObj [ "kind" ==> "inspector"; "obj" ==> float o ]
+
+let private persistTabsKey = "moodev-open-tabs"
+
+/// Persists which tabs are open and which is active, so a page reload can
+/// restore the layout (see `restorePersistedTabs`) - same
+/// `JS.JSON.stringify`/localStorage idiom `Settings.saveColorRules` already
+/// uses for a list-shaped value. Called wherever `openVerbTabs`/
+/// `openInspectorTabs`/`activeTab` actually change, not on a timer.
+let private persistTabs () : unit =
+    let payload =
+        createObj
+            [ "verbTabs" ==> (openVerbTabs |> List.map (fun (o, v) -> createObj [ "obj" ==> float o; "verb" ==> v ]) |> Array.ofList)
+              "inspectorTabs" ==> (openInspectorTabs |> List.map float |> Array.ofList)
+              "active" ==> encodeActiveTab activeTab ]
+
+    window.localStorage.setItem (persistTabsKey, JS.JSON.stringify payload)
+
+/// What `restorePersistedTabs` needs to reopen a saved layout - `Active`
+/// mirrors `OpenTab` but stays a plain decoded value rather than the
+/// original `OpenTab` itself, since restoring a verb/inspector tab is a
+/// multi-step, often-async process (a live `fetch-verb`/`get-live-info`
+/// round trip), not a single `switchToTab` call.
+type private PersistedActiveTab =
+    | PersistedGame
+    | PersistedVerb of objRef: int64 * verbName: string
+    | PersistedInspector of objRef: int64
+
+type private PersistedTabs =
+    { VerbTabs: (int64 * string) list
+      InspectorTabs: int64 list
+      Active: PersistedActiveTab }
+
+let private loadPersistedTabs () : PersistedTabs option =
+    match window.localStorage.getItem persistTabsKey with
+    | null -> None
+    | json ->
+        try
+            let parsed: obj = JS.JSON.parse json
+
+            let verbTabs =
+                (parsed?verbTabs: obj[]) |> Array.map (fun v -> int64 (v?obj: float), (v?verb: string)) |> Array.toList
+
+            let inspectorTabs = (parsed?inspectorTabs: float[]) |> Array.map int64 |> Array.toList
+            let activeObj: obj = parsed?active
+
+            let active =
+                match (activeObj?kind: string) with
+                | "verb" -> PersistedVerb(int64 (activeObj?obj: float), (activeObj?verb: string))
+                | "inspector" -> PersistedInspector(int64 (activeObj?obj: float))
+                | _ -> PersistedGame
+
+            Some { VerbTabs = verbTabs; InspectorTabs = inspectorTabs; Active = active }
+        with _ -> None
+
 /// The `(objRef, verb) option` shape a couple of call sites still need
 /// (`saveIfDirty`, `Monaco.wireLsp`'s hover/definition callback) - derived
 /// from `activeTab` rather than tracked separately.
@@ -1242,6 +1306,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
         showPaneFor tab
         renderTabs ()
         renderTree ()
+        persistTabs ()
 
 and private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
@@ -1293,6 +1358,7 @@ and private closeTabImmediate (objRef: int64, verbName: string) : unit =
         tabContent <- Map.remove (objRef, verbName) tabContent
         renderTabs ()
         renderTree ()
+        persistTabs ()
 
 /// Closes an open verb tab from user-initiated action (the tab strip's ×
 /// button or middle-click, via `closeAction` below) - unlike
@@ -1349,6 +1415,7 @@ and private closeInspectorTab (objRef: int64) : unit =
     else
         renderTabs ()
         renderTree ()
+        persistTabs ()
 
 /// Opens `objRef`'s inspector - switches instantly if it's already an open
 /// tab (adding it first if not), then *always* kicks off a fresh load
@@ -3495,6 +3562,63 @@ outputEl.onclick <-
 
 tabGameBtn.onclick <- fun _ -> switchToTab GameTab
 
+/// Rebuilds whatever tab layout was open the last time this browser tab
+/// closed or reloaded (see `persistTabs`/`loadPersistedTabs`). Hooked into
+/// `moodev-login-result`'s success branch, after `buildTree`/`get-live-roots`
+/// - a real logged-in session is required before `fetch-verb`/`get-live-info`
+/// mean anything.
+///
+/// Every persisted tab is seeded directly into `openVerbTabs`/
+/// `openInspectorTabs`/`tabOrder` up front, rather than through
+/// `fetchVerb`/`openOrSwitchToInspectorWith` one at a time - both of those
+/// paths carry the preview-tab replacement mechanic (see `previewTab`'s own
+/// comment), and a fresh page load starts with no preview tab pinned yet to
+/// protect the first one restored, so restoring a second tab that way would
+/// silently evict the first rather than opening alongside it. Seeding the
+/// full list first means every subsequent fetch/load sees its tab as
+/// "already open" and skips that mechanic entirely - restored tabs come back
+/// pinned, not as a preview.
+///
+/// Inspector tab content is never cached client-side (`loadInspector`'s
+/// "always fresh" rule), so only the persisted-active inspector tab, if any,
+/// needs an actual load call - the rest just need to exist in the strip
+/// until clicked. Verb tab content, by contrast, needs a real fetch for
+/// every restored tab; the previously-active one is fetched last so it's
+/// more likely (not guaranteed) to be the last response to land, since the
+/// `moodev-edit-content` handler always activates whichever tab's content
+/// just arrived (see its own comment on that race) - an accepted limitation
+/// shared with the rest of this restore, not something worth building
+/// request-correlation infrastructure to close.
+let private restorePersistedTabs () : unit =
+    match loadPersistedTabs () with
+    | None -> ()
+    | Some persisted ->
+        for objRef, verbName in persisted.VerbTabs do
+            if not (openVerbTabs |> List.contains (objRef, verbName)) then
+                openVerbTabs <- openVerbTabs @ [ (objRef, verbName) ]
+                tabOrder <- tabOrder @ [ VerbTab(objRef, verbName) ]
+
+        for objRef in persisted.InspectorTabs do
+            if not (openInspectorTabs |> List.contains objRef) then
+                openInspectorTabs <- openInspectorTabs @ [ objRef ]
+                tabOrder <- tabOrder @ [ InspectorTab objRef ]
+
+        renderTabs ()
+
+        let activeVerbTab =
+            match persisted.Active with
+            | PersistedVerb(o, v) -> Some(o, v)
+            | _ -> None
+
+        for objRef, verbName in persisted.VerbTabs do
+            if Some(objRef, verbName) <> activeVerbTab then
+                fetchVerb objRef verbName
+
+        match persisted.Active with
+        | PersistedGame -> switchToTab GameTab
+        | PersistedInspector objRef -> openOrSwitchToInspectorWith objRef None
+        | PersistedVerb(objRef, verbName) -> fetchVerb objRef verbName
+
 // Clicking the already-active view's own icon collapses the sidebar
 // instead of (pointlessly) re-switching to the view already showing -
 // clicking a *different* icon un-collapses first if needed, so the newly
@@ -3781,6 +3905,10 @@ ws.onmessage <-
                         // Refresh the tree's highlight to follow whatever
                         // just opened - cheap, reuses the already-built tree.
                         renderTree ()
+                        // Doesn't go through `switchToTab` (see the comment
+                        // above on why), so its own persistence must be
+                        // triggered here rather than riding that function's.
+                        persistTabs ()
                     | false, _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-edit-result") then
@@ -3855,6 +3983,7 @@ ws.onmessage <-
                         // the tree unpredictably depending purely on which
                         // response happened to arrive first.
                         sendAction [ "action" ==> "get-live-roots" ]
+                        restorePersistedTabs ()
                     }
                     |> Async.StartImmediate
             elif header.StartsWith("moodev-prop-content") then

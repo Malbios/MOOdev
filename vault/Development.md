@@ -8,8 +8,6 @@ kanban-plugin: board
 
 - [ ] [[Rename symbol refactor]]
 	#Acceleration
-- [ ] [[Tab-session restore across reload]]
-	#UI/UX
 - [ ] [[Global content search (live tree, not history)]]
 	#Acceleration #UI/UX
 - [ ] [[Property-level dead-reference finder]]
@@ -64,6 +62,14 @@ kanban-plugin: board
 
 ## Done
 
+**Complete**
+
+- [ ] [[Tab-session restore across reload]]
+
+***
+
+## Archive
+
 - [ ] clicking the game client view should put the focus on the text input for the game client
 - [ ] add ANSI support to the game client
 - [ ] middle mouse click on a tab should close the tab
@@ -82,15 +88,8 @@ kanban-plugin: board
 - [ ] Remove the "collapse/expand" arrow button on the divider between tree-view and game client. Instead make a second click on whichever left sidebar view you have open right now collapse it.
 - [ ] [[Eval scratchpad panel]]
 
-
-## Removed
-
-
-
-
-
 %% kanban:settings
 ```
-{"kanban-plugin":"board","list-collapse":[false,false,false,false],"tag-colors":[{"tagKey":"#UI/UX","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(18, 169, 7, 1)"},{"tagKey":"#Bugfix","color":"","backgroundColor":"rgba(120, 3, 3, 1)"},{"tagKey":"#Complex","color":"","backgroundColor":"rgba(119, 67, 2, 1)"},{"tagKey":"#Acceleration","color":"","backgroundColor":"rgba(94, 13, 87, 1)"},{"tagKey":"#VCS","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(16, 157, 161, 1)"},{"tagKey":"#Server","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(146, 161, 10, 1)"},{"tagKey":"#Research","color":"","backgroundColor":"rgba(24, 14, 122, 1)"}],"new-note-folder":"cards"}
+{"kanban-plugin":"board","list-collapse":[false,false,false],"tag-colors":[{"tagKey":"#UI/UX","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(18, 169, 7, 1)"},{"tagKey":"#Bugfix","color":"","backgroundColor":"rgba(120, 3, 3, 1)"},{"tagKey":"#Complex","color":"","backgroundColor":"rgba(119, 67, 2, 1)"},{"tagKey":"#Acceleration","color":"","backgroundColor":"rgba(94, 13, 87, 1)"},{"tagKey":"#VCS","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(16, 157, 161, 1)"},{"tagKey":"#Server","color":"rgba(0, 0, 0, 1)","backgroundColor":"rgba(146, 161, 10, 1)"},{"tagKey":"#Research","color":"","backgroundColor":"rgba(24, 14, 122, 1)"}],"new-note-folder":"cards"}
 ```
 %%
