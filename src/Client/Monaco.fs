@@ -120,6 +120,58 @@ let registerMoocodeLanguage () : unit =
     monaco?languages?setMonarchTokensProvider ("moocode", moocodeLanguage)
     monaco?languages?setLanguageConfiguration ("moocode", moocodeLanguageConfiguration)
 
+/// Three fixed local boilerplate snippets - a verb's arg-spec scatter
+/// skeleton, a `try`/`except (ANY)` guard, and this project's own leading
+/// block-comment doc-comment convention (confirmed the real one via
+/// `Handlers.fs`'s own doc comment on `inferredVerbSummary`, not guessed -
+/// MOOcode has exactly one comment form, non-nesting). `$1`/`${1:text}` tab
+/// stops need `insertTextRules = 4` (`InsertAsSnippet` - confirmed directly
+/// in the installed package's own `editor.api.d.ts:6980-6991`, same
+/// "read the real enum value" discipline `KeyCode.F2 = 60`/
+/// `MarkerSeverity.Error = 8` already establish in this file) or Monaco
+/// inserts the tab-stop syntax as literal text instead of parsing it.
+///
+/// Registered as a **second, purely client-side** completion provider for
+/// "moocode", alongside (not replacing) `LspClient.fs`'s own LSP-backed
+/// `registerCompletionItemProvider` call - these three are static local
+/// text, nothing here needs a server round trip, so keeping this separate
+/// avoids touching that provider's LSP-only contract at all.
+let registerSnippetProvider () : unit =
+    let snippets =
+        [ "argspec", "Verb arg-spec scatter skeleton", "{${1:who}, ?${2:what} = ${3:0}, @${4:rest}} = args;"
+          "try/except (ANY)", "try/except (ANY) guard", "try\n\t$1\nexcept ${2:e} (ANY)\n\t$3\nendtry"
+          "/* doc comment */", "Leading doc-comment block", "/* ${1:Describe this verb.} */\n$0" ]
+
+    let provideCompletionItems (model: obj) (position: obj) : obj =
+        let wordInfo = model?getWordUntilPosition (position)
+
+        let range =
+            createObj
+                [ "startLineNumber" ==> position?lineNumber
+                  "startColumn" ==> wordInfo?startColumn
+                  "endLineNumber" ==> position?lineNumber
+                  "endColumn" ==> wordInfo?endColumn ]
+
+        let suggestions =
+            snippets
+            |> List.map (fun (label, detail, insertText) ->
+                createObj
+                    [ "label" ==> label
+                      "kind" ==> 27 // CompletionItemKind.Snippet
+                      "detail" ==> detail
+                      "insertText" ==> insertText
+                      "insertTextRules" ==> 4 // CompletionItemInsertTextRule.InsertAsSnippet
+                      "range" ==> range ])
+            |> Array.ofList
+
+        createObj [ "suggestions" ==> suggestions ]
+
+    monaco?languages?registerCompletionItemProvider (
+        "moocode",
+        createObj [ "provideCompletionItems" ==> System.Func<obj, obj, obj>(fun m p -> provideCompletionItems m p) ]
+    )
+    |> ignore
+
 type ITextModel =
     /// Confirmed in the installed package's own `editor.api.d.ts:2093`.
     abstract getLineMaxColumn: lineNumber: int -> int

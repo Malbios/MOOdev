@@ -344,6 +344,7 @@ let private ws = WebSocket.Create(wsUrl)
 ws.binaryType <- "arraybuffer"
 
 Monaco.registerMoocodeLanguage ()
+Monaco.registerSnippetProvider ()
 let private editor = Monaco.create editorMonacoEl
 
 /// Word wrap / font size / minimap: real, live-applied Monaco preferences
