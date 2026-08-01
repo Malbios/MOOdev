@@ -548,6 +548,9 @@ let private buildTryDispatch
                 | "search-history" ->
                     do! IdeActions.searchHistory config session webSocket (getStr "query") ct
                     return true
+                | "search-content" ->
+                    do! IdeActions.searchContent config session webSocket (getStr "query") ct
+                    return true
                 | "corponym-history" ->
                     do! IdeActions.corponymHistory config webSocket ct
                     return true

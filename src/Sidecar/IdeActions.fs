@@ -1792,6 +1792,57 @@ let searchHistory
         do! sendWire webSocket "moodev-search-result" lines ct
     }
 
+/// `search-content {query}` - "find this string in the live tree right
+/// now," next to `searchHistory`'s "find it somewhere in history": reads
+/// `config.TreeDir`'s working-copy files directly rather than walking git
+/// history at all - there's exactly one snapshot ("now") to search, no
+/// commits to enumerate, so this is simpler than `searchHistory` despite
+/// searching similar content. `moodev-content-search-result` lines =
+/// `objnum<TAB>corponym<TAB>label<TAB>matchingLineText` - one line per
+/// matching source line, not per file (matches `searchHistory`'s own
+/// one-result-per-hit granularity). `corponyms.moo` is excluded, same
+/// reasoning as `searchHistory` (`corponym-history` covers that file on its
+/// own terms). Empty `objnum` means the corponym no longer resolves live -
+/// not clickable, same convention `searchHistory` already uses.
+let searchContent
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (query: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let! corponymsByObjnum = Exporter.getCorponyms (evalOnSession session) ct
+        let objnumByCorponym = corponymsByObjnum |> Map.toList |> List.map (fun (n, name) -> name, n) |> Map.ofList
+
+        let queryLower = query.ToLowerInvariant()
+
+        let lines =
+            System.IO.Directory.GetFiles(config.TreeDir, "*.moo", System.IO.SearchOption.AllDirectories)
+            |> Array.toList
+            |> List.collect (fun filePath ->
+                let relativePath =
+                    System.IO.Path.GetRelativePath(config.TreeDir, filePath).Replace('\\', '/')
+
+                if relativePath = "corponyms.moo" then
+                    []
+                else
+                    match Exporter.describePath relativePath with
+                    | None -> []
+                    | Some(corponym, label) ->
+                        let objnumText =
+                            Map.tryFind corponym objnumByCorponym
+                            |> Option.map (sprintf "%d")
+                            |> Option.defaultValue ""
+
+                        System.IO.File.ReadAllLines(filePath)
+                        |> Array.filter (fun line -> line.ToLowerInvariant().Contains(queryLower))
+                        |> Array.toList
+                        |> List.map (fun line -> sprintf "%s\t%s\t%s\t%s" objnumText corponym label line))
+
+        do! sendWire webSocket "moodev-content-search-result" lines ct
+    }
+
 /// `corponym-history {}` - Q5's "why is $room pointing at #14": every
 /// change ever made to `corponyms.moo`, each expanded into its individual
 /// added/removed/repointed entries via `History.diffCorponyms`.

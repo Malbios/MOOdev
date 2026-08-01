@@ -567,6 +567,7 @@ html, body {
 }
 
 #history-search-section,
+#content-search-section,
 #corponym-history-section {
   display: flex;
   flex-direction: column;
@@ -574,6 +575,7 @@ html, body {
 }
 
 #history-search-results,
+#content-search-results,
 #corponym-history-list {
   max-height: 40vh;
   overflow-y: auto;

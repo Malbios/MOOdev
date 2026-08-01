@@ -110,6 +110,8 @@ let private verbHistoryCloseBtn = document.getElementById ("verb-history-close-b
 let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
+let private contentSearchInputEl = document.getElementById ("content-search-input") :?> HTMLInputElement
+let private contentSearchResultsEl = document.getElementById ("content-search-results")
 let private corponymHistoryListEl = document.getElementById ("corponym-history-list")
 let private sidebarViewTasksEl = document.getElementById ("sidebar-view-tasks")
 let private tasksListEl = document.getElementById ("tasks-list")
@@ -2895,6 +2897,31 @@ and private renderSearchResults (results: (string * int64 * int64 option * strin
 
             historySearchResultsEl.appendChild li |> ignore
 
+/// Renders `search-content`'s results (the *live tree*, not history - see
+/// `IdeActions.searchContent`'s own comment) - same clickable-when-resolved
+/// convention `renderSearchResults` uses, minus the timestamp/commit-message
+/// columns that don't exist for "what's there right now."
+and private renderContentSearchResults (results: (int64 option * string * string * string) list) : unit =
+    contentSearchResultsEl.innerHTML <- ""
+
+    if results.IsEmpty then
+        let li = document.createElement ("li")
+        li.textContent <- "No matches."
+        contentSearchResultsEl.appendChild li |> ignore
+    else
+        for objRefOpt, corponym, label, matchingLine in results do
+            let li = document.createElement ("li")
+            li.classList.add "picker-item"
+            li.textContent <- sprintf "$%s / %s - %s" corponym label (matchingLine.Trim())
+
+            match objRefOpt with
+            | Some objRef ->
+                li.classList.add "inspector-link"
+                li.onclick <- fun _ -> openOrSwitchToVerb objRef label
+            | None -> ()
+
+            contentSearchResultsEl.appendChild li |> ignore
+
 /// Renders `corponym-history`'s entries - each `repointed` entry's old/new
 /// objnum is clickable through to that object's inspector via the existing
 /// `openOrSwitchToInspector`, same link style the inspector pane's own
@@ -3717,6 +3744,12 @@ historySearchInputEl.onkeydown <-
         if ev.key = "Enter" && historySearchInputEl.value.Trim() <> "" then
             historySearchResultsEl.innerHTML <- "Searching..."
             sendAction [ "action" ==> "search-history"; "query" ==> historySearchInputEl.value ]
+
+contentSearchInputEl.onkeydown <-
+    fun ev ->
+        if ev.key = "Enter" && contentSearchInputEl.value.Trim() <> "" then
+            contentSearchResultsEl.innerHTML <- "Searching..."
+            sendAction [ "action" ==> "search-content"; "query" ==> contentSearchInputEl.value ]
 // `switchToTab` no-ops when its argument already equals `activeTab` (to
 // avoid redundant work re-clicking the tab you're already on) - but
 // `activeTab` *starts* as `GameTab`, so that guard also skipped the very
@@ -4388,6 +4421,25 @@ ws.onmessage <-
                         |> List.ofArray
 
                     renderSearchResults results
+            elif header.StartsWith("moodev-content-search-result") then
+                if activeSidebarView = HistoryView then
+                    let results =
+                        lines
+                        |> Array.choose (fun line ->
+                            let parts = line.Split('\t')
+
+                            if parts.Length = 4 then
+                                let objRefOpt =
+                                    match System.Int64.TryParse parts.[0] with
+                                    | true, n -> Some n
+                                    | false, _ -> None
+
+                                Some(objRefOpt, parts.[1], parts.[2], parts.[3])
+                            else
+                                None)
+                        |> List.ofArray
+
+                    renderContentSearchResults results
             elif header.StartsWith("moodev-corponym-history") then
                 if activeSidebarView = HistoryView then
                     let entries =
