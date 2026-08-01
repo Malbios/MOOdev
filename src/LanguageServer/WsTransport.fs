@@ -30,6 +30,7 @@ let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge)
         |> Map.add
             "moodev/resolveEffectiveMember"
             (Server.serverRequestHandling (fun (s: MooLspServer) (p: ResolveEffectiveMemberParams) -> s.ResolveEffectiveMember p))
+        |> Map.add "moodev/getCallGraph" (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetCallGraphParams) -> s.GetCallGraph p))
 
     let clientCreator (_notify, _request) = new MooLspClient()
     let serverCreator (client: MooLspClient) = new MooLspServer(client, graph, bridge)

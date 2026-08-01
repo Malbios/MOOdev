@@ -133,6 +133,10 @@ type ResolveEffectiveMemberParams =
       Kind: string
       Name: string }
 
+/// `moodev/getCallGraph`'s params - `VerbName` may be any alias, resolved
+/// to its primary name server-side (see `primaryNameOf`).
+type GetCallGraphParams = { ObjRef: ObjRef; VerbName: string }
+
 type ObjectTreeNode =
     { ObjRef: ObjRef
       Name: string
@@ -606,6 +610,89 @@ let private computeReferenceResolution (graph: Graph) : System.Collections.Gener
         | _ -> ()
 
     confirmedTargets, unresolvedCallNames
+
+/// One resolved call edge, corpus-wide: `ContainingObj`'s own copy of
+/// `ContainingVerbName` (its primary name) contains a resolvable call that
+/// actually reaches `TargetObj`'s copy of `TargetVerbName` (also its
+/// primary name) - the call-graph counterpart to `computeReferenceResolution`
+/// above, which resolves the identical call sites but only keeps the target
+/// side (folded into a flat set) since dead-verb/gotcha detection never
+/// needed the caller side retained. `getCallGraph` needs both ends kept as
+/// real edges instead.
+type private CallEdge =
+    { ContainingObj: ObjRef
+      ContainingVerbName: string
+      TargetObj: ObjRef
+      TargetVerbName: string }
+
+/// Every `allVerbCallReferences` call site that resolves to a real callable
+/// target, kept as a full `(caller -> callee)` edge - same resolve-callee
+/// pattern `computeReferenceResolution`/`TextDocumentInlayHint` both already
+/// use, just retaining the edge instead of folding one side away.
+let private allCallEdges (graph: Graph) : CallEdge list =
+    [ for containingObj, containingVerbName, r in allVerbCallReferences graph do
+          match r.Ref with
+          | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
+              let resolved =
+                  Metadata.Resolver.resolveReceiverInContext graph containingObj receiver
+                  |> Option.bind (fun receiverStart -> Metadata.Resolver.findCallableVerb graph receiverStart callName)
+
+              match resolved with
+              | Some(actualDefiner, actualVerb) ->
+                  let targetName = actualVerb.Meta.Names |> List.tryHead |> Option.defaultValue callName
+
+                  yield
+                      { ContainingObj = containingObj
+                        ContainingVerbName = containingVerbName
+                        TargetObj = actualDefiner
+                        TargetVerbName = targetName }
+              | None -> ()
+          | _ -> () ]
+
+/// One endpoint of a call-graph edge, over the wire - just enough to label
+/// and navigate to it (`Client/App.fs`'s `openOrSwitchToVerb`).
+type CallGraphNode = { ObjRef: ObjRef; VerbName: string }
+
+/// One-hop callees (verbs this verb's own code resolves to) and one-hop
+/// callers (verbs whose own code resolves to this one) - not the whole
+/// reachable call graph, which has no natural bound, same "ancestors
+/// upward, direct children only downward" scoping tradeoff the object
+/// inheritance graph already makes for the same reason.
+type CallGraphResult = { Callees: CallGraphNode[]; Callers: CallGraphNode[] }
+
+/// Resolves `(objRef, verbName)` to that verb's own primary name (the first
+/// entry in its declared name-spec) - `verbName` may be any alias the
+/// caller happened to ask by, but `allCallEdges`' entries are always keyed
+/// by primary name (via `allVerbCallReferences`), so matching against them
+/// needs the same normalization.
+let private primaryNameOf (graph: Graph) (objRef: ObjRef) (verbName: string) : string option =
+    Map.tryFind objRef graph.Objects
+    |> Option.bind (fun o -> o.Verbs |> List.tryFind (fun v -> Metadata.Resolver.verbNameMatchesAny v.Meta.Names verbName))
+    |> Option.bind (fun v -> v.Meta.Names |> List.tryHead)
+
+/// Corpus-wide scan for `getCallGraph` - static-only, same tradeoff every
+/// other corpus-wide scan in this file already makes.
+let getCallGraph (graph: Graph) (objRef: ObjRef) (verbName: string) : CallGraphResult =
+    match primaryNameOf graph objRef verbName with
+    | None -> { Callees = [||]; Callers = [||] }
+    | Some primary ->
+        let edges = allCallEdges graph
+
+        let callees =
+            edges
+            |> List.filter (fun e -> e.ContainingObj = objRef && e.ContainingVerbName = primary)
+            |> List.map (fun e -> { ObjRef = e.TargetObj; VerbName = e.TargetVerbName })
+            |> List.distinct
+            |> Array.ofList
+
+        let callers =
+            edges
+            |> List.filter (fun e -> e.TargetObj = objRef && e.TargetVerbName = primary)
+            |> List.map (fun e -> { ObjRef = e.ContainingObj; VerbName = e.ContainingVerbName })
+            |> List.distinct
+            |> Array.ofList
+
+        { Callees = callees; Callers = callers }
 
 /// Corpus-wide counterpart to `TextDocumentReferences` - instead of
 /// resolving every call site against one target verb, resolves every call
@@ -1972,6 +2059,13 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
 
             return Ok result
         }
+
+    /// Custom method (`moodev/getCallGraph`, `{objRef, verbName}`) - the
+    /// call-graph view's own lookup: one-hop callees and callers of this
+    /// verb, corpus-wide, reusing the same resolve-callee primitives
+    /// `ResolveEffectiveMember`/dead-verb detection already lean on.
+    member _.GetCallGraph(p: GetCallGraphParams) : Async<Result<CallGraphResult, JsonRpc.Error>> =
+        async { return Ok(getCallGraph graph p.ObjRef p.VerbName) }
 
     /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
     /// gotchas" static-check report: every verb `findGotchas` flags for a

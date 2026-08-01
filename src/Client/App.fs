@@ -119,6 +119,7 @@ let private verbParentDiffPaneEl = document.getElementById ("verb-parent-diff-pa
 let private verbParentDiffHeaderEl = document.getElementById ("verb-parent-diff-header")
 let private verbParentDiffEditorEl = document.getElementById ("verb-parent-diff-editor")
 let private verbParentDiffCloseBtn = document.getElementById ("verb-parent-diff-close-btn")
+let private editorCallGraphEl = document.getElementById ("editor-call-graph")
 let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
@@ -541,6 +542,83 @@ let mutable private activeSidebarView: SidebarView = TreeView
 /// `DocsView` arm only fetches when this is still `None`, then just filters
 /// and re-renders the cached array locally on every later switch/search.
 let mutable private moocodeDocsCache: (string * string * string * string)[] option = None
+
+/// The full, fixed set of MOO error codes (`enum error`, ToastStunt
+/// `include/structures.h:70-74`) - static reference content, merged into
+/// `moocodeDocsCache` once fetched (see `switchToSidebarView`'s `DocsView`
+/// arm) so it rides the docs sidebar's existing search/detail UI for free,
+/// rather than a new sidebar view or a server round trip for 19 fixed
+/// entries. One-line descriptions are ToastStunt's own (`unparse.cc`'s
+/// `unparse_error`); "common causes" prose is authored here - no such
+/// prose exists anywhere in the C source or `moocode-reference.md`.
+let private errorCodeGlossary: (string * string * string * string)[] =
+    [| "E_NONE", "E_NONE", "No error. Never actually raised - only ever appears as a placeholder/absence value.", "error"
+       "E_TYPE",
+       "E_TYPE",
+       "Type mismatch. An operation got a value of the wrong type - e.g. adding a string to a number, or indexing a non-list/non-map.",
+       "error"
+       "E_DIV", "E_DIV", "Division by zero, or `x % 0` - check the divisor before dividing, or catch this explicitly.", "error"
+       "E_PERM",
+       "E_PERM",
+       "Permission denied. The calling verb's permissions (not necessarily the connected player's) don't allow this operation - missing the read/write/execute bit, or not the owner/a wizard.",
+       "error"
+       "E_PROPNF",
+       "E_PROPNF",
+       "Property not found. The named property doesn't exist on this object or its ancestors - check spelling, or that `add_property()` actually ran.",
+       "error"
+       "E_VERBNF",
+       "E_VERBNF",
+       "Verb not found. No verb by that name is callable on this object (via `verb_info()`/a `:name()` call) - check spelling, aliases, or that the verb has its `x` bit set.",
+       "error"
+       "E_VARNF",
+       "E_VARNF",
+       "Variable not found - only ever raised by `properties()`/`property_info()`-adjacent introspection builtins on a bad variable/scope name, not by ordinary MOOcode variable use (an unset local is simply 0/blank).",
+       "error"
+       "E_INVIND",
+       "E_INVIND",
+       "Invalid indirection - tried to index into or call a verb on a value that isn't an object/list/map (e.g. `5:foo()` or `5[1]` where `5` is a plain number).",
+       "error"
+       "E_RECMOVE",
+       "E_RECMOVE",
+       "Recursive move - `move()` would place an object inside itself, directly or via one of its own contents.",
+       "error"
+       "E_MAXREC",
+       "E_MAXREC",
+       "Too many verb calls (or too deep an expression) - usually unbounded/runaway recursion between verbs.",
+       "error"
+       "E_RANGE",
+       "E_RANGE",
+       "Range error - a list/string index (or substring range) is out of bounds. `list[0]` is a classic cause (MOO indexing is 1-based).",
+       "error"
+       "E_ARGS",
+       "E_ARGS",
+       "Incorrect number of arguments - a builtin or a verb's own `{who, ?what, @rest} = args;` scatter got a call that doesn't fit its required/optional/rest shape.",
+       "error"
+       "E_NACC",
+       "E_NACC",
+       "Move refused by destination - the destination's `:accept()` (or `:enterfunc()`) verb returned false for this `move()`.",
+       "error"
+       "E_INVARG",
+       "E_INVARG",
+       "Invalid argument - a builtin's argument had the right type but an invalid value, e.g. `add_property()` on a name that already exists, or an out-of-range object number.",
+       "error"
+       "E_QUOTA",
+       "E_QUOTA",
+       "Resource limit (quota) exceeded - usually an object-creation/ownership quota (`.ownership_quota`) running out.",
+       "error"
+       "E_FLOAT",
+       "E_FLOAT",
+       "Floating-point arithmetic error - e.g. an overflow, or a result that isn't a valid float (like `0.0 / 0.0`).",
+       "error"
+       "E_FILE",
+       "E_FILE",
+       "File error - a FileIO builtin's path doesn't exist, isn't readable/writable, or is outside the server's configured FileIO root.",
+       "error"
+       "E_EXEC",
+       "E_EXEC",
+       "Exec error - the `exec()` builtin's external command failed to start or exited abnormally.",
+       "error"
+       "E_INTRPT", "E_INTRPT", "Interrupted - the running task was explicitly killed (`kill_task()`) or interrupted before it finished.", "error" |]
 
 /// Which property, if any, is the specific sub-focus within the currently
 /// shown inspector - set alongside `selectedObjRef` whenever a caller asks
@@ -1607,6 +1685,7 @@ let rec private switchToTab (tab: OpenTab) : unit =
             // is a tab switch, not a user edit.
             setDirty false
             updateCompareParentButton o v
+            updateCallGraph o v
 
         showPaneFor tab
         renderTabs ()
@@ -1684,6 +1763,153 @@ and private updateCompareParentButton (objRef: int64) (verbName: string) : unit 
                     | None -> ()
             }
             |> Async.StartImmediate
+
+/// Renders `getCallGraph`'s result for `(objRef, verbName)` into
+/// `container` - one-hop callers above, the verb itself in the middle,
+/// one-hop callees below, laid out in horizontal layers by the exact same
+/// hand-rolled SVG approach `renderInheritanceGraph` already established
+/// (see its own doc comment on why: no SVG/diagram npm dependency anywhere
+/// in this codebase). Node identity here is a verb, not an object, so
+/// nodes are keyed by `(int64 * string)` pairs (object ref, verb name)
+/// throughout rather than a bare `int64` - kept as its own copy of the
+/// layout math rather than sharing `renderInheritanceGraph`'s (which is
+/// hardcoded to bare object-ref nodes) to avoid risking that already-shipped
+/// view while adding this one. Skips rendering entirely when there's
+/// nothing beyond the verb itself (no resolvable callers or callees) - an
+/// empty graph would just be noise.
+and private renderCallGraph
+    (container: HTMLElement)
+    (rootRef: int64)
+    (rootVerbName: string)
+    (callees: (int64 * string)[])
+    (callers: (int64 * string)[])
+    : unit =
+    container.innerHTML <- ""
+    let rootKey = rootRef, rootVerbName
+    let calleeList = callees |> Array.toList |> List.distinct
+    let callerList = callers |> Array.toList |> List.distinct
+
+    let allNodeLayers =
+        ([ for c in callerList -> c, -1 ] @ [ rootKey, 0 ] @ [ for c in calleeList -> c, 1 ])
+        |> List.distinctBy fst
+
+    if List.length allNodeLayers > 1 then
+        let labelFor (key: int64 * string) : string =
+            let o, v = key
+            let objLabel = Map.tryFind o treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" o)
+            sprintf "%s:%s" objLabel v
+
+        let nodeHeight = 26.0
+        let hGap = 14.0
+        let vGap = 46.0
+        let topPadding = 10.0
+        let sidePadding = 10.0
+        let charWidth = 6.3
+
+        let widthFor (key: int64 * string) : float = max 50.0 (float (labelFor key).Length * charWidth + 16.0)
+
+        let layers =
+            allNodeLayers
+            |> List.groupBy snd
+            |> List.map (fun (layer, entries) -> layer, entries |> List.map fst)
+            |> List.sortBy fst
+
+        let minLayer = layers |> List.map fst |> List.min
+
+        let layerTotalWidth (keys: (int64 * string) list) : float =
+            (keys |> List.sumBy widthFor) + hGap * float (List.length keys - 1)
+
+        let svgWidth = (layers |> List.map (snd >> layerTotalWidth) |> List.max) + sidePadding * 2.0
+        let svgHeight = topPadding * 2.0 + nodeHeight + vGap * float (List.length layers - 1)
+
+        let positions =
+            layers
+            |> List.collect (fun (layer, keys) ->
+                let totalWidth = layerTotalWidth keys
+                let startX = (svgWidth - totalWidth) / 2.0
+                let y = topPadding + float (layer - minLayer) * vGap
+
+                keys
+                |> List.fold
+                    (fun (x, acc) key ->
+                        let w = widthFor key
+                        x + w + hGap, (key, (x, y, w)) :: acc)
+                    (startX, [])
+                |> snd)
+            |> Map.ofList
+
+        let svgNs = "http://www.w3.org/2000/svg"
+        let svg = document.createElementNS (svgNs, "svg")
+        svg.setAttribute ("width", string svgWidth)
+        svg.setAttribute ("height", string svgHeight)
+        svg.setAttribute ("class", "inspector-graph-svg")
+
+        let edges = (callerList |> List.map (fun c -> c, rootKey)) @ (calleeList |> List.map (fun c -> rootKey, c))
+
+        for fromKey, toKey in edges do
+            match Map.tryFind fromKey positions, Map.tryFind toKey positions with
+            | Some(fx, fy, fw), Some(tx, ty, tw) ->
+                let line = document.createElementNS (svgNs, "line")
+                line.setAttribute ("x1", string (fx + fw / 2.0))
+                line.setAttribute ("y1", string fy)
+                line.setAttribute ("x2", string (tx + tw / 2.0))
+                line.setAttribute ("y2", string (ty + nodeHeight))
+                line.setAttribute ("class", "inspector-graph-edge")
+                svg.appendChild line |> ignore
+            | _ -> ()
+
+        for KeyValue((o, v), (x, y, w)) in positions do
+            let g = document.createElementNS (svgNs, "g")
+
+            g.setAttribute (
+                "class",
+                (if (o, v) = rootKey then
+                     "inspector-graph-node inspector-graph-node-root"
+                 else
+                     "inspector-graph-node")
+            )
+
+            g?onclick <- fun (_: Event) -> openOrSwitchToVerb o v
+
+            let rect = document.createElementNS (svgNs, "rect")
+            rect.setAttribute ("x", string x)
+            rect.setAttribute ("y", string y)
+            rect.setAttribute ("width", string w)
+            rect.setAttribute ("height", string nodeHeight)
+            rect.setAttribute ("rx", "4")
+            g.appendChild rect |> ignore
+
+            let text = document.createElementNS (svgNs, "text")
+            text.setAttribute ("x", string (x + w / 2.0))
+            text.setAttribute ("y", string (y + nodeHeight / 2.0 + 4.0))
+            text.setAttribute ("text-anchor", "middle")
+            text.textContent <- labelFor (o, v)
+            g.appendChild text |> ignore
+
+            svg.appendChild g |> ignore
+
+        let title = document.createElement ("div")
+        title.classList.add "inspector-section-title"
+        title.textContent <- "Call graph"
+        container.appendChild title |> ignore
+        container.appendChild svg |> ignore
+
+/// Fetches and renders the call graph for whichever `VerbTab(objRef,
+/// verbName)` is now active - called once whenever the plain editor view
+/// for a verb tab is shown, same call sites as `updateCompareParentButton`.
+/// Clears immediately (synchronously) so switching tabs never briefly shows
+/// the previous verb's stale graph while the real answer is still in
+/// flight.
+and private updateCallGraph (objRef: int64) (verbName: string) : unit =
+    editorCallGraphEl.innerHTML <- ""
+
+    async {
+        let! callees, callers = LspClient.getCallGraphAsync objRef verbName
+
+        if activeTab = VerbTab(objRef, verbName) then
+            renderCallGraph editorCallGraphEl objRef verbName callees callers
+    }
+    |> Async.StartImmediate
 
 /// Actually tears down an open verb tab - no save-state check at all. Only
 /// safe to call once it's already known there's nothing worth saving left
@@ -3412,7 +3638,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
 
             async {
                 let! results = LspClient.getMoocodeDocsAsync ()
-                moocodeDocsCache <- Some results
+                moocodeDocsCache <- Some(Array.append results errorCodeGlossary)
                 renderDocsList (docsSearchInputEl.value)
             }
             |> Async.StartImmediate
@@ -3841,6 +4067,7 @@ and private renderDocsList (filterText: string) : unit =
             match kind with
             | "keyword" -> 0
             | "variable" -> 1
+            | "error" -> 3
             | _ -> 2
 
         let filtered =
@@ -4736,6 +4963,7 @@ ws.onmessage <-
                         showingVerbHistory <- false
                         showingParentDiff <- false
                         updateCompareParentButton objRef verb
+                        updateCallGraph objRef verb
                         showPaneFor activeTab
                         renderTabs ()
                         // Refresh the tree's highlight to follow whatever

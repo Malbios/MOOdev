@@ -613,6 +613,19 @@ html, body {
   min-height: 0;
 }
 
+/* --- Verb call graph (in the editor pane) ------------------------------- */
+
+#editor-call-graph {
+  flex-shrink: 0;
+  max-height: 220px;
+  overflow: auto;
+  border-top: 1px solid #444;
+}
+
+#editor-call-graph:empty {
+  border-top: none;
+}
+
 /* --- History view (content search + corponym history) ----------------- */
 
 #sidebar-view-history {

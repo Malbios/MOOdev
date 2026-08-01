@@ -253,6 +253,23 @@ let resolveEffectiveMemberAsync (objRef: int64) (kind: string) (name: string) : 
         return if isNullOrUndefined result then None else Some(int64 (unbox result: float))
     }
 
+/// Custom method (`moodev/getCallGraph`, `{objRef, verbName}`) - the call
+/// graph view's own lookup (matches `Handlers.MooLspServer.GetCallGraph`):
+/// one-hop callees and callers of this verb. Each returned as a plain
+/// `(objRef, verbName)` tuple pair - no need for a richer type client-side,
+/// same "just enough to label and navigate" convention this file's other
+/// custom-method results already follow.
+let getCallGraphAsync (objRef: int64) (verbName: string) : Async<(int64 * string)[] * (int64 * string)[]> =
+    async {
+        let! result = requestAsync "moodev/getCallGraph" (createObj [ "objRef" ==> float objRef; "verbName" ==> verbName ])
+
+        if isNullOrUndefined result then
+            return [||], [||]
+        else
+            let toNodes (items: obj[]) = items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string))
+            return toNodes (result?callees: obj[]), toNodes (result?callers: obj[])
+    }
+
 /// Custom method (`moodev/reloadGraph`, `{surviveRoot}`) - reloads the
 /// language server's static analysis graph in place from `surviveRoot`,
 /// without restarting its process (matches
