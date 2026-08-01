@@ -1,1 +1,0 @@
-push uncaught-error tracebacks into the IDE as they happen (not just compile diagnostics from M3). handle_uncaught_error is the same hook idiom handle_verb_programmed already follows, so it's a small extension of a pattern you've built once already.

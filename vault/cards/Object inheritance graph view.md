@@ -1,1 +1,0 @@
-The multiple-inheritance DAG is flagged as a hazard to get traversal order right for, but there's no visual of it anywhere — only node-by-node tree browsing. A rendered graph rooted at the open object would make the DAG legible rather than just walkable.

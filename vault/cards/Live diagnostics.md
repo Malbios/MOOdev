@@ -1,1 +1,0 @@
-Currently the compile probe only runs on save. A debounced as-you-type probe would catch errors before you commit to a save.

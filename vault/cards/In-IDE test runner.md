@@ -1,1 +1,0 @@
-test-instance-start.ps1/test-instance-stop.ps1 give you an isolated throwaway MOO, but there's no MOOcode-level unit-test framework or in-editor "run this against the test instance, show pass/fail inline" surface — right now verifying behavior means manual telnet/terminal poking.

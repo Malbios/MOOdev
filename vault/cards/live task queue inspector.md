@@ -1,1 +1,0 @@
-surface tasks()/queued_tasks() with kill, plus tick/seconds usage per task. Directly useful given the tick-limit hazard already called out in the dev-environment plan; cheap to build since the primitives already exist as builtins.

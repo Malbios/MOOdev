@@ -1,1 +1,0 @@
-Static checks for the "MOOcode gotchas" already catalogued in the plan doc but never turned into tooling: a verb referenced elsewhere but missing the x (executable) bit, an unbounded loop with no suspend() (tick-limit risk), list[0]-style off-by-one indexing. The finite, whole-corpus nature of a MOO codebase (the same property M4 leans on) makes these cheap to check exhaustively.

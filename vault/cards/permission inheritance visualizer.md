@@ -1,1 +1,0 @@
-show effective owner/flags for a verb or property across the multiple-inheritance DAG. Worth calling out because the plan already flags "wrong ancestor" as a known M4 resolver risk; a visualizer makes that risk visible to you, not just to the resolver's logic.
