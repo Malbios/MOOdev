@@ -1,6 +1,6 @@
 /// Phase 1 of moo-vcs-plan.md: a read-only exporter that walks `#0`'s
 /// corponyms, resolves objects, and emits an on-disk tree per
-/// `C:\dev\moo-code\moo-dev\FORMAT.md` - `corponyms.moo`, one `object.moo`
+/// `FORMAT.md` (repo root) - `corponyms.moo`, one `object.moo`
 /// per corponym-bearing object, and one file per verb. Talks to the MOO
 /// only through `MooEval` (standard builtins over a wizard connection, no
 /// custom in-MOO verb), per invariant I1.

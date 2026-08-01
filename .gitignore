@@ -5,3 +5,4 @@ src/Client/output/
 src/Client/dist/
 .vs/
 *.user
+TestScratchTree/

@@ -14,7 +14,7 @@
   <ItemGroup>
     <!-- Real parameter names for ~55 builtins, extracted once from
          ToastStunt's own C source comments (see
-         C:\dev\moo-code\ToastStunt\src, `/* (param, names) */` above each
+         ToastStunt\src (repo root), `/* (param, names) */` above each
          bf_* implementation) - a static, build-time resource, not
          per-Survive-checkout data, so it's embedded rather than loaded
          from `surviveRoot`. -->

@@ -1,0 +1,3 @@
+[submodule "ToastStunt"]
+	path = ToastStunt
+	url = https://github.com/Malbios/toaststunt.git

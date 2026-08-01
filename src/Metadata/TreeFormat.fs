@@ -1,4 +1,4 @@
-/// Parses a `Survive`-shaped export tree per `C:\dev\moo-code\moo-dev\FORMAT.md` -
+/// Parses a `Survive`-shaped export tree per `FORMAT.md` (repo root) -
 /// `corponyms.moo`, one `objects/<name>/object.moo`, one file per verb.
 /// Deliberately independent of `Sidecar.TreeParser` (which parses the exact
 /// same on-disk grammar for the importer's benefit): `Metadata` has no

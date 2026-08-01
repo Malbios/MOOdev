@@ -1,15 +1,24 @@
 # MOOdev
 
-This repo is the `tools/` half of the project plan documented at
-`C:\dev\moo-code\toaststunt-dev-environment-plan.md` — read that file first, it is the source of truth
-for architecture, milestones, and settled decisions. `C:\dev\moo-code\moocode-reference.md` is the
-companion MOOcode language reference, with a section of facts verified live against this project's
-ToastStunt fork during M0.
+This is the MOO IDE: a standalone repo holding the sidecar, browser client, LSP server, DB
+parser, and `moo-eval` — the tooling that lets you develop against a MOO without needing raw
+telnet or the in-world editor. It submodules `ToastStunt` (this project's forked MOO server)
+directly, since a live server is needed to test the IDE against; see `test-instance-start.ps1`
+below.
 
-Game/world content (MOOcode verbs, the ToastCore-derived database) lives in the sibling `Survive`
-repo, not here. This repo holds the sidecar, browser client, and (later) the LSP server, DB
-parser, and `moo-eval` — the tooling that lets you develop against the MOO without needing raw
-telnet or the in-world editor.
+Read `toaststunt-dev-environment-plan.md` (repo root) first — it's the source of truth for
+architecture, milestones, and settled decisions. `moocode-reference.md` (repo root) is the
+companion MOOcode language reference, with a section of facts verified live against this
+project's ToastStunt fork during M0.
+
+Game/world content (MOOcode verbs, a ToastCore-derived database) is not part of this repo at
+all — it lives in whatever separate content project you're editing (e.g. `Survive`, an
+independent repo with its own `ToastStunt` submodule to actually run against). This repo's
+Sidecar/LanguageServer are just pointed at that project's content tree via config
+(`Moo:TreeDir` / `Survive:Root`) when you want to develop it — see "Running the sidecar +
+client for local dev" below. Nothing here tracks or assumes a specific content project, though
+`test.ps1`'s own `Survive` profile does assume one particular sibling-checkout layout for
+convenience — see its own doc comment.
 
 ## Development conventions
 
@@ -20,11 +29,11 @@ telnet or the in-world editor.
   should carry the "what"; comments are for the non-obvious "why" only, and should stay short.
 
 **MOOcode reference material should be verified against the live server or the C source in
-`C:\dev\moo-code\ToastStunt\src\` rather than trusted from training data** — the reference doc explains
+`ToastStunt/src/` (repo root) rather than trusted from training data** — the reference doc explains
 why (MOO documentation is sparse and much of what's findable describes LambdaMOO 1.8.1, not
 ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
 
-**VCS ownership has moved to the sidecar.** `C:\dev\moo-code\moo-vcs-plan.md`'s phases 0-6 are
+**VCS ownership has moved to the sidecar.** `moo-vcs-plan.md` (repo root)'s phases 0-6 are
 complete: the in-MOO `$vcs` package is fully retired, and version control (export/import/history/
 diff/search/restore/promotion) is now owned entirely by the sidecar, talking to the MOO purely via
 `eval()` over a wizard connection - no MOO-side file writes. The M2 status below and the
@@ -34,7 +43,7 @@ no current world runs it.
 ## Milestone status
 
 - **M0 (substrate)** — done. ToastStunt fork builds under WSL2 Ubuntu
-  (`C:\dev\moo-code\ToastStunt\build\moo`), ToastCore loads and runs, verified against a live
+  (`ToastStunt\build\moo`, repo root), ToastCore loads and runs, verified against a live
   connection.
 - **M1 (the spine)** — done. F# sidecar bridging browser WebSocket ↔ MOO telnet TCP, plus a
   minimal Fable browser terminal. See `src/Sidecar` and `src/Client`.
@@ -68,56 +77,54 @@ no current world runs it.
 
 ## Two MOO instances: dev world vs. automated tests
 
-Both the dev/play world and the automated test instance now descend from `ToastStunt\Minimal.db`
-(not toastcore + `$vcs` - that baseline is retired). Neither has any in-MOO VCS content; the
-sidecar owns all of that from the outside via `eval()`.
+Both `test.ps1`'s dev/play world and the automated test instance descend from
+`ToastStunt\Minimal.db` (not toastcore + `$vcs` - that baseline is retired). Neither has any
+in-MOO VCS content; the sidecar owns all of that from the outside via `eval()`.
 
-- **Dev/play world** — `ToastStunt\run\survive.db` / `survive.db.new`, FileIO rooted at the real
-  `C:\dev\moo-code\Survive` repo. Launched by `test.ps1 -Database Survive` (also the default with no
-  `-Database` flag) in a visible window. On clean shutdown (in-game `;;shutdown();`, or a graceful
-  `SIGTERM`/Ctrl+C — the wrapping script runs once the `wsl` command returns, however it exited),
-  `survive.db.new` is promoted over `survive.db`, so the next launch continues from where you left
-  off. This is the only path that ever writes to the real `Survive` repo. **Note the double
-  semicolon** - a bare `;shutdown();` silently does nothing on this world: a single leading `;` is
-  ToastStunt's "eval" command alias (`parse_cmd.cc`), which needs a real `eval` verb to dispatch to
-  (ToastCore ships one; this `Minimal.db`-derived world never installed one) - confirmed live via
-  the same root cause as `test-instance-stop.ps1`'s own fix (see its own comment). The `;;` this
-  world's `#0:do_command` bootstrap verb recognizes (see "Bootstrap verbs" below) is what actually
-  reaches `eval()` here.
-- **Automated test instance** — `survive.test.db` (a fresh copy of `survive.db` taken at start), no
-  FileIO root at all (the `-i` flag is dropped entirely here — confirmed optional at the C++ level,
-  and nothing reads it since `$vcs` is retired). `test-instance-start.ps1` / `test-instance-stop.ps1`
-  in this repo group's root now manage the **full stack** headlessly (no visible window), not just
-  the MOO process: Sidecar, LSP server, and Client too, each a single directly-tracked process (no
-  `dotnet watch run`/`npm run dev` wrapper layers, which leave orphaned children behind when
-  killed — confirmed live, this exact mistake accumulated ~25 orphaned processes across several
-  sessions before this script tracked them). The Sidecar (which owns all git-based version control)
-  is pointed at a dedicated scratch content tree, `C:\dev\moo-code\SurviveTestTree` — rebuilt from
-  scratch on every run by exporting whatever's actually live on *this run's* test MOO instance
-  (`Sidecar.exe export`), never cloned from or pointed at the real `Survive` repo. This is the fix
-  for a real, repeated mistake: earlier sessions' manual Sidecar launches for Playwright-driven
-  verification kept defaulting to `Moo:TreeDir`'s real-`Survive` default, leaving real (if
-  unmerged/unpushed) commits and WIP refs in the real repo. Default ports: MOO 7778, Sidecar 5900,
-  LSP 5950, Client 5199, LSP-bridge listener 7782 — all distinct from both `test.ps1` profiles
-  below, so everything can run concurrently. Nothing from this instance is ever promoted —
+- **Dev/play world** (`test.ps1`) — `ToastStunt\run\survive.db` / `survive.db.new`, FileIO rooted
+  at whatever content project's `TreeDir` the launched profile points at (`test.ps1`'s own
+  `$profiles` table - the built-in `Survive` profile assumes a sibling checkout at `..\Survive`;
+  see its own doc comment if that assumption doesn't hold for your layout). Launched by `test.ps1
+  -Database Survive` (also the default with no `-Database` flag) in a visible window. On clean
+  shutdown (in-game `;;shutdown();`, or a graceful `SIGTERM`/Ctrl+C — the wrapping script runs once
+  the `wsl` command returns, however it exited), `survive.db.new` is promoted over `survive.db`, so
+  the next launch continues from where you left off. This is the only path that ever writes to a
+  real content project's tree. **Note the double semicolon** - a bare `;shutdown();` silently does
+  nothing on this world: a single leading `;` is ToastStunt's "eval" command alias
+  (`parse_cmd.cc`), which needs a real `eval` verb to dispatch to (ToastCore ships one; this
+  `Minimal.db`-derived world never installed one) - confirmed live via the same root cause as
+  `test-instance-stop.ps1`'s own fix (see its own comment). The `;;` this world's `#0:do_command`
+  bootstrap verb recognizes (see "Bootstrap verbs" below) is what actually reaches `eval()` here.
+- **Automated test instance** (`test-instance-start.ps1` / `test-instance-stop.ps1`, both in this
+  repo's own root) — `survive.test.db` (a fresh copy of `survive.db` taken at start), no FileIO
+  root at all (the `-i` flag is dropped entirely here — confirmed optional at the C++ level, and
+  nothing reads it since `$vcs` is retired). These two scripts manage the **full stack** headlessly
+  (no visible window), not just the MOO process: Sidecar, LSP server, and Client too, each a single
+  directly-tracked process (no `dotnet watch run`/`npm run dev` wrapper layers, which leave
+  orphaned children behind when killed — confirmed live, this exact mistake accumulated ~25
+  orphaned processes across several sessions before this script tracked them). The Sidecar (which
+  owns all git-based version control) is pointed at a dedicated scratch content tree,
+  `TestScratchTree` (repo root) — rebuilt from scratch on every run by exporting whatever's
+  actually live on *this run's* test MOO instance (`Sidecar.exe export`), never cloned from or
+  pointed at any real content project. This is the fix for a real, repeated mistake: earlier
+  sessions' manual Sidecar launches for Playwright-driven verification kept defaulting to
+  `Moo:TreeDir`'s real-`Survive`-sibling default (see `appsettings.json`), leaving real (if
+  unmerged/unpushed) commits and WIP refs in that real repo. Default ports: MOO 7778, Sidecar 5900,
+  LSP 5950, Client 5199, LSP-bridge listener 7782 — all distinct from `test.ps1`'s own profile
+  ports, so everything can run concurrently. Nothing from this instance is ever promoted —
   `test-instance-stop.ps1` tears down Sidecar/LSP/Client immediately, then calls the MOO's own
-  `shutdown()`, no save. Intentionally left on `Minimal.db`-derived content rather than switched to
-  the richer `ToastCore` profile below - automated tests want the simplest/fastest baseline, not
-  realism.
+  `shutdown()`, no save. Intentionally left on `Minimal.db`-derived content rather than something
+  richer - automated tests want the simplest/fastest baseline, not realism.
 
-`test.ps1` also supports a **`ToastCore`** profile (`-Database ToastCore`) - a full, separate,
-manually-launched MOOdev instance (its own server/sidecar/LSP/client ports, its own db seeded from
-`ToastStunt\ToastCore.db`, its own content tree `ToastCoreWorld`) for exploring/testing against a
-rich, real ToastCore core. It can run alongside the `Survive` profile with no port collisions. Add
-more named profiles later by extending `test.ps1`'s `$profiles` table - no other script logic is
-per-environment.
+Add more named `test.ps1` profiles later by extending its `$profiles` table - no other script
+logic is per-environment.
 
 ## Bootstrap verbs baked into every world (`Minimal.db` *or* real ToastCore-derived)
 
 Two tiny verbs must exist on `#0` for the sidecar/live IDE to work against **any** world - a bare
-`Minimal.db` world, or a real ToastCore-derived one (e.g. the `ToastCore` `test.ps1` profile) -
-things ToastCore's own core + the old `$vcs` used to provide implicitly for `Survive`'s world, now
-gone along with them. Neither appears in the exported tree (`#0` has no corponym, per
+`Minimal.db` world, or a real ToastCore-derived one - things ToastCore's own core + the old `$vcs`
+used to provide implicitly for `Survive`'s world, now gone along with them. Neither appears in the
+exported tree (`#0` has no corponym, per
 moo-vcs-plan.md's invariant I3), so they only exist baked into the db file itself:
 
 - **`#0:user_connected`** — `notify()`s `#$#moodev-login-result ref: 0 ok: 1` followed by
@@ -237,12 +244,11 @@ kicks the currently-connected session whenever the **same player object** logs i
 world gets two small, additive bootstrap objects (no corponym, same as `#0` itself - never appear
 in the exported tree, only exist baked into the db file):
 
-- **A dedicated service character** (`#4` on Survive, `#127` on ToastCore) - `wizard`+`programmer`
-  flags, never used interactively, just a distinct login identity for the LSP's own connection.
-- **A dedicated listener object** (`#5` on Survive, `#127`+`1`=`#128` on ToastCore) bound to its own
-  port (`7780` for Survive, `7781` for ToastCore - see `test.ps1`'s `LspBridgeMooPort`/
-  `LspListenerObj` profile fields) via the `listen()` builtin, with its own copy of the two bootstrap
-  verbs described above:
+- **A dedicated service character** (`#4` on Survive) - `wizard`+`programmer` flags, never used
+  interactively, just a distinct login identity for the LSP's own connection.
+- **A dedicated listener object** (`#5` on Survive) bound to its own port (`7780` for Survive - see
+  `test.ps1`'s `LspBridgeMooPort`/`LspListenerObj` profile fields) via the `listen()` builtin, with
+  its own copy of the two bootstrap verbs described above:
   - **`:do_login_command`** - unconditionally `return #<service character>;` (mirrors `#0`'s own
     `return #3;` exactly, just a different target object).
   - **`:do_command`** - the identical `;;`-eval shim `#0:do_command` has, needed because this verb
@@ -275,12 +281,12 @@ one real user.
 ## Running the MOO server for local testing
 
 The `moo` binary is a Linux ELF built under WSL2 — it does not run directly from Windows.
-`C:\dev\moo-code\test.ps1` starts everything (MOO server, Sidecar, LSP server, client dev server)
-for a chosen `-Database` profile (`Survive` by default, or `ToastCore` - see "Two MOO instances"
-above) in one go; to start just the server by hand from PowerShell:
+`test.ps1` (repo root) starts everything (MOO server, Sidecar, LSP server, client dev server)
+for a chosen `-Database` profile (`Survive` by default - see "Two MOO instances" above) in one
+go; to start just the server by hand from PowerShell:
 
 ```powershell
-wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo-code/ToastStunt/run && /mnt/c/dev/moo-code/ToastStunt/build/moo survive.db survive.db.new 7777 -i /mnt/c/dev/moo-code/Survive"
+wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/moo-dev/ToastStunt/run && /mnt/c/dev/moo/moo-dev/ToastStunt/build/moo survive.db survive.db.new 7777 -i /mnt/c/dev/moo/Survive"
 ```
 
 For automated/headless testing, use `test-instance-start.ps1` / `test-instance-stop.ps1` instead
@@ -288,9 +294,10 @@ For automated/headless testing, use `test-instance-start.ps1` / `test-instance-s
 handles the `survive.test.db` copy, the isolated Sidecar content tree, and starting/stopping the
 Sidecar/LSP/Client alongside it, all in one call.
 
-The `-i` flag points FileIO at the `Survive` repo - a holdover from the retired `$vcs`'s file
-writes there; nothing on the MOO side does its own file I/O anymore (the sidecar owns all of that
-from outside via `eval()`), but `test.ps1` still passes it per-profile for consistency.
+The `-i` flag points FileIO at whichever content project's tree the profile is for (`Survive` by
+default) - a holdover from the retired `$vcs`'s file writes there; nothing on the MOO side does its
+own file I/O anymore (the sidecar owns all of that from outside via `eval()`), but `test.ps1` still
+passes it per-profile for consistency.
 
 It listens on `127.0.0.1:7777`. Connecting from localhost suppresses the MOO's own welcome banner
 (a documented HAProxy source-IP-rewrite quirk) — this is expected, not a broken connection; go
@@ -301,23 +308,25 @@ the browser client or answer any sidecar eval).
 ## Running the sidecar + client for local dev
 
 ```powershell
-cd C:\dev\moo-code\moo-dev
+cd C:\dev\moo\moo-dev
 dotnet tool restore
 dotnet watch run --project src\Sidecar\Sidecar.fsproj
 ```
 
 ```powershell
-cd C:\dev\moo-code\moo-dev\src\Client
+cd C:\dev\moo\moo-dev\src\Client
 npm install
 npm run dev
 ```
 
 Then open the client dev server URL in a browser.
 
-**This bare `dotnet watch run` defaults `Moo:TreeDir` to the real `C:\dev\moo-code\Survive` repo**
-(`Sidecar/appsettings.json`) - every save/add/delete action will commit real changes there. That's
-correct for interactively working against the real dev world (what `test.ps1` already does,
-passing `--Moo:TreeDir` itself), but wrong for automated/Playwright-driven verification - use
+**This bare `dotnet watch run` defaults `Moo:TreeDir` to `../Survive`**
+(`Sidecar/appsettings.json`) - a relative-sibling-checkout default, purely a convenience for this
+project's own layout (see "no content project lives in this repo" note at the top) - every
+save/add/delete action will commit real changes there if such a checkout exists alongside this
+one. That's correct for interactively working against a real dev world (what `test.ps1` already
+does, passing `--Moo:TreeDir` itself), but wrong for automated/Playwright-driven verification - use
 `test-instance-start.ps1` for that instead (see "Two MOO instances" above), which points the
 Sidecar at an isolated scratch tree automatically. This exact confusion (manually launching a
 "test" Sidecar without overriding `TreeDir`) previously left real, if unmerged/unpushed, commits

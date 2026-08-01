@@ -1,5 +1,5 @@
 /// Loads a `Schema.Graph` from a `Survive`-shaped export tree per
-/// `C:\dev\moo-code\moo-dev\FORMAT.md` (`corponyms.moo` + one
+/// `FORMAT.md` (repo root) (`corponyms.moo` + one
 /// `objects/<name>/object.moo` + one file per verb, parsed via
 /// `Metadata.TreeFormat`), plus `builtins.json` (a separate, static,
 /// server-version-specific capture unrelated to the tree format itself),

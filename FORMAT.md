@@ -1,6 +1,6 @@
 # MOO VCS export format — FORMAT.md
 
-Phase 0 deliverable of `C:\dev\moo-code\moo-vcs-plan.md`. This document is the gate: if you can
+Phase 0 deliverable of `moo-vcs-plan.md` (repo root). This document is the gate: if you can
 hand-write a valid export tree from this spec alone — a `corponyms.moo`, one `object.moo`, one
 verb file — with no ambiguity about sort order, flags, or filename derivation, Phase 0 is done.
 Everything downstream (exporter, importer, round-trip test) either conforms to this document or

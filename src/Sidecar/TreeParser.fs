@@ -1,5 +1,5 @@
 /// The mirror of `Exporter`'s renderers: reads a tree written per
-/// `C:\dev\moo-code\moo-dev\FORMAT.md` back into structured data for the
+/// `FORMAT.md` (repo root) back into structured data for the
 /// Phase 2 importer. Line-oriented parsing only - verb *bodies* are read as
 /// raw source lines for `set_verb_code()`, never parsed into an AST (that's
 /// `Language/Parser.fs`'s job for the LSP, a different concern).

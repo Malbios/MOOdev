@@ -1,5 +1,5 @@
 /// In-memory shape of the metadata graph `Metadata.Loader.load` builds from
-/// a `Survive`-shaped export tree per `C:\dev\moo-code\moo-dev\FORMAT.md`
+/// a `Survive`-shaped export tree per `FORMAT.md` (repo root)
 /// (`corponyms.moo` + one `objects/<name>/object.moo` + one file per verb,
 /// parsed via `Metadata.TreeFormat`) plus the captured verb source (parsed
 /// through `Language.Parser`). Previously loaded from `lookups.toml` +
