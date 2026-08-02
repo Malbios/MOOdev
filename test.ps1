@@ -65,22 +65,33 @@ $clientDir      = Join-Path $moodevRoot 'src\Client'
 
 # --- Database profiles -------------------------------------------------------
 #
-# Each profile is a full, independent MOOdy instance: its own db file (seeded
-# once from SeedFrom if missing - relative to $toaststuntRoot unless SeedFrom
-# is itself rooted, e.g. MooWorld's own seed below), its own content tree
-# (git-init'd once if missing), and its own port block so profiles can run
-# simultaneously. Add a new environment by adding a table entry here - nothing
-# else in this script is per-environment.
+# Each profile is a full, independent MOOdy instance: its own db file, its own
+# content tree (git-init'd once if missing), and its own port block so
+# profiles can run simultaneously. Add a new environment by adding a table
+# entry here - nothing else in this script is per-environment.
+#
+# A profile's db file lives in one of two places, chosen by which of these
+# two (mutually exclusive) fields it sets:
+#   - SeedFrom: a scratch copy under $mooRunDir (ToastStunt\run\), seeded once
+#     from SeedFrom if missing (relative to $toaststuntRoot unless SeedFrom is
+#     itself rooted) and never synced back to SeedFrom afterward - the live,
+#     evolving state stays local to $mooRunDir.
+#   - DbDir: the db file lives directly in DbDir, in place - that directory
+#     IS the governing copy. Clean shutdown's <db>.new promotion writes back
+#     into DbDir itself, so (for a profile whose DbDir is a git repo, e.g.
+#     MooWorld below) every session's changes land directly in that repo's
+#     working tree, ready to be committed there.
 
 $profiles = @{
     MooWorld = @{
         DbFile      = 'world.db'
         # MOO-World is its own independent repo, checked out as a sibling of
-        # this one (see MOOdy's own CLAUDE.md for the assumed layout). Its
-        # own world.db is this profile's seed - a rooted path, copied once
-        # into ToastStunt\run\world.db and never touched again from there on,
-        # same as every other profile's SeedFrom.
-        SeedFrom    = Join-Path $repoRoot '..\MOO-World\world.db'
+        # this one (see MOOdy's own CLAUDE.md for the assumed layout).
+        # world.db lives directly in MOO-World's own working tree (DbDir) -
+        # that's the governing copy; test.ps1 runs the MOO server against it
+        # in place rather than a scratch copy, so a clean shutdown's <db>.new
+        # promotion writes straight back into the MOO-World repo.
+        DbDir       = Join-Path $repoRoot '..\MOO-World'
         TreeDir     = Join-Path $repoRoot '..\MOO-World'
         MooPort     = 7777
         SidecarPort = 5000
@@ -111,7 +122,8 @@ $lspListenerObj = $dbProfile.LspListenerObj
 $dbFile   = $dbProfile.DbFile
 $seedFrom = $dbProfile.SeedFrom
 $treeDir  = $dbProfile.TreeDir
-$dbPath   = Join-Path $mooRunDir $dbFile
+$dbDir    = if ($dbProfile.ContainsKey('DbDir')) { $dbProfile.DbDir } else { $mooRunDir }
+$dbPath   = Join-Path $dbDir $dbFile
 
 function Test-PortInUse {
     param([int]$Port)
@@ -206,14 +218,18 @@ if (-not (Test-Path $mooBinary)) {
     throw "moo binary not found at $mooBinary - build it first (see M0 in toaststunt-dev-environment-plan.md)."
 }
 
-if (-not (Test-Path $mooRunDir)) {
-    New-Item -ItemType Directory -Path $mooRunDir | Out-Null
+if (-not (Test-Path $dbDir)) {
+    New-Item -ItemType Directory -Path $dbDir | Out-Null
 }
 
 if (-not (Test-Path $dbPath)) {
+    if (-not $seedFrom) {
+        # A DbDir profile's db file IS the governing copy - there's nothing
+        # to seed it from, it must already exist there.
+        throw "Db file not found at $dbPath for profile '$Database', and no SeedFrom is configured to create it."
+    }
     # SeedFrom may be a bare filename (resolved under $toaststuntRoot, e.g.
-    # Minimal.db) or already a rooted path (e.g. MooWorld's own world.db,
-    # which lives outside ToastStunt entirely) - Join-Path doesn't detect an
+    # Minimal.db) or already a rooted path - Join-Path doesn't detect an
     # already-rooted second argument on its own.
     $seedPath = if ([System.IO.Path]::IsPathRooted($seedFrom)) { $seedFrom } else { Join-Path $toaststuntRoot $seedFrom }
     if (-not (Test-Path $seedPath)) {
@@ -266,10 +282,10 @@ if (Test-PortInUse -Port $MooPort) {
     # against (see test-instance-start.ps1), which never promotes and never
     # touches these files.
     $wslTreeDir = ConvertTo-WslPath $treeDir
-    $wslMooRunDir = ConvertTo-WslPath $mooRunDir
+    $wslDbDir = ConvertTo-WslPath $dbDir
     $wslMooBinary = ConvertTo-WslPath $mooBinary
     $mooScript = @"
-wsl -d Ubuntu -- bash -c `"cd $wslMooRunDir && $wslMooBinary $dbFile $dbFile.new $MooPort -i $wslTreeDir`"
+wsl -d Ubuntu -- bash -c `"cd $wslDbDir && $wslMooBinary $dbFile $dbFile.new $MooPort -i $wslTreeDir`"
 Write-Host ''
 if ((Test-Path '$dbPath.new') -and ((Get-Item '$dbPath.new').Length -gt 0)) {
     Copy-Item '$dbPath.new' '$dbPath' -Force
@@ -278,7 +294,7 @@ if ((Test-Path '$dbPath.new') -and ((Get-Item '$dbPath.new').Length -gt 0)) {
     Write-Host 'No $dbFile.new dump found - nothing to save.' -ForegroundColor Yellow
 }
 "@
-    $tabSegments += New-TabSegment -ScriptText $mooScript -WorkingDirectory $mooRunDir -Title "MOO Server ($Database)"
+    $tabSegments += New-TabSegment -ScriptText $mooScript -WorkingDirectory $dbDir -Title "MOO Server ($Database)"
 }
 
 if (Test-PortInUse -Port $SidecarPort) {
