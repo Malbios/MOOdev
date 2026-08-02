@@ -131,8 +131,15 @@ function Invoke-NativeEval {
     # it, then a no-op ';' as the code's first statement defeats the auto-return-prepend
     # quirk for multi-statement bodies (see CLAUDE.md's "There is no real login/accounting
     # yet" -> bootstrap section for the exact same idiom, confirmed live in that context).
+    #
+    # This is a line-based telnet protocol: ANY embedded newline in $Code becomes a
+    # separate command to the server, not a continuation - so a multi-line here-string
+    # (used here purely for readability in the script source) must be flattened to one
+    # physical line before sending, or only its first line is actually evaluated and
+    # every line after it gets sent as its own unrecognized top-level command instead.
     param($Stream, [string]$Code, [int]$WaitMs = 2000)
-    Send-MooLine $Stream "; ; $Code"
+    $flatCode = ($Code -replace '\r?\n\s*', ' ').Trim()
+    Send-MooLine $Stream "; ; $flatCode"
     return Read-MooResponse -Stream $Stream -WaitMs $WaitMs
 }
 
@@ -205,11 +212,12 @@ try {
     Write-Host "Installing #0:do_command (skips if it already exists)..." -ForegroundColor Cyan
     $r = Invoke-NativeEval -Stream $stream -Code @"
 try
+  verb_info(#0, "do_command");
+  notify(player, "MOODEV_DO_COMMAND_EXISTS_SKIPPED");
+except (E_VERBNF)
   add_verb(#0, {#0, "rxd", "do_command"}, {"none", "none", "none"});
   set_verb_code(#0, "do_command", $doCommandCode);
   notify(player, "MOODEV_DO_COMMAND_ADDED");
-except (E_INVARG)
-  notify(player, "MOODEV_DO_COMMAND_EXISTS_SKIPPED");
 endtry
 "@
     if ($r -match 'MOODEV_DO_COMMAND_ADDED') { Write-Host "  added" -ForegroundColor Green }
@@ -223,11 +231,12 @@ endtry
     Write-Host "Installing #0:user_connected (skips if it already exists)..." -ForegroundColor Cyan
     $r = Invoke-NativeEval -Stream $stream -Code @"
 try
+  verb_info(#0, "user_connected");
+  notify(player, "MOODEV_USER_CONNECTED_EXISTS_SKIPPED");
+except (E_VERBNF)
   add_verb(#0, {#0, "rxd", "user_connected"}, {"none", "none", "none"});
   set_verb_code(#0, "user_connected", $userConnectedCode);
   notify(player, "MOODEV_USER_CONNECTED_ADDED");
-except (E_INVARG)
-  notify(player, "MOODEV_USER_CONNECTED_EXISTS_SKIPPED");
 endtry
 "@
     if ($r -match 'MOODEV_USER_CONNECTED_ADDED') { Write-Host "  added" -ForegroundColor Green }
@@ -244,11 +253,12 @@ endtry
     Write-Host "Installing #0:do_start_script (owned by the connecting player; skips if it already exists)..." -ForegroundColor Cyan
     $r = Invoke-NativeEval -Stream $stream -Code @"
 try
+  verb_info(#0, "do_start_script");
+  notify(player, "MOODEV_DO_START_SCRIPT_EXISTS_SKIPPED");
+except (E_VERBNF)
   add_verb(#0, {player, "rxd", "do_start_script"}, {"this", "none", "this"});
   set_verb_code(#0, "do_start_script", $doStartScriptCode);
   notify(player, "MOODEV_DO_START_SCRIPT_ADDED");
-except (E_INVARG)
-  notify(player, "MOODEV_DO_START_SCRIPT_EXISTS_SKIPPED");
 endtry
 "@
     if ($r -match 'MOODEV_DO_START_SCRIPT_ADDED') { Write-Host "  added" -ForegroundColor Green }
