@@ -29,11 +29,18 @@
   access, not just a socket. The script probes for eval support first and stops cleanly,
   without touching anything, if the probe fails.
 
-  Each of the three verbs is only ever ADDED if it doesn't already exist - never overwritten.
-  If a verb is skipped because it already exists (e.g. a real ToastCore world's own
-  user_connected, which does real MCP/confunc work), you'll need to manually merge in the
-  moodev notify() lines yourself; see the "Bootstrap verbs" section of CLAUDE.md for the
-  append recipe. This script deliberately does not attempt that merge automatically.
+  do_command and do_start_script are only ever ADDED if they don't already exist - never
+  overwritten (neither has any legitimate pre-existing content worth preserving; both are
+  purely this project's own invention, so "already exists" just means a prior bootstrap run
+  already added it). user_connected is different: a real ToastCore-derived world almost always
+  already has one doing real MCP/confunc work (confirmed live: this is the actual, common case,
+  not a hypothetical), so this verb is handled as add-if-missing / APPEND-the-moodev-hook-if-
+  missing-from-an-existing-verb / skip-if-already-hooked, using the exact splice technique
+  CLAUDE.md's "Bootstrap verbs" section documents (`newcode = {@verb_code(...), "notify(...)",
+  "notify(...)"}` - append, never overwrite) - live-verified end to end against a disposable
+  scratch instance (installed a stock-shaped user_connected, ran the append, confirmed the
+  resulting verb_code has both the original logic and the new lines, confirmed a second run
+  correctly detects the hook and skips instead of double-appending).
 
   Also creates the LSP bridge's dedicated service character + listener object (if
   -LspBridgePort is given): a plain object marked as a real player via set_player_flag()
@@ -228,23 +235,35 @@ endtry
         'notify(player, "#$#moodev-login-result ref: 0 ok: 1");',
         'notify(player, "#$#: 0");'
     )
-    Write-Host "Installing #0:user_connected (skips if it already exists)..." -ForegroundColor Cyan
+    Write-Host "Installing #0:user_connected (adds if missing; appends the moodev hook if the" -ForegroundColor Cyan
+    Write-Host "verb already exists without it - e.g. a real ToastCore world's own MCP/confunc" -ForegroundColor Cyan
+    Write-Host "logic - never overwrites; skips if the hook's already there)..." -ForegroundColor Cyan
     $r = Invoke-NativeEval -Stream $stream -Code @"
 try
-  verb_info(#0, "user_connected");
-  notify(player, "MOODEV_USER_CONNECTED_EXISTS_SKIPPED");
+  existing = verb_code(#0, "user_connected", 0, 1);
+  has_hook = 0;
+  for line in (existing)
+    if (index(line, "#$#moodev-login-result") != 0)
+      has_hook = 1;
+    endif
+  endfor
+  if (has_hook)
+    notify(player, "MOODEV_USER_CONNECTED_ALREADY_HOOKED");
+  else
+    newcode = {@existing, "notify(player, \"#$#moodev-login-result ref: 0 ok: 1\");", "notify(player, \"#$#: 0\");"};
+    set_verb_code(#0, "user_connected", newcode);
+    notify(player, "MOODEV_USER_CONNECTED_APPENDED");
+  endif
 except (E_VERBNF)
   add_verb(#0, {#0, "rxd", "user_connected"}, {"none", "none", "none"});
   set_verb_code(#0, "user_connected", $userConnectedCode);
   notify(player, "MOODEV_USER_CONNECTED_ADDED");
 endtry
 "@
-    if ($r -match 'MOODEV_USER_CONNECTED_ADDED') { Write-Host "  added" -ForegroundColor Green }
-    elseif ($r -match 'MOODEV_USER_CONNECTED_EXISTS_SKIPPED') {
-        Write-Host "  already existed, left untouched - if this is a real ToastCore verb doing" -ForegroundColor Yellow
-        Write-Host "  real work, you'll need to manually append the two moodev notify() lines" -ForegroundColor Yellow
-        Write-Host "  per CLAUDE.md's live-bootstrap recipe (append, don't overwrite)." -ForegroundColor Yellow
-    } else { Write-Host "  unexpected response:`n$r" -ForegroundColor Red }
+    if ($r -match 'MOODEV_USER_CONNECTED_ADDED') { Write-Host "  added fresh" -ForegroundColor Green }
+    elseif ($r -match 'MOODEV_USER_CONNECTED_APPENDED') { Write-Host "  existing verb kept, moodev hook appended" -ForegroundColor Green }
+    elseif ($r -match 'MOODEV_USER_CONNECTED_ALREADY_HOOKED') { Write-Host "  already had the moodev hook, left untouched" -ForegroundColor Yellow }
+    else { Write-Host "  unexpected response:`n$r" -ForegroundColor Red }
 
     $doStartScriptCode = ConvertTo-MooCodeListLiteral -Lines @(
         'callers() && raise(E_PERM);',

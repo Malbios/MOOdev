@@ -5288,20 +5288,6 @@ ws.onmessage <-
                     async {
                         let! nodes = LspClient.getObjectTreeAsync ()
                         buildTree nodes
-
-                        // Temporary diagnostic for the "tree view stays empty even
-                        // though the language server logs a real object count" report -
-                        // narrows whether the RPC returned nothing, or returned nodes
-                        // that just have no zero-Parents entry to seed `rootRefs` from.
-                        // Remove once that's root-caused for real.
-                        Browser.Dom.console.log (
-                            sprintf
-                                "[moodev-diag] getObjectTreeAsync returned %d nodes, rootRefs has %d entries: %A"
-                                nodes.Length
-                                rootRefs.Length
-                                rootRefs
-                        )
-
                         expandedRefs <- Set.empty
                         liveChildrenChecked <- Set.empty
                         liveChildrenRequested <- Set.empty
