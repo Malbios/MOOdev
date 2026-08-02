@@ -806,12 +806,28 @@ let private persistTabsKey = "moodev-open-tabs"
 /// `JS.JSON.stringify`/localStorage idiom `Settings.saveColorRules` already
 /// uses for a list-shaped value. Called wherever `openVerbTabs`/
 /// `openInspectorTabs`/`activeTab` actually change, not on a timer.
+///
+/// The preview tab (`previewTab`/`previewInspectorTab`, italicized, not yet
+/// double-click-pinned) is deliberately excluded from what gets saved - it's
+/// disposable by design (the next sidebar click/go-to-definition replaces it
+/// in place), so a reload shouldn't resurrect one the user never pinned. If
+/// it's also the active tab, `active` falls back to `GameTab` rather than
+/// persisting a reference to a tab that's no longer in the saved list.
 let private persistTabs () : unit =
+    let persistedVerbTabs = openVerbTabs |> List.filter (fun t -> Some t <> previewTab)
+    let persistedInspectorTabs = openInspectorTabs |> List.filter (fun o -> Some o <> previewInspectorTab)
+
+    let persistedActive =
+        match activeTab with
+        | VerbTab(o, v) when previewTab = Some(o, v) -> GameTab
+        | InspectorTab o when previewInspectorTab = Some o -> GameTab
+        | other -> other
+
     let payload =
         createObj
-            [ "verbTabs" ==> (openVerbTabs |> List.map (fun (o, v) -> createObj [ "obj" ==> float o; "verb" ==> v ]) |> Array.ofList)
-              "inspectorTabs" ==> (openInspectorTabs |> List.map float |> Array.ofList)
-              "active" ==> encodeActiveTab activeTab ]
+            [ "verbTabs" ==> (persistedVerbTabs |> List.map (fun (o, v) -> createObj [ "obj" ==> float o; "verb" ==> v ]) |> Array.ofList)
+              "inspectorTabs" ==> (persistedInspectorTabs |> List.map float |> Array.ofList)
+              "active" ==> encodeActiveTab persistedActive ]
 
     window.localStorage.setItem (persistTabsKey, JS.JSON.stringify payload)
 
