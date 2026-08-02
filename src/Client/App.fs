@@ -3778,7 +3778,11 @@ and private renderSearchResults (results: (string * int64 * int64 option * strin
             li.classList.add "picker-item"
             let date = System.DateTimeOffset.FromUnixTimeSeconds(whenEpochSeconds).LocalDateTime
 
-            li.textContent <- sprintf "%s  $%s / %s - %s" (date.ToString("yyyy-MM-dd HH:mm")) corponym label message
+            // A non-corified verb capture tier label is already "#objnum"
+            // (see Exporter.describePath's own comment), not a real
+            // corponym - shown as-is rather than double-sigilled "$#123".
+            let displayLabel = if corponym.StartsWith("#") then corponym else "$" + corponym
+            li.textContent <- sprintf "%s  %s / %s - %s" (date.ToString("yyyy-MM-dd HH:mm")) displayLabel label message
 
             match objRefOpt with
             | Some objRef ->
@@ -3803,7 +3807,9 @@ and private renderContentSearchResults (results: (int64 option * string * string
         for objRefOpt, corponym, label, matchingLine in results do
             let li = document.createElement ("li")
             li.classList.add "picker-item"
-            li.textContent <- sprintf "$%s / %s - %s" corponym label (matchingLine.Trim())
+            // Same anon-label handling as `renderSearchResults` above.
+            let displayLabel = if corponym.StartsWith("#") then corponym else "$" + corponym
+            li.textContent <- sprintf "%s / %s - %s" displayLabel label (matchingLine.Trim())
 
             match objRefOpt with
             | Some objRef ->

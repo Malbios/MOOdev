@@ -75,12 +75,22 @@ let private relativeFiles (dir: string) : Set<string> =
     |> Array.map (fun f -> Path.GetRelativePath(dir, f).Replace('\\', '/'))
     |> Set.ofArray
 
+/// `objects/_anon/*` (the non-corified verb capture tier) is excluded from
+/// round-trip comparison entirely - unlike everything else here, it has no
+/// portable identity across instances (keyed by objnum, not a corponym; two
+/// different servers can assign the same objnum to two unrelated objects -
+/// see the card's own accepted-resolution note). Comparing it wouldn't
+/// detect real drift, just coincidental same-numbered/unrelated content, so
+/// it's skipped rather than normalized like the four genuinely-portable
+/// patterns above.
+let private isAnonPath (relativePath: string) = relativePath.StartsWith("objects/_anon/")
+
 /// Compares two exported trees. Every mismatch found is returned (not just
 /// the first) - a missing/extra file is always a real failure, never
 /// normalized away.
 let compareTrees (treeA: string) (treeB: string) : Mismatch list =
-    let filesA = relativeFiles treeA
-    let filesB = relativeFiles treeB
+    let filesA = relativeFiles treeA |> Set.filter (isAnonPath >> not)
+    let filesB = relativeFiles treeB |> Set.filter (isAnonPath >> not)
 
     let missingMismatches =
         [ for f in Set.difference filesA filesB -> { RelativePath = f; Detail = "present in A, missing in B" }

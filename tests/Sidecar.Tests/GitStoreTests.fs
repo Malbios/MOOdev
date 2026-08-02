@@ -51,6 +51,20 @@ let ``buildCommitMessage groups by corponym, marks new items with a plus`` () =
     Assert.Equal("$room: look_self, describe; $player: +tell_lines", buildCommitMessage items)
 
 [<Fact>]
+let ``buildCommitMessage renders an anon capture tier "#objnum" label without a $ prefix`` () =
+    let items = [ { Corponym = "#123"; Name = "test_verb"; Kind = Modified } ]
+
+    Assert.Equal("#123: test_verb", buildCommitMessage items)
+
+[<Fact>]
+let ``buildCommitMessage mixes corponym and anon groups correctly`` () =
+    let items =
+        [ { Corponym = "room"; Name = "look_self"; Kind = Modified }
+          { Corponym = "#123"; Name = "test_verb"; Kind = Added } ]
+
+    Assert.Equal("$room: look_self; #123: +test_verb", buildCommitMessage items)
+
+[<Fact>]
 let ``commitChangedFiles creates the wip ref if it doesn't exist, parented on main`` () =
     let dir = newTestRepo ()
 

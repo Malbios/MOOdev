@@ -30,6 +30,11 @@ type ChangedItem = { Corponym: string; Name: string; Kind: ChangeKind }
 /// `$room: look_self, describe; $player: +tell_lines` - the main plan's own
 /// example shape. Grouped by corponym in first-occurrence order; `+` prefix
 /// for a new verb/property, `-` for a removed one, none for a changed one.
+///
+/// A non-corified verb capture tier entry's `Corponym` is already `"#" +
+/// objnum` (see `Exporter.describePath`'s own comment on this convention),
+/// not a real corponym name - rendered as-is, without the `$` prefix that
+/// would otherwise make it read as a double-sigilled `$#123`.
 let buildCommitMessage (items: ChangedItem list) : string =
     items
     |> List.groupBy (fun i -> i.Corponym)
@@ -45,7 +50,9 @@ let buildCommitMessage (items: ChangedItem list) : string =
             |> List.map (fun i -> prefix i.Kind + i.Name)
             |> String.concat ", "
 
-        sprintf "$%s: %s" corponym names)
+        let label = if corponym.StartsWith("#") then corponym else "$" + corponym
+
+        sprintf "%s: %s" label names)
     |> String.concat "; "
 
 /// `None` if `branchName` doesn't exist yet - a first-ever promotion has no

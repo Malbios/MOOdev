@@ -59,6 +59,25 @@ twice under two different names. This exception is **export/read-model only** �
 importer/promotion pipeline stays corponym-driven and does not pick `#0` up (it has its own
 separate bootstrap path, the `-e`/emergency console, documented alongside the verbs above).
 
+**Non-corified verb capture tier: `objects/_anon/<objnum>/verbs/`.** A non-corified object can
+still carry real, directly-defined verb code — a one-off override nobody bothered to name. I3
+means it never gets a stable path, but the code is still worth a best-effort safety net rather
+than silently losing it. Every valid object (found via §5's `[#1..max_object()]` enumeration
+fallback) with no corponym and at least one directly-defined verb gets a `verbs/` directory keyed
+by its **current objnum**, not a name — `objects/_anon/123/verbs/look_self.moo`, same one-file-
+per-verb layout and grammar as §4, `@verb`/`@program` headers using the raw `#123` self-reference
+(same convention `#0`'s own exception above uses). **No `object.moo` is written for an `_anon`
+entry** — properties, flags, parents, and owner are out of scope here, verb code only. `#0` itself
+is never captured into `_anon/0/`, since it's always already covered above (normally corponym'd,
+or via its own exception). Unlike everything else in this document, `_anon` entries have **no
+portable identity across instances** — objnums aren't portable (I2), so if the same objnum is
+later reused by an unrelated object, the path's history goes discontinuous. That's accepted: the
+goal was never "track this object's evolution," it was "never silently lose code nobody named."
+For the same reason, `objects/_anon/*` is excluded entirely from the round-trip fidelity gate (I7,
+§7) and has **no import/restore path** — recovering an `_anon` verb is a manual copy-paste into a
+wizard connection, the same worst-case recovery story the main plan already documents for the
+format generally.
+
 ---
 
 ## 2. `corponyms.moo` grammar

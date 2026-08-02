@@ -190,3 +190,23 @@ let ``renderBuiltinsJson matches Loader.fs's expected "functions" array shape`` 
     // not special-cased anywhere in the rendering path.
     Assert.Equal(3, notify.GetProperty("maxargs").GetInt32())
     Assert.Equal(-1, notify.GetProperty("types").EnumerateArray() |> Seq.last |> fun t -> t.GetInt32())
+
+// ---------------------------------------------------------------------------
+// describePath - the non-corified verb capture tier's "#objnum" label
+// convention (see the function's own comment for why "#" can never collide
+// with a real corponym).
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``describePath resolves a corponym'd object.moo and verb file as before`` () =
+    Assert.Equal(Some("room", "(properties)"), describePath "objects/room/object.moo")
+    Assert.Equal(Some("room", "look_self"), describePath "objects/room/verbs/look_self.moo")
+
+[<Fact>]
+let ``describePath resolves an anon verb file to a "#objnum" label`` () =
+    Assert.Equal(Some("#123", "test_verb"), describePath "objects/_anon/123/verbs/test_verb.moo")
+
+[<Fact>]
+let ``describePath returns None for paths outside objects/ entirely`` () =
+    Assert.Equal(None, describePath "corponyms.moo")
+    Assert.Equal(None, describePath "FORMAT_VERSION")
