@@ -135,3 +135,38 @@ let ``compareTrees reports zero mismatches for two trees differing only by objnu
     finally
         System.IO.Directory.Delete(dirA, true)
         System.IO.Directory.Delete(dirB, true)
+
+[<Fact>]
+let ``compareTrees ignores objects/_anon/* entirely - present on only one side is not a mismatch`` () =
+    // The non-corified verb capture tier has no portable identity across
+    // instances (objnums aren't portable - see RoundTrip.fs's own comment on
+    // isAnonPath), so it must never contribute a "present in A, missing in
+    // B" mismatch, unlike every other file kind (see the sibling test above
+    // for the same scenario with corponyms.moo, which *should* mismatch).
+    let dirA =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "moovcs-rt-a-" + System.Guid.NewGuid().ToString("N"))
+
+    let dirB =
+        System.IO.Path.Combine(System.IO.Path.GetTempPath(), "moovcs-rt-b-" + System.Guid.NewGuid().ToString("N"))
+
+    let anonVerbsDirA = System.IO.Path.Combine(dirA, "objects", "_anon", "123", "verbs")
+    System.IO.Directory.CreateDirectory(anonVerbsDirA) |> ignore
+    System.IO.Directory.CreateDirectory(dirB) |> ignore
+
+    try
+        System.IO.File.WriteAllText(System.IO.Path.Combine(dirA, "FORMAT_VERSION"), "1\n")
+        System.IO.File.WriteAllText(System.IO.Path.Combine(dirB, "FORMAT_VERSION"), "1\n")
+
+        System.IO.File.WriteAllText(
+            System.IO.Path.Combine(anonVerbsDirA, "test_verb.moo"),
+            "@verb #123:\"test_verb\" this none this rxd #3\n@program #123:test_verb\nreturn 1;\n.\n"
+        )
+        // dirB has no _anon content at all - a genuinely different instance's
+        // non-corified population, not a real drift signal.
+
+        let mismatches = compareTrees dirA dirB
+
+        Assert.Empty(mismatches)
+    finally
+        System.IO.Directory.Delete(dirA, true)
+        System.IO.Directory.Delete(dirB, true)

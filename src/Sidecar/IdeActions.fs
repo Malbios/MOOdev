@@ -91,15 +91,26 @@ let fetchVerb
 /// exported shape needs (`saveVerb` for a verb body, `addProperty` for a
 /// newly-registered property) - shared here so both stay in sync rather
 /// than duplicating the export/write/commit sequence. `None` (silently, per
-/// I3) if `objRef` isn't versioned at all; `Some errorMessage` if the MOO
-/// query or export/commit itself threw - best-effort, since a failure here
-/// shouldn't undo a change that's already live on the MOO.
+/// I3) if `objRef` isn't versioned at all and `isVerbChange` is false;
+/// `Some errorMessage` if the MOO query or export/commit itself threw -
+/// best-effort, since a failure here shouldn't undo a change that's already
+/// live on the MOO.
+///
+/// `isVerbChange` gates the non-corified verb capture tier: when `objRef`
+/// has no corponym AND this call represents a verb mutation (`saveVerb`/
+/// `deleteVerb`/`addVerb`/`setVerbInfo`/`setVerbArgs`/`renameVerb`, never a
+/// property/flag/parent/owner/name change - see the card's own
+/// verb-code-only scope), the object's directly-defined verbs still get a
+/// best-effort capture into `objects/_anon/<objnum>/`, keyed by objnum
+/// rather than a stable identity. Every other mutation on an uncorified
+/// object stays fully ungated by I3, exactly as before.
 let private exportAndCommitObject
     (config: Config)
     (session: Session)
     (objRef: int64)
     (changeName: string)
     (changeKind: GitStore.ChangeKind)
+    (isVerbChange: bool)
     (ct: CancellationToken)
     : Task<string option> =
     task {
@@ -118,7 +129,60 @@ let private exportAndCommitObject
                     Map.tryFind objRef corponymsByObjnum |> Option.map (fun name -> name, "$" + name)
 
             match versionedAs with
-            | None -> return None // uncorified - not versioned, per I3
+            | None when not isVerbChange -> return None // uncorified, non-verb change - not versioned, per I3
+            | None ->
+                // Non-corified verb capture tier: still no stable identity
+                // (no corponym, no object.moo, no import path - see the
+                // card's own accepted-resolution note), but a verb change on
+                // this object is worth a best-effort safety-net capture
+                // keyed by objnum, into a bucket separate from the
+                // corponym-keyed tree the `Some` branch below writes to.
+                let! dataOpt = Exporter.getObjectExport evalRunner objRef ct
+
+                match dataOpt with
+                | None -> return None
+                | Some data ->
+                    let selfRefText = sprintf "#%d" objRef
+                    let objDir = System.IO.Path.Combine(config.TreeDir, "objects", "_anon", string objRef)
+                    let verbsDir = System.IO.Path.Combine(objDir, "verbs")
+                    System.IO.Directory.CreateDirectory(verbsDir) |> ignore
+
+                    let verbFileNames = Exporter.assignVerbFileNames data.Verbs
+                    let currentFileNames = verbFileNames |> List.map snd |> Set.ofList
+                    let relativePaths = ResizeArray<string>()
+
+                    for verb, fileName in verbFileNames do
+                        let path = System.IO.Path.Combine(verbsDir, fileName)
+                        System.IO.File.WriteAllText(path, Exporter.renderVerbFile selfRefText verb)
+                        relativePaths.Add(System.IO.Path.Combine("objects", "_anon", string objRef, "verbs", fileName))
+
+                    // Same self-healing stale-file reconciliation the
+                    // corponym path below does.
+                    let removedPaths =
+                        System.IO.Directory.GetFiles(verbsDir)
+                        |> Array.map System.IO.Path.GetFileName
+                        |> Array.filter (fun fileName -> not (currentFileNames.Contains fileName))
+                        |> Array.map (fun fileName ->
+                            System.IO.File.Delete(System.IO.Path.Combine(verbsDir, fileName))
+                            System.IO.Path.Combine("objects", "_anon", string objRef, "verbs", fileName))
+                        |> List.ofArray
+
+                    use repo = new LibGit2Sharp.Repository(config.TreeDir)
+
+                    let message =
+                        GitStore.buildCommitMessage [ { Corponym = selfRefText; Name = changeName; Kind = changeKind } ]
+
+                    GitStore.commitChangedFiles
+                        repo
+                        config.SessionId
+                        (List.ofSeq relativePaths)
+                        removedPaths
+                        message
+                        config.GitAuthorName
+                        config.GitAuthorEmail
+                    |> ignore
+
+                    return None
             | Some(dirName, selfRefText) ->
                 let! dataOpt = Exporter.getObjectExport evalRunner objRef ct
 
@@ -228,7 +292,7 @@ let saveVerb
             // Best-effort: a failure here shouldn't undo a save that's
             // already live on the MOO - just report it to diagnostics
             // rather than claiming the save itself failed.
-            let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified ct
+            let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified true ct
 
             let diagnostics = gitError |> Option.map (fun m -> [ "(saved, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
 
@@ -268,7 +332,7 @@ let deleteVerb
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Removed ct
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Removed true ct
                     return gitError |> Option.map (fun m -> [ "(deleted, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -324,7 +388,7 @@ let addVerb
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef names GitStore.Added ct
+                    let! gitError = exportAndCommitObject config session objRef names GitStore.Added true ct
                     return gitError |> Option.map (fun m -> [ "(added, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -377,7 +441,7 @@ let setVerbInfo
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified true ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -428,7 +492,7 @@ let setVerbArgs
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified true ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -484,7 +548,7 @@ let renameVerb
         if not renameOk then
             do! sendWire webSocket (sprintf "moodev-rename-result object: #%d ok: 0" objRef) [ renameErrtext ] ct
         else
-            let! renameGitError = exportAndCommitObject config session objRef newName GitStore.Modified ct
+            let! renameGitError = exportAndCommitObject config session objRef newName GitStore.Modified true ct
             let siteFailures = ResizeArray<string>()
 
             for siteObj, siteVerb, line, col, length in sites do
@@ -518,7 +582,7 @@ let renameVerb
                         let errs = errsJson.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
 
                         if errs.IsEmpty then
-                            let! siteGitError = exportAndCommitObject config session siteObj siteVerb GitStore.Modified ct
+                            let! siteGitError = exportAndCommitObject config session siteObj siteVerb GitStore.Modified true ct
                             siteGitError |> Option.iter (fun m -> siteFailures.Add(sprintf "#%d:%s - saved, but git commit failed: %s" siteObj siteVerb m))
                         else
                             siteFailures.Add(sprintf "#%d:%s - %s" siteObj siteVerb (String.concat "; " errs))
@@ -638,7 +702,7 @@ let addProperty
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Added ct
+                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Added false ct
                     return gitError |> Option.map (fun m -> [ "(added, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -689,7 +753,7 @@ let setPropertyInfo
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -731,7 +795,7 @@ let deleteProperty
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Removed ct
+                    let! gitError = exportAndCommitObject config session objRef pname GitStore.Removed false ct
                     return gitError |> Option.map (fun m -> [ "(deleted, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -871,7 +935,7 @@ let setOwner
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef "owner" GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef "owner" GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -915,7 +979,7 @@ let setName
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef "name" GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef "name" GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -967,7 +1031,7 @@ let setFlag
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef flagName GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef flagName GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -1015,7 +1079,7 @@ let addParent
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -1056,7 +1120,7 @@ let removeParent
                 if not ok then
                     return [ errtext ]
                 else
-                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session objRef "parents" GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -1101,7 +1165,7 @@ let addChild
                     return [ errtext ]
                 else
                     let childRef = int64 (root.GetProperty("child").GetString().TrimStart('#'))
-                    let! gitError = exportAndCommitObject config session childRef "parents" GitStore.Modified ct
+                    let! gitError = exportAndCommitObject config session childRef "parents" GitStore.Modified false ct
                     return gitError |> Option.map (fun m -> [ "(changed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
             }
 
@@ -2292,10 +2356,17 @@ let searchHistory
                 match Exporter.describePath m.Path with
                 | None -> None
                 | Some(corponym, label) ->
+                    // An anon label (see `Exporter.describePath`) is already
+                    // `"#" + objnum` - parse it directly rather than a
+                    // corponym-map lookup, which would always miss (it's not
+                    // a real corponym name).
                     let objnumText =
-                        Map.tryFind corponym objnumByCorponym
-                        |> Option.map (sprintf "%d")
-                        |> Option.defaultValue ""
+                        if corponym.StartsWith("#") then
+                            corponym.TrimStart('#')
+                        else
+                            Map.tryFind corponym objnumByCorponym
+                            |> Option.map (sprintf "%d")
+                            |> Option.defaultValue ""
 
                     Some(sprintf "%s\t%d\t%s\t%s\t%s\t%s" m.Sha (m.When.ToUnixTimeSeconds()) objnumText corponym label m.Message))
 
@@ -2340,10 +2411,14 @@ let searchContent
                     match Exporter.describePath relativePath with
                     | None -> []
                     | Some(corponym, label) ->
+                        // Same anon-label parsing as `searchHistory` above.
                         let objnumText =
-                            Map.tryFind corponym objnumByCorponym
-                            |> Option.map (sprintf "%d")
-                            |> Option.defaultValue ""
+                            if corponym.StartsWith("#") then
+                                corponym.TrimStart('#')
+                            else
+                                Map.tryFind corponym objnumByCorponym
+                                |> Option.map (sprintf "%d")
+                                |> Option.defaultValue ""
 
                         System.IO.File.ReadAllLines(filePath)
                         |> Array.filter (fun line -> line.ToLowerInvariant().Contains(queryLower))

@@ -275,6 +275,59 @@ endif"""
                       Aliases = aliases }
     }
 
+/// Non-corified verb capture tier: one eval, connection-wide, walking every
+/// valid objnum via `[#1..max_object()]` (FORMAT.md §5's enumeration
+/// fallback, documented but never previously used to *keep* anything - only
+/// to filter non-corified objects out). Returns directly-defined verb data
+/// for every valid object that has no corponym (per `corponymObjnums`) and
+/// at least one directly-defined verb - `#0` is never included, since it's
+/// always handled separately (normally corponym'd, or via its own
+/// export-time exception). Most objects in this range have zero
+/// directly-defined verbs, so the response payload stays bounded by the
+/// actual anon-verb-bearing population rather than total object count - only
+/// the *scan* itself costs one `valid()`+`verbs()` check per objnum, still a
+/// single eval round-trip either way (mirrors `getBuiltinFunctions`/
+/// `getCorponyms`'s "one eval, not N" shape).
+let getAnonVerbs
+    (evalRunner: EvalRunner)
+    (corponymObjnums: Set<int64>)
+    (ct: CancellationToken)
+    : Task<(int64 * VerbExport list) list> =
+    task {
+        let corponymNumsLiteral =
+            corponymObjnums |> Set.toList |> List.map (sprintf "#%d") |> String.concat ", " |> sprintf "{%s}"
+
+        let statements =
+            $"""corponym_nums = {corponymNumsLiteral};
+anon = {{}};
+for i in [#1..max_object()]
+  if (valid(i) && !(i in corponym_nums))
+    vlist = verbs(i);
+    if (length(vlist) > 0)
+      vout = {{}};
+      for j in [1..length(vlist)]
+        vi = verb_info(i, j);
+        va = verb_args(i, j);
+        code = verb_code(i, j, 0, 1);
+        vout = {{@vout, ["names" -> vi[3], "owner" -> tostr(vi[1]), "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "code" -> code]}};
+      endfor
+      anon = {{@anon, ["objnum" -> tostr(i), "verbs" -> vout]}};
+    endif
+  endif
+endfor"""
+
+        let! json = evalRunner statements "anon" ct
+        let root = json.RootElement
+
+        return
+            root.EnumerateArray()
+            |> Seq.map (fun el ->
+                let objnum = int64 ((getString el "objnum").TrimStart('#'))
+                let verbs = el.GetProperty("verbs").EnumerateArray() |> Seq.map parseVerb |> List.ofSeq
+                objnum, verbs)
+            |> List.ofSeq
+    }
+
 /// Resolves a FORMAT.md tree-relative path to `(corponym, label)` - shared by
 /// `IdeActions.searchHistory` (labeling a pickaxe-search hit) and
 /// `Promotion.diffSummary` (labeling a production/main tree diff), so the
@@ -283,10 +336,20 @@ endif"""
 /// (which needs parsing the blob at a specific commit - not worth it for
 /// either caller). `None` for paths outside `objects/<corponym>/...`
 /// entirely (`corponyms.moo`, `FORMAT_VERSION`).
+///
+/// `objects/_anon/<objnum>/verbs/...` (the non-corified verb capture tier)
+/// resolves to `"#" + objnum` in the corponym slot rather than a real
+/// corponym name - deliberately, since MOO property names can never start
+/// with `#`, so this can never collide with a real corponym string. Every
+/// downstream consumer (`GitStore.buildCommitMessage`, the client's search
+/// result renderers) distinguishes "anon label" from "real corponym" by
+/// checking this same `#`-prefix convention, the same raw-objnum-reference
+/// shape `refText` already uses elsewhere in this file.
 let describePath (path: string) : (string * string) option =
     match path.Split('/') with
     | [| "objects"; corponym; "object.moo" |] -> Some(corponym, "(properties)")
     | [| "objects"; corponym; "verbs"; fileName |] -> Some(corponym, Path.GetFileNameWithoutExtension(fileName: string))
+    | [| "objects"; "_anon"; objnumStr; "verbs"; fileName |] -> Some("#" + objnumStr, Path.GetFileNameWithoutExtension(fileName: string))
     | _ -> None
 
 // ---------------------------------------------------------------------------
@@ -495,4 +558,26 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
 
                 for verb, fileName in verbFileNames do
                     File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
+
+        // Non-corified verb capture tier: objects with no corponym can still
+        // carry real, directly-defined verb code (a one-off override nobody
+        // bothered to name) - captured on a best-effort basis, keyed by
+        // objnum, into a bucket separate from the corponym-keyed tree above.
+        // No object.moo, no stable identity, no import/restore path - a
+        // plain safety net against silently losing code nobody named, not
+        // parity with the corponym-keyed tree (see the card's own
+        // accepted-resolution note for the reasoning).
+        let corponymObjnums = corponymsByObjnum |> Map.toList |> List.map fst |> Set.ofList
+        let! anonVerbsByObjnum = getAnonVerbs evalRunner corponymObjnums ct
+
+        for objnum, verbs in anonVerbsByObjnum do
+            let objDir = Path.Combine(outputDir, "objects", "_anon", string objnum)
+            let verbsDir = Path.Combine(objDir, "verbs")
+            Directory.CreateDirectory(verbsDir) |> ignore
+
+            let verbFileNames = assignVerbFileNames verbs
+            let selfRefText = sprintf "#%d" objnum
+
+            for verb, fileName in verbFileNames do
+                File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile selfRefText verb)
     }
