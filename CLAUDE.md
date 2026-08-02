@@ -67,6 +67,13 @@ ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
 - Still use judgment for genuinely ambiguous or destructive git actions (force-push, rewriting
   history, anything touching a shared/remote branch) - this is specifically about routine
   commits of finished local work, not a blanket override of git safety judgment.
+- **Never use `gh` or the GitHub API/web UI for anything - everything here is plain `git`**
+  (branch, commit, push, fetch, merge). If a `git push` fails, don't escalate to `gh api`/
+  `gh auth status`/fetching GitHub pages to diagnose it - stop and ask instead. Confirmed live:
+  a push kept getting rejected as non-fast-forward for reasons that were never resolved (looked
+  like remote state genuinely not matching what `fetch`/`ls-remote`/a fresh clone all agreed on),
+  and reaching for `gh` to investigate was itself the wrong move, independent of whatever the
+  actual cause was.
 
 ## Tracking this project's work
 
