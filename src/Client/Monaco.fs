@@ -183,6 +183,15 @@ type ITextModel =
 /// uses.
 type IEditorAction =
     abstract run: unit -> obj
+    /// Same as `run` but passes `args` through - Monaco's public
+    /// `IEditorAction.run(args?: unknown): Promise<void>` signature
+    /// (`editor.api.d.ts`), confirmed to accept an argument even though
+    /// every other caller in this file only ever needs the zero-arg form
+    /// (kept as its own member rather than changing `run` itself, so those
+    /// simpler call sites don't need to start passing anything). See
+    /// `registerShowHoverKeybinding`'s own comment for why this specific
+    /// action needs it.
+    abstract runWithArgs: args: obj -> obj
 
 /// The id of Monaco's built-in "Reindent Lines" action (confirmed directly
 /// in the installed package's own source,
@@ -299,8 +308,28 @@ let showHoverActionId = "editor.action.showHover"
 /// the chord Ctrl+K Ctrl+I (confirmed in
 /// `esm/vs/editor/contrib/hover/browser/hoverActions.js`), not a single
 /// combo, so Ctrl+Shift+Space was unclaimed.
+///
+/// Passes `{ focus: "noAutoFocus" }` rather than calling `run()` bare -
+/// confirmed directly in the installed package's own `hoverActions.js` that
+/// this action is genuinely "show OR focus": `run()`'s own implementation
+/// branches on `controller.isHoverVisible` and, when true, just calls
+/// `controller.focus()` on whatever's already showing rather than
+/// re-querying for the current cursor position at all. Not confirmed to be
+/// the specific cause of any one report (a separate, precisely-diagnosed bug
+/// in the reindent-vs-AST-position mismatch - see the card this shipped
+/// under - fully explains what was actually seen), but it's a real risk on
+/// its own terms: pressing this shortcut while a hover is already lingering
+/// from the mouse would silently show stale, unrelated content instead of
+/// the current position's. `HoverFocusBehavior.NoAutoFocus` (the string
+/// `"noAutoFocus"`, confirmed in the same source) is the one `focus` value
+/// whose branch always re-queries via `editor.getPosition()` regardless of
+/// `isHoverVisible`, closing that gap outright.
 let registerShowHoverKeybinding (editor: IStandaloneCodeEditor) : unit =
-    editor.addCommand (2048 ||| 1024 ||| 10, System.Action(fun () -> editor.getAction(showHoverActionId).run () |> ignore))
+    editor.addCommand (
+        2048 ||| 1024 ||| 10,
+        System.Action(fun () ->
+            editor.getAction(showHoverActionId).runWithArgs (createObj [ "focus" ==> "noAutoFocus" ]) |> ignore)
+    )
 
 /// Replaces every compile-error marker on `editor`'s current model with
 /// `lineErrors` (line number, message) - an empty list clears them. Owner
