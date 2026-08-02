@@ -765,6 +765,66 @@ let setPropertyInfo
                 ct
     }
 
+/// Strips the world-writable (`w`) permission bit from a verb or property
+/// `Handlers.findPermissionRisks` flagged (`"wizard-writable-verb"` /
+/// `"world-writable-property"`) - the one-click "Fix" action on the
+/// Permission risks panel. Unlike `setVerbInfo`/`setPropertyInfo` (which
+/// exist to let an editable UI cell resubmit any of owner/perms/names), this
+/// reads the current owner/perms/name itself via `verb_info`/`property_info`
+/// - there's nothing else for a caller to resubmit, since only the one `w`
+/// bit ever changes. `verb_info`/`set_verb_info` returning/taking
+/// `{owner, perms, names}` and `property_info`/`set_property_info`
+/// `{owner, perms}` confirmed against `ToastStunt/src/verbs.cc`'s
+/// `bf_verb_info`/`bf_set_verb_info` and `property.cc`'s `bf_prop_info`/
+/// `bf_set_prop_info`. Filters the perms string character-by-character
+/// rather than relying on any particular `strsub`/`strsub`-like builtin's
+/// exact replace-count semantics - a plain loop is unambiguous either way.
+let fixPermissionRisk
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (objRef: int64)
+    (name: string)
+    (kind: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let o = sprintf "#%d" objRef
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let nameLit = quote name
+        let stripWLoop (permsVar: string) (outVar: string) =
+            $"""{outVar} = ""; for i in [1..length({permsVar})] if ({permsVar}[i] != "w") {outVar} = {outVar} + {permsVar}[i]; endif endfor"""
+
+        let statements =
+            if kind = "wizard-writable-verb" then
+                resolveVerbIndexStatements o nameLit
+                + $""" ok = 0; errtext = ""; if (idx == 0) errtext = "verb not found"; else try vi = verb_info({o}, idx); p = vi[2]; {stripWLoop "p" "np"} set_verb_info({o}, idx, {{vi[1], np, vi[3]}}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry endif;"""
+            else
+                $"""ok = 0; errtext = ""; try pi = property_info({o}, {nameLit}); p = pi[2]; {stripWLoop "p" "np"} set_property_info({o}, {nameLit}, {{pi[1], np}}); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+        let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+        let root = json.RootElement
+        let ok = root.GetProperty("ok").GetInt32() = 1
+        let errtext = root.GetProperty("errtext").GetString()
+
+        let! diagnostics =
+            task {
+                if not ok then
+                    return [ errtext ]
+                else
+                    let isVerb = kind = "wizard-writable-verb"
+                    let! gitError = exportAndCommitObject config session objRef name GitStore.Modified isVerb ct
+                    return gitError |> Option.map (fun m -> [ "(fixed, but git commit failed: " + m + ")" ]) |> Option.defaultValue []
+            }
+
+        do!
+            sendWire
+                webSocket
+                (sprintf "moodev-permission-risk-fix-result object: #%d ok: %d" objRef (if ok then 1 else 0))
+                diagnostics
+                ct
+    }
+
 /// Removes a property entirely - `delete_property(obj, pname)`, the
 /// removal counterpart to `addProperty` above. Properties live inline in
 /// `object.moo` (not their own file the way verbs do), so re-exporting
@@ -1970,6 +2030,44 @@ endtry"""
                 (sprintf "moodev-scratchpad-result ok: %d" (if ok then 1 else 0))
                 [ (if ok then resultText else errtext) ]
                 ct
+    }
+
+/// The "Live watch dashboard" panel's one action: evaluates every watched
+/// expression in `exprs`, in order, in a single round trip - not
+/// `exprs.Length` separate `evalScratchpad`-style calls, since this fires on
+/// every auto-refresh tick. `eval()` never throws (it reports success/
+/// failure as `result[1]`, per `evalScratchpad`'s own precedent above), so a
+/// bad expression just contributes an `"ERROR: ..."` entry rather than
+/// aborting the batch - the same one-bad-expression-doesn't-sink-the-rest
+/// property a per-expression try/except would give, without needing one.
+/// `resultExpr = "results"` reports the whole MOO list of result strings
+/// back as one `generate_json()` call (`evalOnSession`'s own contract) -
+/// `sendWire` then carries it to the client as one line per expression, in
+/// the same order they were sent, for positional matching against the
+/// client's own watch-list order.
+let evalWatchBatch (session: Session) (webSocket: WebSocket) (exprs: string list) (ct: CancellationToken) : Task<unit> =
+    task {
+        if List.isEmpty exprs then
+            do! sendWire webSocket "moodev-watch-result" [] ct
+        else
+            let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+            let exprsLit = exprs |> List.map quote |> String.concat ", "
+
+            let statements =
+                $"""results = {{}};
+for e in ({{{exprsLit}}})
+  r = eval("return " + e + ";");
+  if (r[1])
+    results = {{@results, tostr(r[2])}};
+  else
+    results = {{@results, "ERROR: parse error"}};
+  endif
+endfor"""
+
+            let! json = evalOnSession session statements "results" ct
+            let resultLines = json.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+
+            do! sendWire webSocket "moodev-watch-result" resultLines ct
     }
 
 /// The inspector's sole source of structural data (owner, flags,

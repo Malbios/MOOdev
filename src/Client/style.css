@@ -35,6 +35,76 @@ html, body {
   border-color: #6cf;
 }
 
+.connection-status {
+  position: fixed;
+  top: 8px;
+  right: 44px;
+  z-index: 100;
+  padding: 0.3em 0.6em;
+  border-radius: 4px;
+  font-size: 0.85em;
+  border: 1px solid #444;
+  background: #1a1a1a;
+  color: #999;
+}
+
+.connection-status:empty {
+  display: none;
+}
+
+.connection-status.status-connected {
+  color: #6c6;
+  border-color: #2a4a2a;
+}
+
+.connection-status.status-reconnecting {
+  color: #e2a03f;
+  border-color: #4a3a1a;
+}
+
+.connection-status.status-disconnected {
+  color: #e55;
+  border-color: #4a1a1a;
+}
+
+.stale-tab-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  padding: 0.4em 0.8em;
+  /* `#settings-btn`/`.connection-status` are `position: fixed` over the
+     page's top-right corner, independent of `#layout` - without this, the
+     banner's own right-aligned dismiss button renders directly underneath
+     them (confirmed live: unclickable, the fixed settings button always
+     wins the hit test). Generous enough to clear `.connection-status`'s
+     widest realistic text ("reconnecting (attempt 99)...") plus the gear
+     button beside it. */
+  padding-right: 260px;
+  background: #4a3a1a;
+  color: #e2a03f;
+  border-bottom: 1px solid #6a5a2a;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.stale-tab-warning.hidden {
+  display: none;
+}
+
+.stale-tab-warning button {
+  background: none;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: 1.1em;
+  line-height: 1;
+}
+
+.tree-color-rule-stale {
+  color: #e2a03f;
+}
+
 #settings-overlay {
   display: none;
   position: fixed;
@@ -836,6 +906,29 @@ html, body {
 
 .inspector-link:hover {
   text-decoration: underline;
+}
+
+.picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+}
+
+.picker-fix-btn {
+  background: #2a2a2a;
+  color: #ddd;
+  border: 1px solid #444;
+  padding: 0.1em 0.6em;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 0.85em;
+  flex-shrink: 0;
+}
+
+.picker-fix-btn:disabled {
+  color: #777;
+  cursor: default;
 }
 
 .inspector-flags {
