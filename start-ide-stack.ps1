@@ -68,6 +68,16 @@
     Content tree for this MOO world (Moo:TreeDir) - where the Sidecar exports/reads/commits
     MOOcode. Must already exist.
 
+.PARAMETER MooUsername
+    Account name for the initial content-tree export's own connection (`Sidecar.exe export ...
+    --user`, see `MooEval.connect`'s own comment). Default: `wizard` - correct for a bare
+    `Minimal.db` world with no real accounting. A real, separately-accounted world (confirmed live
+    against a HellMOO-derived one) needs its actual wizard-equivalent character's name instead - a
+    bare `connect wizard` there silently never authenticates, and the export just hangs until
+    ToastStunt's own 300-second not-logged-in connection timeout kills it. Only ever a bare
+    `connect <name>`, no password - see the same comment for why that's the limit of what this
+    supports.
+
 .EXAMPLE
     # Terminal 1:
     .\start-moo-only.ps1 -DbPath C:\dev\moo\ToastCore-World\world.db -Port 7779
@@ -84,7 +94,8 @@ param(
     [Parameter(Mandatory = $true)] [int]$MooPort,
     [Parameter(Mandatory = $true)] [int]$LspBridgeMooPort,
     [Parameter(Mandatory = $true)] [int]$LspListenerObj,
-    [Parameter(Mandatory = $true)] [string]$TreeDir
+    [Parameter(Mandatory = $true)] [string]$TreeDir,
+    [string]$MooUsername = 'wizard'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -234,7 +245,7 @@ Write-Host "Exporting/refreshing content tree..."
 if (-not (Test-Path (Join-Path $TreeDir '.git'))) {
     git -C $TreeDir init --initial-branch=main -q
 }
-& $sidecarExe export $TreeDir $MooHost $MooPort
+& $sidecarExe export $TreeDir $MooHost $MooPort --user $MooUsername
 if ($LASTEXITCODE -ne 0) { throw "Export into $TreeDir failed." }
 git -C $TreeDir add -A
 if (git -C $TreeDir status --porcelain) {
