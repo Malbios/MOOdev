@@ -123,7 +123,7 @@ let private runCompareTrees (treeA: string) (treeB: string) : int =
 /// `compare-trees` were built and verified standalone first.
 let private runCheckpoint (treeDir: string) (sessionId: string) (message: string) (relativePaths: string list) : int =
     use repo = new Repository(treeDir)
-    let commit = GitStore.commitChangedFiles repo sessionId relativePaths [] message "moo-dev" "moo-dev@localhost"
+    let commit = GitStore.commitChangedFiles repo sessionId relativePaths [] message "MOOdy" "moody@localhost"
     printfn "Committed %s onto refs/moo/wip/%s" (commit.Id.Sha.Substring(0, 8)) sessionId
     0
 
@@ -133,7 +133,7 @@ let private runCheckpoint (treeDir: string) (sessionId: string) (message: string
 let private runSquashWip (treeDir: string) (sessionId: string) (message: string) : int =
     use repo = new Repository(treeDir)
 
-    match GitStore.squashWipOntoMain repo sessionId message "moo-dev" "moo-dev@localhost" with
+    match GitStore.squashWipOntoMain repo sessionId message "MOOdy" "moody@localhost" with
     | Some commit ->
         printfn "Squashed onto main as %s" (commit.Id.Sha.Substring(0, 8))
         0
@@ -288,7 +288,7 @@ let private runPromote (treeDir: string) (host: string) (port: int) (toSha: stri
 ///    before any browser connects), and `MooEval.connect` logs in as the
 ///    same `wizard` character that connection almost certainly already is
 ///    (there's no real accounting on a bare `Minimal.db` world - see
-///    moo-dev's CLAUDE.md). ToastStunt kicks a *repeated* login of the same
+///    MOOdy's CLAUDE.md). ToastStunt kicks a *repeated* login of the same
 ///    character, so connecting via `newPort` would disconnect the very
 ///    session that triggered the switch. The LSP-bridge port's listener
 ///    always logs in as its own dedicated service character regardless of
@@ -696,8 +696,8 @@ let main args =
               LspBridgePort = app.Configuration.GetValue<int>("Moo:LspBridgePort", 7780)
               TreeDir = app.Configuration.GetValue<string>("Moo:TreeDir", "../../../Survive") }
 
-        let gitAuthorName = app.Configuration.GetValue<string>("Moo:GitAuthorName", "moo-dev")
-        let gitAuthorEmail = app.Configuration.GetValue<string>("Moo:GitAuthorEmail", "moo-dev@localhost")
+        let gitAuthorName = app.Configuration.GetValue<string>("Moo:GitAuthorName", "MOOdy")
+        let gitAuthorEmail = app.Configuration.GetValue<string>("Moo:GitAuthorEmail", "moody@localhost")
         let wipRetentionDays = app.Configuration.GetValue<float>("Moo:WipRetentionDays", 14.0)
 
         // Runs once per sidecar start rather than as a persistent timer - every

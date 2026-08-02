@@ -46,7 +46,7 @@ deliberate change from the current system (see §7).
 **Exception: `#0` (System Object) always gets a directory, at `objects/0/`, when it has no
 corponym.** By construction it can't easily have one pointing at itself (corponyms are properties
 *on* `#0` pointing elsewhere), yet it's exactly where sidecar/live-IDE bootstrap verbs live
-(`#0:user_connected`, `#0:do_command` — see `moo-dev/CLAUDE.md`'s "Bootstrap verbs" section) and
+(`#0:user_connected`, `#0:do_command` — see MOOdy's `CLAUDE.md`'s "Bootstrap verbs" section) and
 needs to be visible/editable through the same tooling as everything else. `object.moo` renders
 `@object #0` (a raw objnum, per §3's own grammar) instead of `@object $name`, and its verb files
 render `@verb #0:"..." ...`/`@program #0:...` the same way — a fabricated `$0` would look like a

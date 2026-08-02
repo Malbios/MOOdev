@@ -77,7 +77,7 @@ try {
     # "eval" verb to dispatch to (ToastCore ships one; this project's
     # Minimal.db-derived worlds - both the dev world and this test instance -
     # never installed one). The `;;` this project's own `do_command`
-    # bootstrap verb recognizes (see moo-dev's CLAUDE.md) is what actually
+    # bootstrap verb recognizes (see MOOdy's CLAUDE.md) is what actually
     # reaches the real `eval()` builtin here - confirmed live: a bare
     # `;shutdown(...)` silently produces "I couldn't understand that." and
     # never sets `shutdown_triggered` at all, which is why this always

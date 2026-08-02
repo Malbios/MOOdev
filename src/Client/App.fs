@@ -34,7 +34,7 @@ let private wsUrl: string =
 let private databaseName: string =
     emitJsExpr () "import.meta.env.VITE_DATABASE_NAME"
 
-document.title <- sprintf "MOOcode Development: %s" databaseName
+document.title <- sprintf "MOOdy: %s" databaseName
 
 let private outputEl = document.getElementById ("output")
 let private inputEl = document.getElementById ("input") :?> HTMLInputElement
@@ -5734,7 +5734,7 @@ ws.onmessage <-
                 scratchpadResultEl.textContent <- (if ok then "" else "Error: ") + String.concat "\n" lines
             elif header.StartsWith("moodev-error") then
                 // Unsolicited push from `#0:handle_uncaught_error`/
-                // `handle_task_timeout` (see moo-dev/CLAUDE.md's bootstrap
+                // `handle_task_timeout` (see MOOdy's CLAUDE.md bootstrap
                 // verbs) - can arrive at any time, not just while the Errors
                 // view is open, so this always logs it; `renderErrorsList`
                 // only actually touches the DOM when that view is active.
@@ -5788,7 +5788,7 @@ ws.onmessage <-
 /// user, then sends the `"rename-verb"` Sidecar action with the server's
 /// own confirmed-site list. The client never edits anything itself here -
 /// it's purely a confirm-and-forward step; the actual rename is entirely
-/// server-side (see moo-dev's "server-orchestrated batch action" design
+/// server-side (see MOOdy's "server-orchestrated batch action" design
 /// note for why this doesn't go through Monaco's native
 /// `registerRenameProvider`/`textDocument/rename`).
 let private runRenameSymbolFlow () : unit =

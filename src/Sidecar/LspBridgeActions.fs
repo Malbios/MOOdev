@@ -6,7 +6,7 @@
 /// `Metadata.Resolver.findCallableVerb` - see that module's own doc comment
 /// for the exact ported algorithm this mirrors). Both run over the
 /// `/lsp-bridge` connection's own `Session` - always the dedicated LSP
-/// service character (see moo-dev's CLAUDE.md bootstrap docs), never a
+/// service character (see MOOdy's CLAUDE.md bootstrap docs), never a
 /// browser tab's connection.
 module Sidecar.LspBridgeActions
 

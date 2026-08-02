@@ -37,7 +37,7 @@ let private verb (names: string) (code: string list) : VerbExport =
       Iobj = "this"
       Code = code }
 
-/// A small, synthetic FORMAT.md tree - see `moo-dev/FORMAT.md` for the
+/// A small, synthetic FORMAT.md tree - see MOOdy's `FORMAT.md` for the
 /// on-disk grammar `Sidecar.Exporter`'s renderers produce. The temp
 /// directory is deliberately never deleted: a per-fact `tempDir()`
 /// `finally Directory.Delete` (as `Sidecar.Tests`/`Metadata.Tests` use)

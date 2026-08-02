@@ -1,4 +1,4 @@
-# MOOdev
+# MOOdy
 
 This is the MOO IDE: a standalone repo holding the sidecar, browser client, LSP server, DB
 parser, and `moo-eval` — the tooling that lets you develop against a MOO without needing raw
@@ -438,7 +438,7 @@ for a chosen `-Database` profile (`MooWorld` by default - see "Two MOO instances
 go; to start just the server by hand from PowerShell:
 
 ```powershell
-wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/moo-dev/ToastStunt/run && /mnt/c/dev/moo/moo-dev/ToastStunt/build/moo world.db world.db.new 7777 -i /mnt/c/dev/moo/MOO-World"
+wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/moody/ToastStunt/run && /mnt/c/dev/moo/moody/ToastStunt/build/moo world.db world.db.new 7777 -i /mnt/c/dev/moo/MOO-World"
 ```
 
 For automated/headless testing, use `test-instance-start.ps1` / `test-instance-stop.ps1` instead
@@ -460,13 +460,13 @@ the browser client or answer any sidecar eval).
 ## Running the sidecar + client for local dev
 
 ```powershell
-cd C:\dev\moo\moo-dev
+cd C:\dev\moo\moody
 dotnet tool restore
 dotnet watch run --project src\Sidecar\Sidecar.fsproj
 ```
 
 ```powershell
-cd C:\dev\moo\moo-dev\src\Client
+cd C:\dev\moo\moody\src\Client
 npm install
 npm run dev
 ```

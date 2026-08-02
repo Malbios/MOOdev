@@ -5,15 +5,15 @@
     so you can watch its output.
 
 .DESCRIPTION
-    Spans all four pieces (ToastStunt fork - a submodule of this repo, moo-dev sidecar, moo-dev
-    LSP server, moo-dev client). Run it, wait for the "ready" line, then open the printed URL
+    Spans all four pieces (ToastStunt fork - a submodule of this repo, MOOdy's sidecar, MOOdy's
+    LSP server, MOOdy's client). Run it, wait for the "ready" line, then open the printed URL
     yourself.
 
     Re-running while a previous run is still up is safe - already-listening ports
     are detected and left alone rather than double-started.
 
     Multiple named database profiles are supported (-Database), each with its own db
-    file, seed source, content tree, and port block, so more than one MOOdev instance
+    file, seed source, content tree, and port block, so more than one MOOdy instance
     can run side by side. Adding a new environment later is a new $profiles entry, not
     new script logic.
 
@@ -34,7 +34,7 @@
 
 .PARAMETER LspBridgeMooPort
     Override the profile's dedicated MOO-side LSP-service listener port (see
-    moo-dev's CLAUDE.md bootstrap docs) - what the LSP process connects to
+    MOOdy's CLAUDE.md bootstrap docs) - what the LSP process connects to
     live via the Sidecar's own `/lsp-bridge` endpoint, logging in as a
     dedicated service character rather than Wizard.
 #>
@@ -65,7 +65,7 @@ $clientDir      = Join-Path $moodevRoot 'src\Client'
 
 # --- Database profiles -------------------------------------------------------
 #
-# Each profile is a full, independent MOOdev instance: its own db file (seeded
+# Each profile is a full, independent MOOdy instance: its own db file (seeded
 # once from SeedFrom if missing - relative to $toaststuntRoot unless SeedFrom
 # is itself rooted, e.g. MooWorld's own seed below), its own content tree
 # (git-init'd once if missing), and its own port block so profiles can run
@@ -76,7 +76,7 @@ $profiles = @{
     MooWorld = @{
         DbFile      = 'world.db'
         # MOO-World is its own independent repo, checked out as a sibling of
-        # this one (see moo-dev's own CLAUDE.md for the assumed layout). Its
+        # this one (see MOOdy's own CLAUDE.md for the assumed layout). Its
         # own world.db is this profile's seed - a rooted path, copied once
         # into ToastStunt\run\world.db and never touched again from there on,
         # same as every other profile's SeedFrom.
@@ -87,7 +87,7 @@ $profiles = @{
         LspPort     = 5050
         ClientPort  = 5173
         # The world's dedicated LSP-service listener port (bound to object #5
-        # there, always logging in as the service character #4 - see moo-dev's
+        # there, always logging in as the service character #4 - see MOOdy's
         # CLAUDE.md bootstrap docs). Distinct from MooPort - a different
         # player character, so it never collides with a browser tab's own
         # Wizard connection on MooPort.
@@ -381,7 +381,7 @@ Start-Windows -Segments $tabSegments
 Wait-ForPort -Port $MooPort -Name 'MOO server'
 
 # `listen()` doesn't persist across a server restart - re-bind the world's
-# dedicated LSP-service listener (see moo-dev's CLAUDE.md bootstrap docs)
+# dedicated LSP-service listener (see MOOdy's CLAUDE.md bootstrap docs)
 # every time, not just on first launch. Wrapped in a MOO try/except: if this
 # server process was already up (left alone above) and already has it bound
 # from an earlier launch, re-binding the same object+port throws rather than
