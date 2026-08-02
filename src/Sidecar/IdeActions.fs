@@ -1316,7 +1316,7 @@ let private maxLiveRoots = 500
 /// way a live object ever joins the tree afterward is by being discovered as
 /// a child of an already-known node (`getLiveChildren`, on an expand click).
 /// A parentless live object (confirmed live: the LSP's own dedicated `#4`/
-/// `#5` bootstrap objects, see moo-dev/CLAUDE.md's "LSP service character +
+/// `#5` bootstrap objects, see MOOdy's CLAUDE.md "LSP service character +
 /// listener" section) has no such node to be discovered from - not because
 /// of anything special about its object number, but because nothing in the
 /// tree's design ever asks "what else has no parent?" after the initial

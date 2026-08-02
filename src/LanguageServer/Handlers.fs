@@ -121,7 +121,7 @@ type FindReferencesToObjectParams = { ObjRef: ObjRef }
 
 /// `moodev/reloadGraph`'s params - the path to reload `GraphStore` from,
 /// matching whatever content tree the sidecar's own `"reconfigure-target"`
-/// action just switched to (see `moo-dev`'s "Configurable MOO server
+/// action just switched to (see `MOOdy`'s "Configurable MOO server
 /// target" feature).
 type ReloadGraphParams = { SurviveRoot: string }
 

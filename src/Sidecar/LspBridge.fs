@@ -7,7 +7,7 @@
 ///
 /// This is a genuinely separate live MOO connection from any browser tab's
 /// - opened here logged in as a dedicated, non-interactive service
-/// character (moo-dev's CLAUDE.md documents the bootstrap: a world-specific
+/// character (MOOdy's CLAUDE.md documents the bootstrap: a world-specific
 /// player object plus a second `listen()` port whose `do_login_command`
 /// always returns that character, never `#3`/Wizard). Two *different*
 /// player characters can be connected simultaneously with no collision -

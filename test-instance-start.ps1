@@ -39,7 +39,7 @@
     Port for the isolated Client static preview server. Defaults to 5199.
 
 .PARAMETER LspBridgeMooPort
-    Port the world's dedicated LSP-service listener binds to (see moo-dev's CLAUDE.md bootstrap
+    Port the world's dedicated LSP-service listener binds to (see MOOdy's CLAUDE.md bootstrap
     docs) - distinct from Port, a different player character. Defaults to 7782 (test.ps1's own
     Survive profile already uses 7780).
 #>
@@ -80,7 +80,7 @@ $clientLogPath  = Join-Path $mooRunDir 'client.test.log'
 $clientPidPath  = Join-Path $mooRunDir 'client.test.pid'
 
 function ConvertTo-WslPath {
-    # 'C:\dev\moo\moo-dev\ToastStunt' -> '/mnt/c/dev/moo/moo-dev/ToastStunt'
+    # 'C:\dev\moo\moody\ToastStunt' -> '/mnt/c/dev/moo/moody/ToastStunt'
     param([string]$WindowsPath)
     $drive = $WindowsPath.Substring(0, 1).ToLower()
     $rest = $WindowsPath.Substring(2) -replace '\\', '/'
@@ -237,7 +237,7 @@ $lspProc = Start-Process $lspExe -ArgumentList $lspArgs -WindowStyle Hidden -Red
 $lspProc.Id | Out-File $lspPidPath -Force
 
 # `listen()` doesn't persist across a server restart - bind the world's
-# dedicated LSP-service listener (see moo-dev's CLAUDE.md bootstrap docs)
+# dedicated LSP-service listener (see MOOdy's CLAUDE.md bootstrap docs)
 # every time. Wrapped in a MOO try/except: harmless if somehow already bound.
 . (Join-Path $repoRoot 'moo-client.ps1')
 Send-MooCommands -Port $Port -Commands @(";;try listen(#5, $LspBridgeMooPort); except e (ANY) endtry;") -WaitMs 1000 | Out-Null
