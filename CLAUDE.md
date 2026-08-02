@@ -12,13 +12,13 @@ companion MOOcode language reference, with a section of facts verified live agai
 project's ToastStunt fork during M0.
 
 Game/world content (MOOcode verbs, a ToastCore-derived database) is not part of this repo at
-all — it lives in whatever separate content project you're editing (e.g. `Survive`, an
-independent repo with its own `ToastStunt` submodule to actually run against). This repo's
-Sidecar/LanguageServer are just pointed at that project's content tree via config
-(`Moo:TreeDir` / `Survive:Root`) when you want to develop it — see "Running the sidecar +
-client for local dev" below. Nothing here tracks or assumes a specific content project, though
-`test.ps1`'s own `Survive` profile does assume one particular sibling-checkout layout for
-convenience — see its own doc comment.
+all — it lives in whatever separate content project you're editing (e.g. `MOO-World`, an
+independent repo). This repo's Sidecar/LanguageServer are just pointed at that project's content
+tree via config (`Moo:TreeDir` / `Survive:Root` - the config *key* is still named after the
+project's original content repo, purely cosmetic, not worth renaming) when you want to develop
+it — see "Running the sidecar + client for local dev" below. Nothing here tracks or assumes a
+specific content project, though `test.ps1`'s own `MooWorld` profile does assume one particular
+sibling-checkout layout for convenience — see its own doc comment.
 
 ## Development conventions
 
@@ -58,8 +58,9 @@ ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
   the task), commit it as part of finishing the task - "should I commit" isn't a separate open
   question needing its own confirmation round-trip. Push immediately after, in the same turn -
   don't leave a commit local waiting for a separate "push this."
-- This repo submodules `ToastStunt`; a related content project (e.g. `Survive`) has its own
-  separate `ToastStunt` submodule too. If a submodule commit and a parent-repo
+- This repo submodules `ToastStunt`; a related content project may have its own separate
+  `ToastStunt` submodule too (`MOO-World`, the current one, currently doesn't - this only applies
+  if/when one is added back). If a submodule commit and a parent-repo
   submodule-pointer-bump commit both happen in the same round, push the submodule first, then
   the parent - the parent's pointer only resolves once that commit is reachable on the
   submodule's own remote.
@@ -140,13 +141,16 @@ Both `test.ps1`'s dev/play world and the automated test instance descend from
 `ToastStunt\Minimal.db` (not toastcore + `$vcs` - that baseline is retired). Neither has any
 in-MOO VCS content; the sidecar owns all of that from the outside via `eval()`.
 
-- **Dev/play world** (`test.ps1`) — `ToastStunt\run\survive.db` / `survive.db.new`, FileIO rooted
+- **Dev/play world** (`test.ps1`) — `ToastStunt\run\world.db` / `world.db.new`, FileIO rooted
   at whatever content project's `TreeDir` the launched profile points at (`test.ps1`'s own
-  `$profiles` table - the built-in `Survive` profile assumes a sibling checkout at `..\Survive`;
-  see its own doc comment if that assumption doesn't hold for your layout). Launched by `test.ps1
-  -Database Survive` (also the default with no `-Database` flag) in a visible window. On clean
+  `$profiles` table - the built-in `MooWorld` profile assumes a sibling checkout at `..\MOO-World`;
+  see its own doc comment if that assumption doesn't hold for your layout). `SeedFrom` for this
+  profile is `MOO-World\world.db` itself (a rooted path, not a bare filename resolved under
+  `ToastStunt\`) - copied once into `ToastStunt\run\world.db` on first launch, exactly like every
+  other profile's `SeedFrom`, and never touched again from there on. Launched by `test.ps1
+  -Database MooWorld` (also the default with no `-Database` flag) in a visible window. On clean
   shutdown (in-game `;;shutdown();`, or a graceful `SIGTERM`/Ctrl+C — the wrapping script runs once
-  the `wsl` command returns, however it exited), `survive.db.new` is promoted over `survive.db`, so
+  the `wsl` command returns, however it exited), `world.db.new` is promoted over `world.db`, so
   the next launch continues from where you left off. This is the only path that ever writes to a
   real content project's tree. **Note the double semicolon** - a bare `;shutdown();` silently does
   nothing on this world: a single leading `;` is ToastStunt's "eval" command alias
@@ -155,28 +159,42 @@ in-MOO VCS content; the sidecar owns all of that from the outside via `eval()`.
   `test-instance-stop.ps1`'s own fix (see its own comment). The `;;` this world's `#0:do_command`
   bootstrap verb recognizes (see "Bootstrap verbs" below) is what actually reaches `eval()` here.
 - **Automated test instance** (`test-instance-start.ps1` / `test-instance-stop.ps1`, both in this
-  repo's own root) — `survive.test.db` (a fresh copy of `survive.db` taken at start), no FileIO
-  root at all (the `-i` flag is dropped entirely here — confirmed optional at the C++ level, and
-  nothing reads it since `$vcs` is retired). These two scripts manage the **full stack** headlessly
-  (no visible window), not just the MOO process: Sidecar, LSP server, and Client too, each a single
-  directly-tracked process (no `dotnet watch run`/`npm run dev` wrapper layers, which leave
-  orphaned children behind when killed — confirmed live, this exact mistake accumulated ~25
+  repo's own root) — `survive.test.db` (a fresh copy of `Minimal.db`, unrelated to `MOO-World` -
+  the automated stack was deliberately left untouched by the `MOO-World` migration, see below), no
+  FileIO root at all (the `-i` flag is dropped entirely here — confirmed optional at the C++ level,
+  and nothing reads it since `$vcs` is retired). These two scripts manage the **full stack**
+  headlessly (no visible window), not just the MOO process: Sidecar, LSP server, and Client too,
+  each a single directly-tracked process (no `dotnet watch run`/`npm run dev` wrapper layers, which
+  leave orphaned children behind when killed — confirmed live, this exact mistake accumulated ~25
   orphaned processes across several sessions before this script tracked them). The Sidecar (which
   owns all git-based version control) is pointed at a dedicated scratch content tree,
   `TestScratchTree` (repo root) — rebuilt from scratch on every run by exporting whatever's
   actually live on *this run's* test MOO instance (`Sidecar.exe export`), never cloned from or
   pointed at any real content project. This is the fix for a real, repeated mistake: earlier
   sessions' manual Sidecar launches for Playwright-driven verification kept defaulting to
-  `Moo:TreeDir`'s real-`Survive`-sibling default (see `appsettings.json`), leaving real (if
+  `Moo:TreeDir`'s real-content-project-sibling default (see `appsettings.json`), leaving real (if
   unmerged/unpushed) commits and WIP refs in that real repo. Default ports: MOO 7778, Sidecar 5900,
   LSP 5950, Client 5199, LSP-bridge listener 7782 — all distinct from `test.ps1`'s own profile
   ports, so everything can run concurrently. Nothing from this instance is ever promoted —
   `test-instance-stop.ps1` tears down Sidecar/LSP/Client immediately, then calls the MOO's own
   `shutdown()`, no save. Intentionally left on `Minimal.db`-derived content rather than something
-  richer - automated tests want the simplest/fastest baseline, not realism.
+  richer - automated tests want the simplest/fastest baseline, not realism. **Out of scope for the
+  `MOO-World` migration** - it still uses its own `LspBridgeMooPort`/`listen(#5, ...)` two-port
+  design unchanged (see "LSP service character + listener" below for why that design is correct,
+  not a legacy leftover).
 
 Add more named `test.ps1` profiles later by extending its `$profiles` table - no other script
 logic is per-environment.
+
+**A content project's `world.db`/exported `.moo` tree needs `.gitattributes` forcing LF line
+endings, or a fresh Windows clone silently corrupts it.** Confirmed live: cloning `MOO-World`
+without this produced a `world.db` with CRLF line terminators (Windows git's default `autocrlf`
+checkout conversion), and the server refused to load it (`*** DBIO_READ_NUM: Bad number:
+"3\r"`/`*** DB_LOAD: Cannot load database!`) - these are plain-text, line-based formats the
+server's own parser reads byte-for-byte, not something git's line-ending normalization can safely
+touch. `MOO-World` now carries a `.gitattributes` forcing `*.db`/`*.moo`/`corponyms.moo`/
+`FORMAT_VERSION`/`builtins.json` to `eol=lf` - any other content project should carry the same one,
+and this is worth checking first if a freshly-cloned world refuses to boot.
 
 ## Bootstrap verbs baked into every world (`Minimal.db` *or* real ToastCore-derived)
 
@@ -184,7 +202,10 @@ Two tiny verbs must exist on `#0` for the sidecar/live IDE to work against **any
 `Minimal.db` world, or a real ToastCore-derived one - things ToastCore's own core + the old `$vcs`
 used to provide implicitly for `Survive`'s world, now gone along with them. Neither appears in the
 exported tree (`#0` has no corponym, per
-moo-vcs-plan.md's invariant I3), so they only exist baked into the db file itself:
+moo-vcs-plan.md's invariant I3), so they only exist baked into the db file itself. A third,
+optional verb (`do_start_script`, below) is worth adding at the same time even though nothing
+currently requires it, purely because it enables a much cheaper bootstrap path for *future* worlds
+once it exists.
 
 - **`#0:user_connected`** — `notify()`s `#$#moodev-login-result ref: 0 ok: 1` followed by
   `#$#: 0` on every login. Without it, nothing tells the browser client a login succeeded
@@ -219,26 +240,68 @@ moo-vcs-plan.md's invariant I3), so they only exist baked into the db file itsel
   which a bare `Minimal.db` world doesn't have. Without this verb, every sidecar eval (export,
   import, live IDE save, history, search, ...) hangs forever waiting for a response that never
   comes, rather than failing fast.
+- **`#0:do_start_script`** (optional, not required for the IDE) - a generic eval entry point real
+  ToastStunt already dispatches for free: `-c`/`--start-line` and `-f`/`--start-script` server
+  startup flags call `#0:do_start_script(code)` directly (`ToastStunt/src/server.cc`'s
+  `run_do_start_script`), with an empty MOO call stack (guard with `callers() && raise(E_PERM);` to
+  keep it from being invoked any other way). Once this verb exists on a world, *future* worlds
+  seeded from an export of that world can be bootstrapped non-interactively via `moo ... -f
+  bootstrap.moo` instead of a manual `-e` session - see `MOO-World`'s own bootstrap commit, which
+  added this specifically so `MOO-World-stable`'s own bootstrap (below) could reuse it. Body:
+  ```
+  callers() && raise(E_PERM);
+  return eval(@args);
+  ```
 
-Both verbs require `#0.wizard = 1` **and** `#0.programmer = 1` (two independent flags - `eval()`
-itself checks `is_programmer()`, not `is_wizard()`) - not because the *connecting player* needs
-those flags, but because **a verb runs with its owner's permissions by default**, and both verbs are
-owned by `#0` itself. On a bare `Minimal.db` world with no connectable programmer account yet, these
-flags must be set via the server's `-e`/`--emergency` console, since there's no other bootstrapping
-path before the verbs exist.
+Both `do_command` and `user_connected` require `#0.wizard = 1` **and** `#0.programmer = 1` (two
+independent flags - `eval()` itself checks `is_programmer()`, not `is_wizard()`) - not because the
+*connecting player* needs those flags, but because **a verb runs with its owner's permissions by
+default**, and both verbs are owned by `#0` itself.
 
-On a real ToastCore-derived world, there's already a live-connectable `wizard` player, so this can
-be bootstrapped over a normal connection instead - but with one live-confirmed gotcha: **fix `#0`'s
-own flags *before* `#0:do_command` exists, and do the fixing via ToastCore's native single-`;` eval,
-not `;;`.** Once `do_command` exists, the server tries it first for every command line, including
-`;;`-prefixed ones (confirmed in `tasks.cc`) - so if `#0` isn't yet wizard+programmer,
-`do_command`'s own `eval()` call inside itself throws `E_PERM` for literally every subsequent command,
-including the one meant to fix `#0`'s flags. The native single-`;` command (real ToastCore's own
-`#58:eval_cmd_string`, or the server's built-in recognition) doesn't go through the `eval()` builtin
-at all, so it isn't gated the same way - use `; ; #0.wizard = 1; #0.programmer = 1;` (leading `;` for
-the command, a no-op `;` as the code's first statement to defeat ToastCore's auto-`return`-prepend
-quirk for multi-statement bodies - same double-semicolon idiom `Sidecar.MooEval`'s own doc comment
-describes, just via the native path instead of `do_command`) to break the chicken-and-egg lock.
+On a bare `Minimal.db` world, `-e`/`--emergency` really is required for this *first* bootstrap -
+confirmed live, and the reason is narrower than "no connectable account exists yet": `#3` (Wizard)
+is already both connectable (`do_login_command` returns it unconditionally, even for a truly blank
+first line - see "There is no real login/accounting yet" below) *and* already `wizard`+`programmer`
+by `Minimal.db`'s own default. The actual blocker is that **no eval mechanism exists at all yet** -
+`.program`/`.pr*ogram` is a genuinely native server command (`tasks.cc`'s `ICMD_PROGRAM`, confirmed
+against source - it needs no verb), but it can only *reprogram* a verb that's already been
+`add_verb()`'d; creating one from nothing needs `add_verb()` itself, a function call, which needs
+some eval path to invoke - and none exists before `do_command` does. `-e`'s own console (`server.cc`
+`emergency_mode()`) sidesteps this entirely: it's a real, independent MOO-code evaluator built into
+the C++ core, using the exact same `;EXPR`/`;;CODE` syntax `Sidecar.MooEval`'s own `;;`-prefix
+convention mirrors (short form evaluates one line; typing `;;` alone opens multi-line input, ended
+by a lone `.`). Live-verified recipe for a fresh `Minimal.db`-derived world (one combined `;;`
+block, since each separate `-e` console line runs as its own independent program with no shared
+variables across lines):
+```
+;;
+#0.wizard = 1;
+#0.programmer = 1;
+add_verb(#0, {#0, "rxd", "do_command"}, {"none", "none", "none"});
+set_verb_code(#0, "do_command", {"if (length(argstr) >= 2 && argstr[1..2] == \";;\")", "  result = eval(argstr[3..$]);", "  if (!result[1])", "    notify(player, \"EVAL ERROR: \" + toliteral(result[2]));", "  endif", "  return 1;", "endif", "return 0;"});
+add_verb(#0, {#0, "rxd", "user_connected"}, {"none", "none", "none"});
+set_verb_code(#0, "user_connected", {"notify(player, \"#$#moodev-login-result ref: 0 ok: 1\");", "notify(player, \"#$#: 0\");"});
+add_verb(#0, {#3, "rxd", "do_start_script"}, {"this", "none", "this"});
+set_verb_code(#0, "do_start_script", {"callers() && raise(E_PERM);", "return eval(@args);"});
+.
+continue
+```
+(`continue` exits emergency mode and lets the server proceed to normal operation, still against
+the same db - no restart needed.)
+
+On a real ToastCore-derived world, there's already a live-connectable `wizard` player *and* a real
+eval path (`#58:eval_cmd_string`), so this can be bootstrapped over a normal connection instead -
+but with one live-confirmed gotcha: **fix `#0`'s own flags *before* `#0:do_command` exists, and do
+the fixing via ToastCore's native single-`;` eval, not `;;`.** Once `do_command` exists, the server
+tries it first for every command line, including `;;`-prefixed ones (confirmed in `tasks.cc`) - so
+if `#0` isn't yet wizard+programmer, `do_command`'s own `eval()` call inside itself throws `E_PERM`
+for literally every subsequent command, including the one meant to fix `#0`'s flags. The native
+single-`;` command (real ToastCore's own `#58:eval_cmd_string`, or the server's built-in
+recognition) doesn't go through the `eval()` builtin at all, so it isn't gated the same way - use
+`; ; #0.wizard = 1; #0.programmer = 1;` (leading `;` for the command, a no-op `;` as the code's
+first statement to defeat ToastCore's auto-`return`-prepend quirk for multi-statement bodies - same
+double-semicolon idiom `Sidecar.MooEval`'s own doc comment describes, just via the native path
+instead of `do_command`) to break the chicken-and-egg lock.
 
 `executables/vcs-commit.sh` (the old `$vcs`-era shell-out script) no longer runs at all - retired
 along with `$vcs` itself.
@@ -303,11 +366,11 @@ kicks the currently-connected session whenever the **same player object** logs i
 world gets two small, additive bootstrap objects (no corponym, same as `#0` itself - never appear
 in the exported tree, only exist baked into the db file):
 
-- **A dedicated service character** (`#4` on Survive) - `wizard`+`programmer` flags, never used
+- **A dedicated service character** (`#4` on `MOO-World`) - `wizard`+`programmer` flags, never used
   interactively, just a distinct login identity for the LSP's own connection.
-- **A dedicated listener object** (`#5` on Survive) bound to its own port (`7780` for Survive - see
-  `test.ps1`'s `LspBridgeMooPort`/`LspListenerObj` profile fields) via the `listen()` builtin, with
-  its own copy of the two bootstrap verbs described above:
+- **A dedicated listener object** (`#5` on `MOO-World`) bound to its own port (`7780` for
+  `MOO-World` - see `test.ps1`'s `LspBridgeMooPort`/`LspListenerObj` profile fields) via the
+  `listen()` builtin, with its own copy of the two bootstrap verbs described above:
   - **`:do_login_command`** - unconditionally `return #<service character>;` (mirrors `#0`'s own
     `return #3;` exactly, just a different target object).
   - **`:do_command`** - the identical `;;`-eval shim `#0:do_command` has, needed because this verb
@@ -315,6 +378,27 @@ in the exported tree, only exist baked into the db file):
     confirmed live: without this, `Sidecar.MooEval`'s `;;`-eval protocol never fires for a
     connection through this listener at all, since there's no `<listener>:do_command` to catch it
     (the server's own "I couldn't understand that." fallback swallows everything silently instead).
+
+`#0:do_login_command` itself stays completely stock (`return #3;`, untouched) - the LSP's identity
+comes entirely from *which port* it connects to, never from anything it types.
+
+**This two-object/two-port design is not legacy complexity waiting to be simplified - it was tried
+and live-disproven.** A same-port design (LSP sends a distinct `connect <sentinel-word>` line over
+the *same* port a browser tab uses, with `#0:do_login_command` pattern-matching that word) looks
+appealing - one fewer object, no second `listen()` to rebind - and was actually implemented and
+bootstrapped once, before being reverted. It fails because of how ToastStunt dispatches
+`do_login_command` for a brand-new connection: **the very first dispatch carries an empty `args`
+list, before any input the client sends can be read** - confirmed live by instrumenting
+`do_login_command` to record its own `args` into a property and connecting with *zero bytes sent*:
+the connection still completed a full login. Since the stock verb returns `#3` unconditionally
+regardless of `args`, that first blank dispatch logs the connection in immediately; a same-port
+sentinel line sent right after `ConnectAsync` arrives too late, after login has already completed,
+and is processed as an ordinary (unrecognized) command from `#3` instead. There is no way to tell
+"the automatic pre-input blank dispatch" apart from "the user genuinely sent a blank line" from
+inside `do_login_command` alone, so a shared port fundamentally cannot route by login text - only
+the port itself (via a listener object with its own fixed-identity `do_login_command`) can
+disambiguate reliably, which is exactly what this design already does. Don't re-attempt the
+same-port version without solving that dispatch-ordering problem first.
 
 `listen()` doesn't persist across a server restart, unlike the bootstrap verbs/objects themselves
 (those live in the db) - `test.ps1` re-binds it every launch, right after the MOO server itself
@@ -337,15 +421,24 @@ no password check, no way to create a second player. Deliberately left this way 
 developer tool) rather than building real accounting - revisit if/when this world needs more than
 one real user.
 
+**A brand-new connection completes this login before it ever sends anything, not just when it
+types something trivial.** Confirmed live: `do_login_task` (`tasks.cc`) dispatches
+`do_login_command` with an empty `args` list as the very first tick after a connection is accepted,
+before the client's own first line is read; since the stock verb returns `#3` unconditionally for
+*any* `args` including empty, that first blank dispatch alone finishes the login. This is the root
+cause behind the reverted same-port LSP design above, not just a curiosity - anything relying on
+"the first thing this connection sends" to decide identity will observe an already-logged-in
+connection instead.
+
 ## Running the MOO server for local testing
 
 The `moo` binary is a Linux ELF built under WSL2 — it does not run directly from Windows.
 `test.ps1` (repo root) starts everything (MOO server, Sidecar, LSP server, client dev server)
-for a chosen `-Database` profile (`Survive` by default - see "Two MOO instances" above) in one
+for a chosen `-Database` profile (`MooWorld` by default - see "Two MOO instances" above) in one
 go; to start just the server by hand from PowerShell:
 
 ```powershell
-wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/moo-dev/ToastStunt/run && /mnt/c/dev/moo/moo-dev/ToastStunt/build/moo survive.db survive.db.new 7777 -i /mnt/c/dev/moo/Survive"
+wsl -d Ubuntu -- bash -c "cd /mnt/c/dev/moo/moo-dev/ToastStunt/run && /mnt/c/dev/moo/moo-dev/ToastStunt/build/moo world.db world.db.new 7777 -i /mnt/c/dev/moo/MOO-World"
 ```
 
 For automated/headless testing, use `test-instance-start.ps1` / `test-instance-stop.ps1` instead
@@ -353,7 +446,7 @@ For automated/headless testing, use `test-instance-start.ps1` / `test-instance-s
 handles the `survive.test.db` copy, the isolated Sidecar content tree, and starting/stopping the
 Sidecar/LSP/Client alongside it, all in one call.
 
-The `-i` flag points FileIO at whichever content project's tree the profile is for (`Survive` by
+The `-i` flag points FileIO at whichever content project's tree the profile is for (`MOO-World` by
 default) - a holdover from the retired `$vcs`'s file writes there; nothing on the MOO side does its
 own file I/O anymore (the sidecar owns all of that from outside via `eval()`), but `test.ps1` still
 passes it per-profile for consistency.
@@ -380,7 +473,7 @@ npm run dev
 
 Then open the client dev server URL in a browser.
 
-**This bare `dotnet watch run` defaults `Moo:TreeDir` to `../Survive`**
+**This bare `dotnet watch run` defaults `Moo:TreeDir` to `../MOO-World`**
 (`Sidecar/appsettings.json`) - a relative-sibling-checkout default, purely a convenience for this
 project's own layout (see "no content project lives in this repo" note at the top) - every
 save/add/delete action will commit real changes there if such a checkout exists alongside this
