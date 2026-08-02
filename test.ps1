@@ -18,7 +18,7 @@
     new script logic.
 
 .PARAMETER Database
-    Which named profile to launch (see $profiles below). Default: Survive.
+    Which named profile to launch (see $profiles below). Default: MooWorld.
 
 .PARAMETER MooPort
     Override the profile's MOO server port. Must match Sidecar's Moo:Port config.
@@ -40,7 +40,7 @@
 #>
 
 param(
-    [string]$Database = 'Survive',
+    [string]$Database = 'MooWorld',
     [int]$MooPort = 0,
     [int]$SidecarPort = 0,
     [int]$LspPort = 0,
@@ -66,18 +66,22 @@ $clientDir      = Join-Path $moodevRoot 'src\Client'
 # --- Database profiles -------------------------------------------------------
 #
 # Each profile is a full, independent MOOdev instance: its own db file (seeded
-# once from $repoRoot\ToastStunt\<SeedFrom> if missing), its own content tree
+# once from SeedFrom if missing - relative to $toaststuntRoot unless SeedFrom
+# is itself rooted, e.g. MooWorld's own seed below), its own content tree
 # (git-init'd once if missing), and its own port block so profiles can run
 # simultaneously. Add a new environment by adding a table entry here - nothing
 # else in this script is per-environment.
 
 $profiles = @{
-    Survive = @{
-        DbFile      = 'survive.db'
-        SeedFrom    = 'Minimal.db'
-        # Survive is its own independent repo, checked out as a sibling of
-        # this one (see moo-dev's own CLAUDE.md for the assumed layout).
-        TreeDir     = Join-Path $repoRoot '..\Survive'
+    MooWorld = @{
+        DbFile      = 'world.db'
+        # MOO-World is its own independent repo, checked out as a sibling of
+        # this one (see moo-dev's own CLAUDE.md for the assumed layout). Its
+        # own world.db is this profile's seed - a rooted path, copied once
+        # into ToastStunt\run\world.db and never touched again from there on,
+        # same as every other profile's SeedFrom.
+        SeedFrom    = Join-Path $repoRoot '..\MOO-World\world.db'
+        TreeDir     = Join-Path $repoRoot '..\MOO-World'
         MooPort     = 7777
         SidecarPort = 5000
         LspPort     = 5050
@@ -207,7 +211,11 @@ if (-not (Test-Path $mooRunDir)) {
 }
 
 if (-not (Test-Path $dbPath)) {
-    $seedPath = Join-Path $toaststuntRoot $seedFrom
+    # SeedFrom may be a bare filename (resolved under $toaststuntRoot, e.g.
+    # Minimal.db) or already a rooted path (e.g. MooWorld's own world.db,
+    # which lives outside ToastStunt entirely) - Join-Path doesn't detect an
+    # already-rooted second argument on its own.
+    $seedPath = if ([System.IO.Path]::IsPathRooted($seedFrom)) { $seedFrom } else { Join-Path $toaststuntRoot $seedFrom }
     if (-not (Test-Path $seedPath)) {
         throw "Seed db not found at $seedPath for profile '$Database'."
     }
