@@ -2528,6 +2528,15 @@ and private mkEditableCell (labelText: string) (widget: HTMLElement) (onConfirm:
             editBtn.setAttribute ("style", "display:none")
             editGroup.setAttribute ("style", "")
 
+            // `widget` varies by call site (a plain text input, a
+            // quick-fill owner group, a perms popover, an arg-spec
+            // select, ...) - a generic query for whichever focusable
+            // control it actually contains, rather than every call site
+            // having to pass its own input element through separately.
+            match editGroup.querySelector ("input, select") with
+            | null -> ()
+            | el -> (el :?> HTMLElement).focus ()
+
     let confirmBtn = document.createElement ("button")
     confirmBtn.classList.add "inspector-add-property-btn"
     confirmBtn.textContent <- "✓"
@@ -2914,7 +2923,11 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 sendAction [ "action" ==> "rename-object"; "obj" ==> int objRef; "name" ==> newName ]
 
     renameGroup.appendChild renameConfirmBtn |> ignore
-    renameBtn.onclick <- fun _ -> renameGroup.setAttribute ("style", "")
+
+    renameBtn.onclick <-
+        fun _ ->
+            renameGroup.setAttribute ("style", "")
+            renameInput.focus ()
 
     header.appendChild renameBtn |> ignore
     header.appendChild renameGroup |> ignore
@@ -3092,6 +3105,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 link.setAttribute ("style", "display:none")
                 editBtn.setAttribute ("style", "display:none")
                 editGroup.setAttribute ("style", "")
+                ownerEditInput.focus ()
 
         ownerRow.appendChild editBtn |> ignore
         ownerRow.appendChild editGroup |> ignore
