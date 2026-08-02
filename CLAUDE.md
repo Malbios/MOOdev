@@ -80,6 +80,29 @@ Testing**, never straight to **Done** - the user reviews finished work manually 
 Done themselves. Any feature idea proposed during brainstorming that doesn't end up on the board
 by the next check-in is implicitly rejected - don't resurface it later.
 
+**A card is two lines, not one - move both.** Each entry is `- [ ] [[Card Name]]` followed by an
+indented `\t#Tag1 #Tag2` continuation line directly beneath it (see the tag vocabulary in
+`.obsidian/plugins/obsidian-kanban/data.json`'s `tag-colors`, in the same vault). When relocating a
+card between lanes, cut/paste the checkbox line *and* its tag line as one unit - editing just the
+checkbox line and leaving the tag line behind (or dropping it) silently strips the card's
+classification. This exact bug hit every card moved to Ready for Testing before 2026-08-02 (all 18
+lost their tags); re-verify the tag line landed with the card after every move.
+
+**Tags split into two axes, colored differently in `.obsidian/plugins/obsidian-kanban/data.json`'s
+`tag-colors`** (same vault) - *categories* (subject/domain: UI/UX, VCS, Server, Security,
+Documentation, Diagnostics, Navigation, Editor, Object-Model, Language) versus *types* (nature of
+the work: Bugfix, Complex, Acceleration, Research, Safety). As of 2026-08-02:
+- Every category tag shares one identical entry - `color: rgba(0, 0, 0, 1)` (black text),
+  `backgroundColor: rgba(123, 164, 226, 1)` (the user's chosen blue, tuned from an earlier
+  lighter shade of the same idea). **If a session introduces a new category tag, add it to
+  `tag-colors` with this exact same pair of values - don't invent a new color for it.**
+- Each type tag gets its own distinct dark `backgroundColor` with light-gray `color: rgba(225,
+  225, 225, 1)` text - currently Bugfix red, Complex amber, Acceleration purple, Research indigo,
+  Safety green. **If a session identifies a need for a new type tag, don't just pick a color for
+  it - stop and ask the user**, since the dark-color assignment is a deliberate, small,
+  memorable palette (not a formula like the category one) and picking a new one is a judgment
+  call for the user, not the session.
+
 ## External references
 
 - **[SindomeCorp/moo-for-llms](https://github.com/SindomeCorp/moo-for-llms)** — a public,
