@@ -23,7 +23,7 @@ let private lspWsUrl: string = emitJsExpr () "import.meta.env.VITE_LSP_WS_URL"
 
 let private ws = WebSocket.Create(lspWsUrl)
 let mutable private nextId = 1
-let private pending = Dictionary<int, obj -> unit>()
+let private pending = Dictionary<int, (obj -> unit) * (exn -> unit)>()
 let mutable private isReady = false
 let private readyWaiters = ResizeArray<unit -> unit>()
 
@@ -40,10 +40,10 @@ let private waitForReady () : Async<unit> =
 /// Everything else goes through `requestAsync`, which waits for
 /// `isReady`.
 let private rawRequestAsync (methodName: string) (parameters: obj) : Async<obj> =
-    Async.FromContinuations(fun (resolve, _, _) ->
+    Async.FromContinuations(fun (resolve, reject, _) ->
         let id = nextId
         nextId <- nextId + 1
-        pending.[id] <- resolve
+        pending.[id] <- (resolve, reject)
 
         send (
             createObj
@@ -88,9 +88,23 @@ ws.onmessage <-
         let id: obj = msg?id
 
         if not (isNullOrUndefined id) && pending.ContainsKey(unbox id) then
-            let resolve = pending.[unbox id]
+            let resolve, reject = pending.[unbox id]
             pending.Remove(unbox id) |> ignore
-            resolve msg?result
+            let error: obj = msg?error
+
+            if isNullOrUndefined error then
+                resolve msg?result
+            else
+                // Previously ignored entirely (only `resolve` was ever wired up,
+                // so an error response silently resolved with `undefined` as if
+                // it had succeeded) - confirmed live as the root cause of a
+                // switch-target failure looking like a no-op success: the graph
+                // reload threw server-side (a dangling parent reference), but
+                // the client sailed on to `window.location.reload()` as if it
+                // had worked, leaving the stale pre-switch graph in place with
+                // no visible error anywhere.
+                let message: string = error?message |> Option.ofObj |> Option.defaultValue "LSP request failed"
+                reject (exn message)
 
 /// `moodev-verb://<objRef>/<verbName>` - mirrors `Handlers.moodevVerbUri` on
 /// the server exactly (the browser never has a real filesystem path; object

@@ -18,6 +18,9 @@ let mutable private current: Metadata.Schema.Graph =
 
 let init (surviveRoot: string) : unit = current <- Metadata.Loader.load surviveRoot
 
-let reload (surviveRoot: string) : unit = current <- Metadata.Loader.load surviveRoot
+let reload (surviveRoot: string) : unit =
+    printfn "Reloading metadata graph from %s..." surviveRoot
+    current <- Metadata.Loader.load surviveRoot
+    printfn "Loaded %d objects." current.Objects.Count
 
 let get () : Metadata.Schema.Graph = current

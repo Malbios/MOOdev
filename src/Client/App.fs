@@ -5061,8 +5061,18 @@ settingMooSwitchBtn.onclick <-
 
             if ok then
                 settingMooSwitchStatusEl.textContent <- "Reloading language server graph..."
-                do! LspClient.reloadGraphAsync treeDir
-                window.location.reload ()
+
+                try
+                    do! LspClient.reloadGraphAsync treeDir
+                    window.location.reload ()
+                with ex ->
+                    // The sidecar's own export/commit (above) already succeeded and
+                    // currentTarget already switched at this point - only the language
+                    // server's static graph failed to follow. Left un-reloaded (no
+                    // page refresh) rather than reloading into a half-switched state
+                    // with a stale graph and no visible explanation, which is exactly
+                    // what silently swallowing this error used to produce.
+                    settingMooSwitchStatusEl.textContent <- sprintf "Switched, but graph reload failed: %s" ex.Message
             else
                 settingMooSwitchStatusEl.textContent <- sprintf "Failed: %s" message
         }
