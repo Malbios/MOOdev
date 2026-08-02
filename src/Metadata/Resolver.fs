@@ -62,8 +62,10 @@ let private isExecutable (meta: VerbMeta) : bool = meta.Perms.Contains 'x'
 /// Scans one object's own verbs, in declared order, for the first
 /// executable verb whose name list matches - `find_verbdef_by_name`
 /// (`db_verbs.cc:227-238`), which stops at the first hit rather than
-/// collecting every match.
-let private findOwnVerb (graph: Graph) (obj: ObjRef) (verbName: string) : VerbNode option =
+/// collecting every match. Not `private` - `Handlers.findGotchas`'s
+/// diamond-verb-ambiguity check also needs "does this specific object, not
+/// its ancestors, define this verb name" per immediate parent.
+let findOwnVerb (graph: Graph) (obj: ObjRef) (verbName: string) : VerbNode option =
     graph.Objects
     |> Map.tryFind obj
     |> Option.bind (fun node ->

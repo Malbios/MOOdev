@@ -1297,13 +1297,16 @@ let private hoverForResolvedVerbLive (verbName: string) (result: SidecarBridge.V
     (baseText :: extraSections) |> String.concat "\n\n" |> mkHover
 
 /// One of the catalogued "MOOcode gotchas" (the project plan's own
-/// MOOcode gotchas section, plus the call-site arg-spec mismatch check
-/// added later) `findGotchas` checks for, exhaustively across every parsed
-/// verb in the graph. `Kind` is a plain string tag rather than a DU -
-/// simpler to send over the wire, matching `Dobj`/`Prep`/`Iobj`'s own
-/// plain-string convention on `DeadVerbEntry` above - one of
-/// `"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"` /
-/// `"arg-shape-mismatch"`.
+/// MOOcode gotchas section, plus the call-site arg-spec mismatch check and
+/// the inheritance/override checks added later) `findGotchas` checks for,
+/// exhaustively across every parsed verb in the graph. `Kind` is a plain
+/// string tag rather than a DU - simpler to send over the wire, matching
+/// `Dobj`/`Prep`/`Iobj`'s own plain-string convention on `DeadVerbEntry`
+/// above - one of `"missing-x-bit"` / `"unbounded-loop"` / `"zero-index"` /
+/// `"arg-shape-mismatch"` / `"inheritance-cycle"` / `"diamond-verb-ambiguity"`
+/// / `"verb-argspec-mismatch"` / `"verb-return-mismatch"`.
+/// `VerbName` is `""` for `"inheritance-cycle"` - that check is object-level,
+/// not verb-level, the only `Kind` for which this is true.
 type GotchaEntry = { ObjRef: ObjRef; VerbName: string; Kind: string }
 
 /// True if `target` is `start` itself or reachable by walking `start`'s
@@ -1357,6 +1360,108 @@ let private scatterArityAllows (calleeParams: InferredParam list) (argCount: int
     let hasRest = calleeParams |> List.exists (function RestParam _ -> true | _ -> false)
 
     argCount >= reqCount && (hasRest || argCount <= reqCount + optCount)
+
+/// Every object that is a member of a cycle in the parent-inheritance graph
+/// (reachable from itself by repeatedly following `Parents`) - feeds
+/// `findGotchas`'s `"inheritance-cycle"` check. A well-formed tree/DAG has
+/// none; `findCallableVerb`'s own ancestor walk already guards against one
+/// with a `visited` set (per its doc comment) rather than assuming it can't
+/// happen, so this makes the same latent hazard visible instead of merely
+/// surviving it silently. Each object is fully explored at most once
+/// (`fullyExplored`) - a cycle, if any exists reachable from that object, is
+/// necessarily found during that one exploration (the DFS follows every
+/// parent edge from every object it visits), so memoizing across different
+/// starting points in the outer loop below is sound, not just an
+/// optimization.
+let private findInheritanceCycleMembers (graph: Graph) : ObjRef Set =
+    let members = System.Collections.Generic.HashSet<ObjRef>()
+    let fullyExplored = System.Collections.Generic.HashSet<ObjRef>()
+
+    let rec walk (onStack: ObjRef list) (current: ObjRef) =
+        if List.contains current onStack then
+            current :: (onStack |> List.takeWhile (fun o -> o <> current)) |> List.iter (members.Add >> ignore)
+        elif fullyExplored.Add current then
+            match Map.tryFind current graph.Objects with
+            | Some node -> node.Parents |> List.iter (walk (current :: onStack))
+            | None -> ()
+
+    for num in graph.Objects |> Map.toSeq |> Seq.map fst do
+        walk [] num
+
+    Set.ofSeq members
+
+/// For every object with 2+ distinct immediate parents, every verb name for
+/// which 2+ of those parents each *own-define* (not merely inherit) a
+/// callable definition - feeds `findGotchas`'s `"diamond-verb-ambiguity"`
+/// check. Doesn't claim MOO's own dispatch is actually ambiguous (
+/// `Metadata.Resolver.findCallableVerb` is a deterministic leftmost-first
+/// walk, verified against `db_find_callable_verb` - see that function's own
+/// doc comment) - flags that which definition wins depends on parent list
+/// *order*, a human-readability/maintenance hazard even though the server
+/// itself never has to guess.
+let private findDiamondVerbAmbiguities (graph: Graph) : GotchaEntry seq =
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        let parents = o.Parents |> List.distinct
+
+        if List.length parents < 2 then
+            Seq.empty
+        else
+            let candidateNames =
+                parents
+                |> List.collect (fun p ->
+                    Map.tryFind p graph.Objects
+                    |> Option.map (fun n -> n.Verbs |> List.choose (fun v -> match v.Meta.Names with primary :: _ -> Some primary | [] -> None))
+                    |> Option.defaultValue [])
+                |> List.distinct
+
+            candidateNames
+            |> Seq.choose (fun name ->
+                let definingParents = parents |> List.filter (fun p -> (Metadata.Resolver.findOwnVerb graph p name).IsSome)
+
+                if List.length definingParents >= 2 then
+                    Some { ObjRef = num; VerbName = name; Kind = "diamond-verb-ambiguity" }
+                else
+                    None))
+
+/// For every object's own verb that overrides a same-named verb reachable
+/// from one of its immediate parents, checks the override against the
+/// *nearest* ancestor definition (per real dispatch order - see below) for
+/// two divergences - feeds `findGotchas`'s `"verb-argspec-mismatch"` and
+/// `"verb-return-mismatch"` checks:
+///   - the `dobj`/`prep`/`iobj` arg-spec triple differs
+///   - the ancestor's body may return a value (`mayReturnValue`) but the
+///     override's never does - one-directional; an override that starts
+///     returning a value the ancestor didn't is a widening, not a broken
+///     contract, so isn't flagged.
+/// "Nearest ancestor" replicates `findCallableVerb`'s own left-to-right,
+/// depth-first-per-branch order: `List.tryPick` over `o.Parents` in
+/// declared order, each candidate resolved via the *same* `findCallableVerb`
+/// (which itself checks that parent's own verb before descending into its
+/// own ancestors) - so the first `Some` is exactly what real dispatch would
+/// find starting one level up from `num` (`num`'s own verb is deliberately
+/// excluded by starting the walk at its parents, not at `num` itself).
+let private findVerbConsistencyIssues (graph: Graph) : GotchaEntry seq =
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Verbs
+        |> Seq.collect (fun v ->
+            match v.Meta.Names with
+            | primary :: _ ->
+                o.Parents
+                |> List.tryPick (fun p -> Metadata.Resolver.findCallableVerb graph p primary)
+                |> Option.map (fun (_, ancestorVerb) ->
+                    seq {
+                        if v.Meta.Dobj <> ancestorVerb.Meta.Dobj || v.Meta.Prep <> ancestorVerb.Meta.Prep || v.Meta.Iobj <> ancestorVerb.Meta.Iobj then
+                            yield { ObjRef = num; VerbName = primary; Kind = "verb-argspec-mismatch" }
+
+                        if mayReturnValue (ancestorVerb.Ast |> Option.defaultValue []) && not (mayReturnValue (v.Ast |> Option.defaultValue [])) then
+                            yield { ObjRef = num; VerbName = primary; Kind = "verb-return-mismatch" }
+                    })
+                |> Option.defaultValue Seq.empty
+            | [] -> Seq.empty))
 
 /// Static, whole-corpus checks for the gotchas already catalogued in the
 /// project plan doc but never turned into tooling - cheap to check
@@ -1437,7 +1542,16 @@ let findGotchas (graph: Graph) : GotchaEntry[] =
                 |> Option.map (fun _ -> { ObjRef = containingObj; VerbName = containingVerbName; Kind = "arg-shape-mismatch" })
             | _ -> None)
 
-    [ missingXBit; structural; argShapeMismatches ] |> Seq.concat |> Array.ofSeq
+    let inheritanceCycles =
+        findInheritanceCycleMembers graph
+        |> Seq.map (fun num -> { ObjRef = num; VerbName = ""; Kind = "inheritance-cycle" })
+
+    let diamondVerbAmbiguities = findDiamondVerbAmbiguities graph
+    let verbConsistencyIssues = findVerbConsistencyIssues graph
+
+    [ missingXBit; structural; argShapeMismatches; inheritanceCycles; diamondVerbAmbiguities; verbConsistencyIssues ]
+    |> Seq.concat
+    |> Array.ofSeq
 
 /// One verb or property `findPermissionRisks` flagged as a risky permission
 /// combination, corpus-wide. `Kind` is a plain string tag, same convention

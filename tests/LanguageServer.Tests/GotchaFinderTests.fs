@@ -37,6 +37,9 @@ let private objNode (num: ObjRef) (verbs: VerbNode list) : ObjectNode =
       Properties = []
       Aliases = [] }
 
+let private objNodeWithParents (num: ObjRef) (parents: ObjRef list) (verbs: VerbNode list) : ObjectNode =
+    { objNode num verbs with Parents = parents }
+
 let private graphOf (objects: ObjectNode list) : Graph =
     { Objects = objects |> List.map (fun o -> o.Num, o) |> Map.ofList
       SystemObjectProperties = Map.empty
@@ -255,3 +258,121 @@ let ``a callee using the args[N]-index idiom is never flagged (no arity bound im
 
     let gotchas = findGotchas graph
     Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "arg-shape-mismatch"))
+
+// --- inheritance-cycle -----------------------------------------------------
+
+[<Fact>]
+let ``a direct two-object parent cycle is flagged inheritance-cycle for both members`` () =
+    let graph = graphOf [ objNodeWithParents 1L [ 2L ] []; objNodeWithParents 2L [ 1L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 1L && g.VerbName = "" && g.Kind = "inheritance-cycle"))
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 2L && g.VerbName = "" && g.Kind = "inheritance-cycle"))
+
+[<Fact>]
+let ``a well-formed diamond (no cycle) is not flagged inheritance-cycle`` () =
+    let graph =
+        graphOf [ objNodeWithParents 1L [] []; objNodeWithParents 2L [ 1L ] []; objNodeWithParents 3L [ 1L ] []; objNodeWithParents 4L [ 2L; 3L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "inheritance-cycle"))
+
+[<Fact>]
+let ``a self-parented object is flagged inheritance-cycle`` () =
+    let graph = graphOf [ objNodeWithParents 1L [ 1L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 1L && g.Kind = "inheritance-cycle"))
+
+// --- diamond-verb-ambiguity -------------------------------------------------
+
+[<Fact>]
+let ``two distinct immediate parents each defining the same verb name is flagged diamond-verb-ambiguity`` () =
+    let leftVerb = verbNode 2L (verbMeta 1 "look" "rxd") []
+    let rightVerb = verbNode 3L (verbMeta 1 "look" "rxd") []
+
+    let graph =
+        graphOf
+            [ objNodeWithParents 1L [] []
+              objNodeWithParents 2L [ 1L ] [ leftVerb ]
+              objNodeWithParents 3L [ 1L ] [ rightVerb ]
+              objNodeWithParents 4L [ 2L; 3L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 4L && g.VerbName = "look" && g.Kind = "diamond-verb-ambiguity"))
+
+[<Fact>]
+let ``only one immediate parent defining the verb is not flagged diamond-verb-ambiguity`` () =
+    let leftVerb = verbNode 2L (verbMeta 1 "look" "rxd") []
+
+    let graph =
+        graphOf
+            [ objNodeWithParents 1L [] []
+              objNodeWithParents 2L [ 1L ] [ leftVerb ]
+              objNodeWithParents 3L [ 1L ] []
+              objNodeWithParents 4L [ 2L; 3L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "diamond-verb-ambiguity"))
+
+[<Fact>]
+let ``an object with only one parent is never flagged diamond-verb-ambiguity`` () =
+    let v = verbNode 1L (verbMeta 1 "look" "rxd") []
+    let graph = graphOf [ objNodeWithParents 1L [] [ v ]; objNodeWithParents 2L [ 1L ] [] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "diamond-verb-ambiguity"))
+
+// --- verb-argspec-mismatch / verb-return-mismatch ---------------------------
+
+[<Fact>]
+let ``an override with a different dobj-prep-iobj triple than its nearest ancestor is flagged verb-argspec-mismatch`` () =
+    let parentMeta = { verbMeta 1 "take" "rxd" with Dobj = "any"; Prep = "none"; Iobj = "none" }
+    let childMeta = { verbMeta 1 "take" "rxd" with Dobj = "this"; Prep = "none"; Iobj = "none" }
+    let parentVerb = verbNode 1L parentMeta []
+    let childVerb = verbNode 2L childMeta []
+
+    let graph = graphOf [ objNodeWithParents 1L [] [ parentVerb ]; objNodeWithParents 2L [ 1L ] [ childVerb ] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 2L && g.VerbName = "take" && g.Kind = "verb-argspec-mismatch"))
+
+[<Fact>]
+let ``an override matching its nearest ancestor's arg-spec is not flagged verb-argspec-mismatch`` () =
+    let parentVerb = verbNode 1L (verbMeta 1 "take" "rxd") []
+    let childVerb = verbNode 2L (verbMeta 1 "take" "rxd") []
+
+    let graph = graphOf [ objNodeWithParents 1L [] [ parentVerb ]; objNodeWithParents 2L [ 1L ] [ childVerb ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "verb-argspec-mismatch"))
+
+[<Fact>]
+let ``an override that drops the ancestor's return value is flagged verb-return-mismatch`` () =
+    let parentVerb = verbNode 1L (verbMeta 1 "take" "rxd") [ Return(Some(IntLit 1L)) ]
+    let childVerb = verbNode 2L (verbMeta 1 "take" "rxd") [ ExprStmt(Call("notify", [], 1, 1)) ]
+
+    let graph = graphOf [ objNodeWithParents 1L [] [ parentVerb ]; objNodeWithParents 2L [ 1L ] [ childVerb ] ]
+
+    let gotchas = findGotchas graph
+    Assert.Contains(gotchas, (fun g -> g.ObjRef = 2L && g.VerbName = "take" && g.Kind = "verb-return-mismatch"))
+
+[<Fact>]
+let ``an override that also returns a value is not flagged verb-return-mismatch`` () =
+    let parentVerb = verbNode 1L (verbMeta 1 "take" "rxd") [ Return(Some(IntLit 1L)) ]
+    let childVerb = verbNode 2L (verbMeta 1 "take" "rxd") [ Return(Some(IntLit 2L)) ]
+
+    let graph = graphOf [ objNodeWithParents 1L [] [ parentVerb ]; objNodeWithParents 2L [ 1L ] [ childVerb ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "verb-return-mismatch"))
+
+[<Fact>]
+let ``an override that never returns a value, matching an ancestor that also never does, is not flagged verb-return-mismatch`` () =
+    let parentVerb = verbNode 1L (verbMeta 1 "take" "rxd") [ ExprStmt(Call("notify", [], 1, 1)) ]
+    let childVerb = verbNode 2L (verbMeta 1 "take" "rxd") [ ExprStmt(Call("notify", [], 1, 1)) ]
+
+    let graph = graphOf [ objNodeWithParents 1L [] [ parentVerb ]; objNodeWithParents 2L [ 1L ] [ childVerb ] ]
+
+    let gotchas = findGotchas graph
+    Assert.DoesNotContain(gotchas, (fun g -> g.Kind = "verb-return-mismatch"))

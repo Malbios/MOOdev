@@ -525,6 +525,14 @@ let private buildTryDispatch
                             ct
 
                     return true
+                | "fix-permission-risk" ->
+                    do! IdeActions.fixPermissionRisk config session webSocket (getObj ()) (getStr "name") (getStr "kind") ct
+
+                    return true
+                | "eval-watch-batch" ->
+                    let exprs = root.GetProperty("exprs").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+                    do! IdeActions.evalWatchBatch session webSocket exprs ct
+                    return true
                 | "get-live-children" ->
                     do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
                     return true

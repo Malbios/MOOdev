@@ -49,6 +49,7 @@ let private commandPalettePanelEl = document.getElementById ("command-palette-pa
 let private commandPaletteInputEl = document.getElementById ("command-palette-input") :?> HTMLInputElement
 let private commandPaletteListEl = document.getElementById ("command-palette-list")
 
+let private connectionStatusEl = document.getElementById ("connection-status")
 let private settingsBtn = document.getElementById ("settings-btn")
 let private settingsOverlayEl = document.getElementById ("settings-overlay")
 let private settingsPanelEl = document.getElementById ("settings-panel")
@@ -97,6 +98,9 @@ let private treeColorRulesListEl = document.getElementById ("tree-color-rules-li
 let private treeListEl = document.getElementById ("tree-list")
 let private sidebarResizerEl = document.getElementById ("sidebar-resizer")
 
+let private staleTabWarningEl = document.getElementById ("stale-tab-warning")
+let private staleTabWarningTextEl = document.getElementById ("stale-tab-warning-text")
+let private staleTabWarningDismissBtn = document.getElementById ("stale-tab-warning-dismiss")
 let private mainTabsEl = document.getElementById ("main-tabs")
 let private tabGameBtn = document.getElementById ("tab-game")
 let private verbTabsEl = document.getElementById ("verb-tabs")
@@ -157,6 +161,10 @@ let private sidebarViewPropertySearchEl = document.getElementById ("sidebar-view
 let private propertySearchNameInputEl = document.getElementById ("property-search-name-input") :?> HTMLInputElement
 let private propertySearchExprInputEl = document.getElementById ("property-search-expr-input") :?> HTMLInputElement
 let private propertySearchResultsEl = document.getElementById ("property-search-results")
+let private viewWatchBtn = document.getElementById ("view-watch")
+let private sidebarViewWatchEl = document.getElementById ("sidebar-view-watch")
+let private watchAddInputEl = document.getElementById ("watch-add-input") :?> HTMLInputElement
+let private watchListEl = document.getElementById ("watch-list")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -360,8 +368,60 @@ module private Login =
         window.localStorage.removeItem userKey
         window.localStorage.removeItem passKey
 
-let private ws = WebSocket.Create(wsUrl)
-ws.binaryType <- "arraybuffer"
+/// The client<->Sidecar WebSocket. `onopen`/`onclose`/`onerror`/`onmessage`
+/// are wired further down (`onWsOpen`/`onWsClose`/`onWsError`/
+/// `onWsMessage`), at the point in module-init order where everything
+/// their bodies close over (`renderTree`, `Sidebar.init`, `switchToSidebarView`,
+/// ...) already exists - `connectWebSocket` re-wires those same (unchanged)
+/// handler functions onto a fresh socket on every reconnect, rather than
+/// duplicating or relocating their bodies.
+let mutable private ws: WebSocket = Unchecked.defaultof<WebSocket>
+
+/// One of `Connected` / `Disconnected` (a deliberate teardown - the
+/// "switch MOO target" reload flow, which is about to blow away this whole
+/// page anyway) / `Reconnecting` (an unexpected drop, backing off before
+/// the next `connectWebSocket` retry).
+type private ConnState =
+    | Connected
+    | Disconnected
+    | Reconnecting of attempt: int
+
+let mutable private connState: ConnState = Disconnected
+
+/// Set `true` only immediately before the one deliberate
+/// `window.location.reload()` this client ever does (the "switch MOO
+/// target" flow) - lets `onWsClose` tell "the socket died because the page
+/// itself is about to die" apart from "the socket died out from under a
+/// page that's still very much alive", the latter being the only case that
+/// should ever schedule a reconnect.
+let mutable private expectingTeardown = false
+
+let private renderConnectionStatus () : unit =
+    match connState with
+    | Connected ->
+        connectionStatusEl.textContent <- "connected"
+        connectionStatusEl.className <- "connection-status status-connected"
+    | Reconnecting attempt ->
+        connectionStatusEl.textContent <- sprintf "reconnecting (attempt %d)..." attempt
+        connectionStatusEl.className <- "connection-status status-reconnecting"
+    | Disconnected ->
+        connectionStatusEl.textContent <- "disconnected"
+        connectionStatusEl.className <- "connection-status status-disconnected"
+
+let mutable private onWsOpen: Event -> unit = fun _ -> ()
+let mutable private onWsClose: Event -> unit = fun _ -> ()
+let mutable private onWsError: Event -> unit = fun _ -> ()
+let mutable private onWsMessage: MessageEvent -> unit = fun _ -> ()
+
+let private connectWebSocket () : unit =
+    ws <- WebSocket.Create(wsUrl)
+    ws.binaryType <- "arraybuffer"
+    ws.onopen <- fun ev -> onWsOpen ev
+    ws.onclose <- fun ev -> onWsClose ev
+    ws.onerror <- fun ev -> onWsError ev
+    ws.onmessage <- fun ev -> onWsMessage ev
+
+connectWebSocket ()
 
 Monaco.registerMoocodeLanguage ()
 Monaco.registerSnippetProvider ()
@@ -482,6 +542,7 @@ module private Settings =
 
 settingsBtn.onclick <- fun _ -> Settings.show ()
 settingsCloseBtn.onclick <- fun _ -> Settings.hide ()
+staleTabWarningDismissBtn.onclick <- fun _ -> staleTabWarningEl.classList.add "hidden"
 // Backdrop click closes the overlay; the panel stops its own clicks from
 // bubbling to the backdrop, same "stop propagation so an inner click
 // doesn't also trigger the outer handler" pattern `renderTabs`'s close-×
@@ -538,6 +599,7 @@ type private SidebarView =
     | DocsView
     | EvalScratchpadView
     | PropertySearchView
+    | WatchView
 
 let mutable private activeSidebarView: SidebarView = TreeView
 
@@ -861,6 +923,19 @@ let private persistTabsKey = "moodev-open-tabs"
 /// in place), so a reload shouldn't resurrect one the user never pinned. If
 /// it's also the active tab, `active` falls back to `GameTab` rather than
 /// persisting a reference to a tab that's no longer in the saved list.
+/// Best-effort "what does this object look like right now" - looked up from
+/// `treeNodes` (the live tree), `""` if this object isn't (yet) known to it.
+/// `""` is also what a stale-check comparison treats as "nothing to compare
+/// against" (see `staleTabWarnings` below), so an unknown label never
+/// produces a false-positive warning. A plain forward-declared function
+/// value, not a direct call into `treeNodes` - `treeNodes` itself is
+/// declared much further down (where the rest of the tree-building code
+/// lives), after this point in the file, and ordinary top-level bindings
+/// can't forward-reference like a `let rec ... and ...` group can (same
+/// reasoning `onWsOpen`/`onWsClose`/etc. above use for the WebSocket
+/// handlers). Assigned its real body right after `treeNodes` is declared.
+let mutable private currentLiveLabel: int64 -> string = fun _ -> ""
+
 let private persistTabs () : unit =
     let persistedVerbTabs = openVerbTabs |> List.filter (fun t -> Some t <> previewTab)
     let persistedInspectorTabs = openInspectorTabs |> List.filter (fun o -> Some o <> previewInspectorTab)
@@ -873,8 +948,12 @@ let private persistTabs () : unit =
 
     let payload =
         createObj
-            [ "verbTabs" ==> (persistedVerbTabs |> List.map (fun (o, v) -> createObj [ "obj" ==> float o; "verb" ==> v ]) |> Array.ofList)
-              "inspectorTabs" ==> (persistedInspectorTabs |> List.map float |> Array.ofList)
+            [ "verbTabs"
+              ==> (persistedVerbTabs
+                   |> List.map (fun (o, v) -> createObj [ "obj" ==> float o; "verb" ==> v; "label" ==> currentLiveLabel o ])
+                   |> Array.ofList)
+              "inspectorTabs"
+              ==> (persistedInspectorTabs |> List.map (fun o -> createObj [ "obj" ==> float o; "label" ==> currentLiveLabel o ]) |> Array.ofList)
               "active" ==> encodeActiveTab persistedActive ]
 
     window.localStorage.setItem (persistTabsKey, JS.JSON.stringify payload)
@@ -890,8 +969,8 @@ type private PersistedActiveTab =
     | PersistedInspector of objRef: int64
 
 type private PersistedTabs =
-    { VerbTabs: (int64 * string) list
-      InspectorTabs: int64 list
+    { VerbTabs: (int64 * string * string) list
+      InspectorTabs: (int64 * string) list
       Active: PersistedActiveTab }
 
 let private loadPersistedTabs () : PersistedTabs option =
@@ -901,10 +980,25 @@ let private loadPersistedTabs () : PersistedTabs option =
         try
             let parsed: obj = JS.JSON.parse json
 
-            let verbTabs =
-                (parsed?verbTabs: obj[]) |> Array.map (fun v -> int64 (v?obj: float), (v?verb: string)) |> Array.toList
+            // `label` predates tabs persisted before this field existed - a
+            // genuinely missing JS property reads back as `undefined`, not
+            // `null` (confirmed live: an old persisted-tabs blob without
+            // `label` produced the literal string "undefined" in the stale-
+            // tab warning before this guard used `isNullOrUndefined`, which
+            // catches both). Reads back as `""`, same "nothing to compare
+            // against" degradation `currentLiveLabel` itself uses.
+            let label (v: obj) =
+                let l = v?label
+                if isNullOrUndefined l then "" else (unbox<string> l)
 
-            let inspectorTabs = (parsed?inspectorTabs: float[]) |> Array.map int64 |> Array.toList
+            let verbTabs =
+                (parsed?verbTabs: obj[])
+                |> Array.map (fun v -> int64 (v?obj: float), (v?verb: string), label v)
+                |> Array.toList
+
+            let inspectorTabs =
+                (parsed?inspectorTabs: obj[]) |> Array.map (fun v -> int64 (v?obj: float), label v) |> Array.toList
+
             let activeObj: obj = parsed?active
 
             let active =
@@ -936,6 +1030,81 @@ let private currentVerbDoc () : (int64 * string) option =
 /// same wire shape either way.
 let private sendAction (fields: (string * obj) list) : unit =
     ws.send (JS.JSON.stringify (createObj fields))
+
+/// The "Live watch dashboard" panel's own persisted state - a plain list of
+/// user-typed MOO expressions (`moodev-watch-expressions` in localStorage,
+/// same JSON-array-of-strings convention `Settings.loadColorRules`/
+/// `saveColorRules` use for a richer shape), plus the last batch of results
+/// received for them (positionally matched by index - see
+/// `IdeActions.evalWatchBatch`'s own comment on why the wire reports them
+/// back in request order rather than tagged pairs).
+let private watchExprsKey = "moodev-watch-expressions"
+
+let private loadWatchExprs () : string list =
+    match window.localStorage.getItem watchExprsKey with
+    | null -> []
+    | json ->
+        try
+            (unbox (JS.JSON.parse json): string[]) |> Array.toList
+        with _ ->
+            []
+
+let private saveWatchExprs (exprs: string list) : unit =
+    window.localStorage.setItem (watchExprsKey, JS.JSON.stringify (Array.ofList exprs))
+
+let mutable private watchExprs: string list = loadWatchExprs ()
+let mutable private watchValues: string[] = [||]
+let mutable private watchIntervalId: int option = None
+
+/// Renders the current watch list - one row per expression, showing its
+/// last-received value (or "..." before the first tick ever completes).
+let rec private renderWatchList () : unit =
+    watchListEl.innerHTML <- ""
+
+    watchExprs
+    |> List.iteri (fun i expr ->
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+
+        let label = document.createElement ("span")
+        let value = if i < watchValues.Length then watchValues.[i] else "..."
+        label.textContent <- sprintf "%s = %s" expr value
+
+        let removeBtn = document.createElement ("button") :?> HTMLButtonElement
+        removeBtn.classList.add "picker-fix-btn"
+        removeBtn.textContent <- "×"
+        removeBtn.title <- "Remove"
+
+        removeBtn.onclick <-
+            fun ev ->
+                ev.stopPropagation () |> ignore
+                watchExprs <- watchExprs |> List.indexed |> List.filter (fun (idx, _) -> idx <> i) |> List.map snd
+                watchValues <- [||]
+                saveWatchExprs watchExprs
+                renderWatchList ()
+
+        li.appendChild label |> ignore
+        li.appendChild removeBtn |> ignore
+        watchListEl.appendChild li |> ignore)
+
+/// One refresh tick - a no-op with nothing watched yet, so an idle Watch
+/// panel (or one nobody's opened this session) never sends anything.
+let private tickWatch () : unit =
+    if not (List.isEmpty watchExprs) then
+        sendAction [ "action" ==> "eval-watch-batch"; "exprs" ==> (watchExprs |> Array.ofList) ]
+
+/// Ticks only while the Watch panel is the active sidebar view - started/
+/// stopped from `switchToSidebarView` below, same "only refresh what's
+/// actually visible" reasoning every other on-demand panel in this file
+/// already follows, just on a timer instead of a single fetch.
+let private startWatchInterval () : unit =
+    if watchIntervalId.IsNone then
+        tickWatch ()
+        watchIntervalId <- Some(JS.setInterval tickWatch 3000)
+
+let private stopWatchInterval () : unit =
+    watchIntervalId |> Option.iter JS.clearInterval
+    watchIntervalId <- None
 
 // Wired here rather than alongside the tree-filter-settings popover wiring
 // above (which is plain top-level code that runs before `sendAction` itself
@@ -1173,7 +1342,8 @@ let private allSidebarViews =
       sidebarViewPermissionRisksEl
       sidebarViewDocsEl
       sidebarViewScratchpadEl
-      sidebarViewPropertySearchEl ]
+      sidebarViewPropertySearchEl
+      sidebarViewWatchEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -1362,6 +1532,8 @@ type private TreeNode =
       Verbs: string[] }
 
 let mutable private treeNodes: Map<int64, TreeNode> = Map.empty
+
+currentLiveLabel <- fun objRef -> treeNodes |> Map.tryFind objRef |> Option.map (fun n -> n.Name) |> Option.defaultValue ""
 
 /// A user-defined "color this object and everything descending from it in
 /// the tree" rule (see `colorForObject` below) - set/cleared from an
@@ -3728,6 +3900,11 @@ and private loadCorponymHistory () : unit =
 and private switchToSidebarView (view: SidebarView) : unit =
     activeSidebarView <- view
 
+    // Only `WatchView` (below) restarts this - every other switch means the
+    // panel that was ticking is no longer visible, so there's nothing left
+    // for the interval to refresh.
+    stopWatchInterval ()
+
     match view with
     | TreeView -> activateOnlySidebarView sidebarViewTreeEl
     | HistoryView ->
@@ -3809,6 +3986,12 @@ and private switchToSidebarView (view: SidebarView) : unit =
         // Nothing to load - same reasoning as EvalScratchpadView, the
         // results area only ever shows the last search's own outcome.
         activateOnlySidebarView sidebarViewPropertySearchEl
+    | WatchView ->
+        activateOnlySidebarView sidebarViewWatchEl
+        renderWatchList ()
+
+        if isLoggedIn then
+            startWatchInterval ()
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -3822,7 +4005,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
           viewScratchpadBtn, EvalScratchpadView
-          viewPropertySearchBtn, PropertySearchView ] do
+          viewPropertySearchBtn, PropertySearchView
+          viewWatchBtn, WatchView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -4162,6 +4346,10 @@ and private gotchaKindLabel (kind: string) : string =
     | "unbounded-loop" -> "loop with no suspend() anywhere in its body"
     | "zero-index" -> "list[0] indexing - always raises E_RANGE"
     | "arg-shape-mismatch" -> "called somewhere with an argument count its own arg-spec can't accept"
+    | "inheritance-cycle" -> "member of a cycle in the parent-inheritance graph"
+    | "diamond-verb-ambiguity" -> "2+ parents each define this verb - resolution depends on parent order"
+    | "verb-argspec-mismatch" -> "dobj/prep/iobj differs from the nearest ancestor's own definition"
+    | "verb-return-mismatch" -> "ancestor may return a value, this override never does"
     | other -> other
 
 /// Renders `moodev/findGotchas`' results into the Gotchas sidebar view -
@@ -4181,8 +4369,16 @@ and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
         let li = document.createElement ("li")
         li.classList.add "picker-item"
         li.classList.add "inspector-link"
-        li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
-        li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
+
+        // "inheritance-cycle" is object-level, not verb-level (see
+        // `GotchaEntry.VerbName`'s doc comment) - no verb to jump to, so
+        // this falls through to the object's own inspector instead.
+        if verbName = "" then
+            li.onclick <- fun _ -> openOrSwitchToInspector objRef
+            li.textContent <- sprintf "#%d - %s" objRef (gotchaKindLabel kind)
+        else
+            li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+            li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
 
         treeGotchasListEl.appendChild li |> ignore
 
@@ -4215,15 +4411,35 @@ and private renderPermissionRisksResults (results: (int64 * string * string)[]) 
         li.classList.add "picker-item"
         li.classList.add "inspector-link"
 
-        li.onclick <-
+        let label = document.createElement ("span")
+        label.classList.add "inspector-link"
+        label.textContent <- sprintf "#%d.%s - %s" objRef name (permissionRiskKindLabel kind)
+        label.onclick <-
             fun _ ->
                 if kind = "wizard-writable-verb" then
                     openOrSwitchToVerb objRef name
                 else
                     openOrSwitchToInspector objRef
 
-        li.textContent <- sprintf "#%d.%s - %s" objRef name (permissionRiskKindLabel kind)
+        // Both flagged kinds are fixed the same way (strip the `w` bit) -
+        // see `IdeActions.fixPermissionRisk`. Disabled immediately on click
+        // so a slow round trip can't be double-submitted; the panel
+        // re-scans on success (see the `moodev-permission-risk-fix-result`
+        // handler), which naturally removes this row once actually fixed.
+        let fixBtn = document.createElement ("button") :?> Browser.Types.HTMLButtonElement
+        fixBtn.classList.add "picker-fix-btn"
+        fixBtn.textContent <- "Fix"
+        fixBtn.title <- "Strip the world-writable bit"
 
+        fixBtn.onclick <-
+            fun ev ->
+                ev.stopPropagation () |> ignore
+                fixBtn.disabled <- true
+                fixBtn.textContent <- "Fixing..."
+                sendAction [ "action" ==> "fix-permission-risk"; "obj" ==> int objRef; "name" ==> name; "kind" ==> kind ]
+
+        li.appendChild label |> ignore
+        li.appendChild fixBtn |> ignore
         treePermissionRisksListEl.appendChild li |> ignore
 
 /// Shows one docs entry's full signature + description in the detail pane -
@@ -4621,7 +4837,21 @@ and private renderColorRulesList () : unit =
             row.appendChild swatch |> ignore
 
             let label = document.createElement ("span")
-            label.textContent <- rule.TypeLabel
+
+            // Same best-effort staleness comparison `staleTabWarnings` uses
+            // for restored tabs - `TypeLabel` is already exactly the name
+            // fingerprint that check needs, just never re-checked against
+            // the live tree before now. `""` on either side (unknown at
+            // rule-creation time, or this object not yet known to
+            // `treeNodes`) means "nothing to compare", not a mismatch.
+            let currentLabel = currentLiveLabel rule.TypeObjRef
+
+            if currentLabel <> "" && currentLabel <> rule.TypeLabel then
+                label.textContent <- sprintf "#%d - was '%s', now '%s' (recycled/reused?)" rule.TypeObjRef rule.TypeLabel currentLabel
+                label.classList.add "tree-color-rule-stale"
+            else
+                label.textContent <- rule.TypeLabel
+
             row.appendChild label |> ignore
 
             let removeBtn = document.createElement ("button")
@@ -4845,28 +5075,67 @@ tabGameBtn.onclick <- fun _ -> switchToTab GameTab
 /// just arrived (see its own comment on that race) - an accepted limitation
 /// shared with the rest of this restore, not something worth building
 /// request-correlation infrastructure to close.
+/// Best-effort "does this restored tab still point at the object it did
+/// when it was saved" - a stored `label` of `""` (unknown at save time) or
+/// a current `currentLiveLabel` of `""` (unknown now) means there's nothing
+/// to compare, so those never produce a warning; only a genuine non-empty
+/// mismatch does. There's no true recycle-generation counter to check
+/// against (ToastStunt exposes none - confirmed against `db_private.h`'s
+/// `Object` struct), so a same-named replacement object goes undetected -
+/// an accepted limitation shared with `Settings`' own color-rule staleness
+/// check below, not something this can close without server-side support
+/// that doesn't exist.
+let private staleTabWarnings (persisted: PersistedTabs) : string list =
+    let verbWarnings =
+        persisted.VerbTabs
+        |> List.choose (fun (objRef, verbName, label) ->
+            let current = currentLiveLabel objRef
+            if label <> "" && current <> "" && label <> current then
+                Some(sprintf "#%d (verb %s) - was '%s', now '%s'" objRef verbName label current)
+            else
+                None)
+
+    let inspectorWarnings =
+        persisted.InspectorTabs
+        |> List.choose (fun (objRef, label) ->
+            let current = currentLiveLabel objRef
+            if label <> "" && current <> "" && label <> current then
+                Some(sprintf "#%d (inspector) - was '%s', now '%s'" objRef label current)
+            else
+                None)
+
+    verbWarnings @ inspectorWarnings
+
 let private restorePersistedTabs () : unit =
     match loadPersistedTabs () with
     | None -> ()
     | Some persisted ->
-        for objRef, verbName in persisted.VerbTabs do
+        for objRef, verbName, _ in persisted.VerbTabs do
             if not (openVerbTabs |> List.contains (objRef, verbName)) then
                 openVerbTabs <- openVerbTabs @ [ (objRef, verbName) ]
                 tabOrder <- tabOrder @ [ VerbTab(objRef, verbName) ]
 
-        for objRef in persisted.InspectorTabs do
+        for objRef, _ in persisted.InspectorTabs do
             if not (openInspectorTabs |> List.contains objRef) then
                 openInspectorTabs <- openInspectorTabs @ [ objRef ]
                 tabOrder <- tabOrder @ [ InspectorTab objRef ]
 
         renderTabs ()
 
+        match staleTabWarnings persisted with
+        | [] -> ()
+        | warnings ->
+            staleTabWarningTextEl.textContent <-
+                sprintf "%d restored tab(s) may point at recycled/reused objects:\n%s" warnings.Length (String.concat "\n" warnings)
+
+            staleTabWarningEl.classList.remove "hidden"
+
         let activeVerbTab =
             match persisted.Active with
             | PersistedVerb(o, v) -> Some(o, v)
             | _ -> None
 
-        for objRef, verbName in persisted.VerbTabs do
+        for objRef, verbName, _ in persisted.VerbTabs do
             if Some(objRef, verbName) <> activeVerbTab then
                 fetchVerb objRef verbName
 
@@ -4902,6 +5171,7 @@ viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksVie
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
 viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
+viewWatchBtn.onclick <- fun _ -> onActivityBtnClick WatchView
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
@@ -4916,6 +5186,26 @@ let private runScratchpadEval () : unit =
         sendAction [ "action" ==> "eval-scratchpad"; "expr" ==> expr ]
 
 scratchpadInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runScratchpadEval ()
+
+/// Adds whatever's typed in the Watch panel's own input to the watch list -
+/// same "Enter to submit, then clear the box" shape as the scratchpad's
+/// input above, except this appends to a persisted list instead of running
+/// once. Ticks once immediately (via `startWatchInterval`'s own first-tick
+/// behavior when nothing was running yet, or `tickWatch` directly when the
+/// interval was already ticking) so the new expression gets a value without
+/// waiting for the next scheduled refresh.
+let private addWatchExpr () : unit =
+    let expr = watchAddInputEl.value.Trim()
+
+    if expr <> "" && not (List.contains expr watchExprs) then
+        watchExprs <- watchExprs @ [ expr ]
+        saveWatchExprs watchExprs
+        watchAddInputEl.value <- ""
+        renderWatchList ()
+
+        if watchIntervalId.IsNone then startWatchInterval () else tickWatch ()
+
+watchAddInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then addWatchExpr ()
 
 /// Runs the Property search view's two inputs (a property name, and a raw
 /// MOO comparison expression referencing `val` - see
@@ -4995,8 +5285,10 @@ renderTree ()
 // rather than waiting for the first add/remove.
 renderColorRulesList ()
 
-ws.onopen <-
+onWsOpen <-
     fun _ ->
+        connState <- Connected
+        renderConnectionStatus ()
         appendOutput "[connected]\n"
         // v1 simplification: the sidebar/tabs are always shown once
         // connected, rather than proactively querying player.programmer
@@ -5007,6 +5299,11 @@ ws.onopen <-
         // `moodev-login-result` handler below - it stays empty until a real
         // MOO login succeeds, since the metadata graph it's drawn from has
         // nothing to do with which (if any) account this session is using.
+        // Also correct on a *reconnect* (not just first load): the Sidecar
+        // never resumes a prior session (`BridgeHandler` opens a brand-new
+        // MOO TCP connection per WebSocket accept), so becoming usable
+        // again always means re-running this same bootstrap and getting a
+        // fresh login, exactly like today's page-reload path already does.
         sidebarEl.classList.add ("visible")
         activityBarEl.classList.add ("visible")
         mainTabsEl.classList.add ("visible")
@@ -5021,8 +5318,27 @@ ws.onopen <-
         // once it succeeds.
         sendAction [ "action" ==> "get-moo-target" ]
 
-ws.onclose <- fun _ -> appendOutput "\n[disconnected]\n"
-ws.onerror <- fun _ -> appendOutput "\n[connection error]\n"
+// Reconnect backoff: 1s, 2s, 4s, ... capped at 30s. Skipped entirely when
+// `expectingTeardown` is set - the one deliberate `window.location.reload()`
+// this client ever does is about to tear down this whole page anyway, so
+// there's nothing useful for a reconnect attempt to do.
+onWsClose <-
+    fun _ ->
+        appendOutput "\n[disconnected]\n"
+        isLoggedIn <- false
+        stopWatchInterval ()
+
+        if expectingTeardown then
+            connState <- Disconnected
+            renderConnectionStatus ()
+        else
+            let attempt = match connState with | Reconnecting n -> n + 1 | _ -> 1
+            connState <- Reconnecting attempt
+            renderConnectionStatus ()
+            let delayMs = min 30000 (1000 * pown 2 (attempt - 1))
+            JS.setTimeout (fun () -> connectWebSocket ()) delayMs |> ignore
+
+onWsError <- fun _ -> appendOutput "\n[connection error]\n"
 
 // "Configurable MOO server target" feature's switch sequence: validate +
 // swap the sidecar's own live connection/tree ("reconfigure-target"), then
@@ -5064,6 +5380,7 @@ settingMooSwitchBtn.onclick <-
 
                 try
                     do! LspClient.reloadGraphAsync treeDir
+                    expectingTeardown <- true
                     window.location.reload ()
                 with ex ->
                     // The sidecar's own export/commit (above) already succeeded and
@@ -5126,7 +5443,7 @@ inputEl.onkeydown <-
                     inputEl.value <- historyDraft
         | _ -> ()
 
-ws.onmessage <-
+onWsMessage <-
     fun ev ->
         if isMcpMessage ev.data then
             let text: string = unbox ev.data
@@ -5293,6 +5610,15 @@ ws.onmessage <-
                         liveChildrenRequested <- Set.empty
                         selectedObjRef <- None
                         renderTree ()
+
+                        // Re-render now that `treeNodes` (via `buildTree`
+                        // above) has real live names to compare against -
+                        // the initial page-load render (line ~5286, before
+                        // any login) always sees an empty `treeNodes`, so
+                        // every color rule's own staleness check
+                        // (`currentLiveLabel`, inside `renderColorRulesList`)
+                        // degrades to "nothing to compare" until this runs.
+                        renderColorRulesList ()
 
                         // Parentless live objects (e.g. the LSP's own
                         // `#4`/`#5` bootstrap objects) have no discovery
@@ -5826,9 +6152,40 @@ ws.onmessage <-
                     if activeSidebarView = TasksView then loadTasks ()
                 elif not (Array.isEmpty lines) then
                     window.alert (String.concat "\n" lines)
+            elif header.StartsWith("moodev-permission-risk-fix-result") then
+                // Re-scanning on success (rather than surgically removing
+                // just the fixed row) keeps this in sync with whatever else
+                // changed the object meanwhile, same "just reload" shape
+                // `moodev-kill-task-result` uses for the Tasks view above.
+                let ok = headerField "ok: " header = Some "1"
+
+                if activeSidebarView = PermissionRisksView then
+                    if ok then
+                        treePermissionRisksSummaryEl.textContent <- "Scanning..."
+
+                        async {
+                            let! results = LspClient.findPermissionRisksAsync ()
+                            renderPermissionRisksResults results
+                        }
+                        |> Async.StartImmediate
+                    else
+                        treePermissionRisksSummaryEl.textContent <- "Fix failed: " + String.concat "\n" lines
             elif header.StartsWith("moodev-scratchpad-result") then
                 let ok = headerField "ok: " header = Some "1"
                 scratchpadResultEl.textContent <- (if ok then "" else "Error: ") + String.concat "\n" lines
+            elif header.StartsWith("moodev-watch-result") then
+                // Only trust a reply whose length matches the *current*
+                // watch list - `tickWatch` carries no request id, so a
+                // reply to a batch sent against a since-edited list (an
+                // add/remove landed while this round trip was in flight)
+                // would otherwise misalign positionally against
+                // `watchExprs`. Dropped rather than applied; the next tick
+                // (already scheduled) supersedes it a few seconds later.
+                if lines.Length = watchExprs.Length then
+                    watchValues <- lines
+
+                    if activeSidebarView = WatchView then
+                        renderWatchList ()
             elif header.StartsWith("moodev-error") then
                 // Unsolicited push from `#0:handle_uncaught_error`/
                 // `handle_task_timeout` (see MOOdy's CLAUDE.md bootstrap
