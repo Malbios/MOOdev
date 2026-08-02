@@ -77,6 +77,7 @@
       <button id="view-docs" class="activity-btn" title="MOOcode docs" aria-label="MOOcode docs">📖</button>
       <button id="view-scratchpad" class="activity-btn" title="Eval scratchpad" aria-label="Eval scratchpad">🧮</button>
       <button id="view-watch" class="activity-btn" title="Watch dashboard" aria-label="Watch dashboard">👁</button>
+      <button id="view-inheritance-graph" class="activity-btn" title="Inheritance graph" aria-label="Inheritance graph">🌳</button>
     </div>
     <div id="sidebar">
       <div id="sidebar-view-tree" class="sidebar-view">
@@ -149,14 +150,15 @@
         <pre id="scratchpad-result"></pre>
       </div>
       <div id="sidebar-view-property-search" class="sidebar-view">
-        <input id="property-search-name-input" type="text" class="sidebar-filter" placeholder="property name, e.g. wizard" autocomplete="off" spellcheck="false" />
-        <input id="property-search-expr-input" type="text" class="sidebar-filter" placeholder="comparison, e.g. val == 1" autocomplete="off" spellcheck="false" />
+        <input id="property-search-name-input" type="text" class="sidebar-filter" placeholder="property name, e.g. wizard" title="Which property to check on every object" autocomplete="off" spellcheck="false" />
+        <input id="property-search-expr-input" type="text" class="sidebar-filter" placeholder="comparison, e.g. val == 1" title="MOO expression to test that property's value against - reference it as 'val'" autocomplete="off" spellcheck="false" />
         <ul id="property-search-results" class="picker-list"></ul>
       </div>
       <div id="sidebar-view-watch" class="sidebar-view">
         <input id="watch-add-input" type="text" class="sidebar-filter" placeholder="MOO expression, e.g. #123.hp" autocomplete="off" spellcheck="false" />
         <ul id="watch-list" class="picker-list"></ul>
       </div>
+      <div id="sidebar-view-inheritance-graph" class="sidebar-view"></div>
     </div>
     <div id="sidebar-resizer" class="resizer resizer-leftright"></div>
     <div id="main-pane">
