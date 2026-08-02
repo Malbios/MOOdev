@@ -282,6 +282,26 @@ let create (container: Browser.Types.HTMLElement) : IStandaloneCodeEditor =
 let registerRenameAction (editor: IStandaloneCodeEditor) (onRename: unit -> unit) : unit =
     editor.addCommand (60, System.Action(onRename))
 
+/// The id of Monaco's built-in "Show or Focus Hover" action - the same
+/// documentation/type-info tooltip that already appears on mouse hover,
+/// triggerable from the keyboard instead (confirmed directly in the
+/// installed package's own source,
+/// `esm/vs/editor/contrib/hover/browser/hoverActionIds.js`).
+let showHoverActionId = "editor.action.showHover"
+
+/// Ctrl+Shift+Space - runs `showHoverActionId` for whatever's at the current
+/// cursor position. `KeyMod.CtrlCmd = 2048`, `KeyMod.Shift = 1024`,
+/// `KeyCode.Space = 10` (all confirmed directly in the installed package's
+/// own source, `esm/vs/editor/common/services/editorBaseApi.js` and
+/// `esm/vs/editor/editor.api.d.ts` respectively - same "read the real enum
+/// value" discipline `KeyCode.F2 = 60` above already establishes). Doesn't
+/// override anything: Monaco's own default keybinding for this action is
+/// the chord Ctrl+K Ctrl+I (confirmed in
+/// `esm/vs/editor/contrib/hover/browser/hoverActions.js`), not a single
+/// combo, so Ctrl+Shift+Space was unclaimed.
+let registerShowHoverKeybinding (editor: IStandaloneCodeEditor) : unit =
+    editor.addCommand (2048 ||| 1024 ||| 10, System.Action(fun () -> editor.getAction(showHoverActionId).run () |> ignore))
+
 /// Replaces every compile-error marker on `editor`'s current model with
 /// `lineErrors` (line number, message) - an empty list clears them. Owner
 /// string is just a namespace so this diagnostic source can't collide with
