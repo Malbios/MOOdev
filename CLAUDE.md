@@ -53,11 +53,22 @@ ToastStunt) and has an explicit list of what's confirmed versus still-shaky.
 
 ## Git workflow
 
-- **Commit and push finished, verified work without waiting to be asked.** Once a chunk of work
-  is implemented and verified (build/tests pass, and live verification too if that was part of
-  the task), commit it as part of finishing the task - "should I commit" isn't a separate open
-  question needing its own confirmation round-trip. Push immediately after, in the same turn -
-  don't leave a commit local waiting for a separate "push this."
+- **Commit finished, verified work without waiting to be asked.** Once a chunk of work is
+  implemented and verified (build/tests pass, and live verification too if that was part of the
+  task), commit it as part of finishing the task - "should I commit" isn't a separate open
+  question needing its own confirmation round-trip.
+- **Merge into local `main`, then push `main` to `origin`.** The workflow is: do the work in an
+  isolated worktree on its own branch, then once it's verified, merge that branch into the primary
+  checkout's local `main`, then push `main` - plain `git push`, same as every other step here,
+  never `gh`/the GitHub API/web UI (see below).
+- **Fast-forward the merge (no wrapping "Merge worktree-X" commit) when the branch is a single
+  commit and `main` hasn't moved since it branched; use `--no-ff` otherwise.** Check with `git
+  merge-base main <branch>` (does it equal `main`'s current tip?), or just try `git merge --ff-only
+  <branch>` and fall back to `--no-ff` if that refuses. A single-commit feature branch merged onto
+  an unchanged `main` doesn't need a second, purely-administrative commit wrapping it - the one
+  real commit's own message is already the full record. A multi-commit branch (or one where `main`
+  moved on while it was being worked) still gets `--no-ff`, so the group stays identifiable as one
+  unit of work and revertable as such.
 - This repo submodules `ToastStunt`; a related content project may have its own separate
   `ToastStunt` submodule too (`MOO-World`, the current one, currently doesn't - this only applies
   if/when one is added back). If a submodule commit and a parent-repo
