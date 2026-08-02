@@ -165,6 +165,8 @@ let private viewWatchBtn = document.getElementById ("view-watch")
 let private sidebarViewWatchEl = document.getElementById ("sidebar-view-watch")
 let private watchAddInputEl = document.getElementById ("watch-add-input") :?> HTMLInputElement
 let private watchListEl = document.getElementById ("watch-list")
+let private viewInheritanceGraphBtn = document.getElementById ("view-inheritance-graph")
+let private sidebarViewInheritanceGraphEl = document.getElementById ("sidebar-view-inheritance-graph")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -600,6 +602,7 @@ type private SidebarView =
     | EvalScratchpadView
     | PropertySearchView
     | WatchView
+    | InheritanceGraphView
 
 let mutable private activeSidebarView: SidebarView = TreeView
 
@@ -1343,7 +1346,8 @@ let private allSidebarViews =
       sidebarViewDocsEl
       sidebarViewScratchpadEl
       sidebarViewPropertySearchEl
-      sidebarViewWatchEl ]
+      sidebarViewWatchEl
+      sidebarViewInheritanceGraphEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -2019,6 +2023,12 @@ let rec private switchToTab (tab: OpenTab) : unit =
         renderTree ()
         persistTabs ()
 
+        // Keeps the standalone Inheritance graph view in sync with
+        // whichever inspector tab is now active, without requiring a
+        // manual re-click of that view's own activity-bar button.
+        if activeSidebarView = InheritanceGraphView then
+            renderInheritanceGraphView ()
+
 and private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
     | GameTab -> true
@@ -2665,14 +2675,19 @@ and private renderObjRefList
     section.appendChild list |> ignore
     container.appendChild section |> ignore
 
-/// Object inheritance graph (Part 7) - a hand-rolled inline SVG rooted at
-/// `rootRef`: its full ancestor chain upward (`ancestorLayers`) and direct
-/// children only downward (`directChildEdges`), laid out in horizontal
-/// layers by BFS depth. Deliberately no new npm dependency (confirmed:
-/// zero SVG/canvas/diagram-library usage anywhere in this codebase or its
-/// dependencies) - the graphs here are object-model-scale, not
-/// thousands-of-nodes scale, so a hand-rolled layered layout is enough.
-/// Skips rendering the section entirely when there's nothing beyond the
+/// Object inheritance graph - a hand-rolled SVG rooted at `rootRef`: its
+/// full ancestor chain upward (`ancestorLayers`) and direct children only
+/// downward (`directChildEdges`), laid out in horizontal layers by BFS
+/// depth. Renders into whatever `container` the caller gives it -
+/// `renderInheritanceGraphView` (below) is the only caller now, feeding it
+/// the standalone Inheritance graph sidebar view's own container; this used
+/// to render straight into the object inspector, but that duplicated the
+/// inspector's own Parents/Children lists on the same screen. Deliberately
+/// no new npm dependency (confirmed: zero SVG/canvas/diagram-library usage
+/// anywhere in this codebase or its dependencies) - the graphs here are
+/// object-model-scale, not thousands-of-nodes scale, so a hand-rolled
+/// layered layout is enough. Falls back to a plain "no parents or children"
+/// message when there's nothing beyond the
 /// root itself (a parentless, childless object) - an empty graph would
 /// just be noise.
 and private renderInheritanceGraph (container: HTMLElement) (rootRef: int64) : unit =
@@ -2792,6 +2807,32 @@ and private renderInheritanceGraph (container: HTMLElement) (rootRef: int64) : u
         section.appendChild title |> ignore
         section.appendChild svg |> ignore
         container.appendChild section |> ignore
+    else
+        let placeholder = document.createElement ("div")
+        placeholder.classList.add "tree-color-rules-empty"
+        placeholder.textContent <- sprintf "#%d has no parents or children to graph." rootRef
+        container.appendChild placeholder |> ignore
+
+/// Renders the standalone Inheritance graph sidebar view (own activity-bar
+/// button, not part of the object inspector - it used to be an inline
+/// section there, but that duplicated the inspector's own Parents/Children
+/// lists in the same screen; pulled out into its own view instead) for
+/// whichever object is the current `activeTab`'s `InspectorTab`, if any.
+/// Re-run from `switchToTab` (below) whenever `activeTab` changes while
+/// this view is the active one, so switching between inspector tabs keeps
+/// it in sync without requiring a manual re-click of this view's own
+/// button.
+and private renderInheritanceGraphView () : unit =
+    sidebarViewInheritanceGraphEl.innerHTML <- ""
+
+    match activeTab with
+    | InspectorTab objRef -> renderInheritanceGraph sidebarViewInheritanceGraphEl objRef
+    | GameTab
+    | VerbTab _ ->
+        let placeholder = document.createElement ("div")
+        placeholder.classList.add "tree-color-rules-empty"
+        placeholder.textContent <- "Open an object's inspector to see its inheritance graph."
+        sidebarViewInheritanceGraphEl.appendChild placeholder |> ignore
 
 /// Builds the inspector pane's DOM from a `moodev/getObjectInfo` result:
 /// header, a clickable owner link, permission-flag badges, clickable
@@ -3129,8 +3170,6 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         (toRefList (unbox info?children))
         None
         (Some("child", fun expr -> sendAction [ "action" ==> "add-child"; "obj" ==> int objRef; "childExpr" ==> expr ]))
-
-    renderInheritanceGraph inspectorContentEl objRef
 
     let propsSection = document.createElement ("div")
     let propsTitle = document.createElement ("div")
@@ -3992,6 +4031,9 @@ and private switchToSidebarView (view: SidebarView) : unit =
 
         if isLoggedIn then
             startWatchInterval ()
+    | InheritanceGraphView ->
+        activateOnlySidebarView sidebarViewInheritanceGraphEl
+        renderInheritanceGraphView ()
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -4006,7 +4048,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewDocsBtn, DocsView
           viewScratchpadBtn, EvalScratchpadView
           viewPropertySearchBtn, PropertySearchView
-          viewWatchBtn, WatchView ] do
+          viewWatchBtn, WatchView
+          viewInheritanceGraphBtn, InheritanceGraphView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -4231,6 +4274,14 @@ and private renderServerStatusResults (listeners: (int64 * int64 * string * bool
         for objRef, port, interfaceName, tls in listeners do
             let li = document.createElement ("li")
             li.classList.add "picker-item"
+            // Every `.picker-list li` gets a pointer cursor unconditionally
+            // (see style.css) - previously only the small nested "#N" span
+            // actually navigated anywhere, so the rest of the row looked
+            // clickable but silently did nothing on click. The whole row is
+            // "this listener, owned by #N" - one navigable target - so the
+            // click handler now lives on the row itself, matching every
+            // other picker-item list in this file.
+            li.onclick <- fun _ -> openOrSwitchToInspector objRef
 
             let label = document.createElement ("span")
             label.textContent <- sprintf "port %d (%s)%s  owner: " port interfaceName (if tls then ", TLS" else "")
@@ -4239,7 +4290,6 @@ and private renderServerStatusResults (listeners: (int64 * int64 * string * bool
             let ownerLink = document.createElement ("span")
             ownerLink.classList.add "inspector-link"
             ownerLink.textContent <- sprintf "#%d" objRef
-            ownerLink.onclick <- fun _ -> openOrSwitchToInspector objRef
             li.appendChild ownerLink |> ignore
 
             serverStatusListEl.appendChild li |> ignore
@@ -5172,6 +5222,7 @@ viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
 viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
 viewWatchBtn.onclick <- fun _ -> onActivityBtnClick WatchView
+viewInheritanceGraphBtn.onclick <- fun _ -> onActivityBtnClick InheritanceGraphView
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
