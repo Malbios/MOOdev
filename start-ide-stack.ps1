@@ -99,6 +99,9 @@ $lspOutDir     = Join-Path $moodevRoot 'src\LanguageServer\bin\ide-stack'
 $sidecarExe    = Join-Path $sidecarOutDir 'Sidecar.exe'
 $lspExe        = Join-Path $lspOutDir 'LanguageServer.exe'
 $runLogDir     = Join-Path $moodevRoot 'ToastStunt\run'
+if (-not (Test-Path $runLogDir)) {
+    New-Item -ItemType Directory -Path $runLogDir -Force | Out-Null
+}
 
 function Test-PortInUse {
     param([int]$TestPort)
