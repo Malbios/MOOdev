@@ -171,18 +171,23 @@ Both `test.ps1`'s dev/play world and the automated test instance descend from
 `ToastStunt\Minimal.db` (not toastcore + `$vcs` - that baseline is retired). Neither has any
 in-MOO VCS content; the sidecar owns all of that from the outside via `eval()`.
 
-- **Dev/play world** (`test.ps1`) — `ToastStunt\run\world.db` / `world.db.new`, FileIO rooted
-  at whatever content project's `TreeDir` the launched profile points at (`test.ps1`'s own
-  `$profiles` table - the built-in `MooWorld` profile assumes a sibling checkout at `..\MOO-World`;
-  see its own doc comment if that assumption doesn't hold for your layout). `SeedFrom` for this
-  profile is `MOO-World\world.db` itself (a rooted path, not a bare filename resolved under
-  `ToastStunt\`) - copied once into `ToastStunt\run\world.db` on first launch, exactly like every
-  other profile's `SeedFrom`, and never touched again from there on. Launched by `test.ps1
-  -Database MooWorld` (also the default with no `-Database` flag) in a visible window. On clean
-  shutdown (in-game `;;shutdown();`, or a graceful `SIGTERM`/Ctrl+C — the wrapping script runs once
-  the `wsl` command returns, however it exited), `world.db.new` is promoted over `world.db`, so
-  the next launch continues from where you left off. This is the only path that ever writes to a
-  real content project's tree. **Note the double semicolon** - a bare `;shutdown();` silently does
+- **Dev/play world** (`test.ps1`) — for the built-in `MooWorld` profile, `world.db`/`world.db.new`
+  live directly in `MOO-World\` itself (a sibling checkout - see the profile's own doc comment if
+  that assumption doesn't hold for your layout), not a scratch copy under `ToastStunt\run\`.
+  `MooWorld` sets `DbDir` (not `SeedFrom`) to point the server straight at `MOO-World`'s own
+  working tree, so `MOO-World\world.db` is the **governing** copy - `test.ps1`'s `$profiles` table
+  supports both: `SeedFrom` (a one-time copy into a scratch `ToastStunt\run\<db>` that never syncs
+  back - what any profile without its own git-tracked db would use) or `DbDir` (run in place
+  against a directory that IS the governing copy - what a profile whose db lives in its own
+  content-project repo, like `MooWorld`, should use instead). FileIO is rooted at whatever content
+  project's `TreeDir` the launched profile points at. Launched by `test.ps1 -Database MooWorld`
+  (also the default with no `-Database` flag) in a visible window. On clean shutdown (in-game
+  `;;shutdown();`, or a graceful `SIGTERM`/Ctrl+C — the wrapping script runs once the `wsl` command
+  returns, however it exited), `world.db.new` is promoted over `world.db` **directly in
+  `MOO-World`'s own working tree**, so the next launch continues from where you left off and the
+  change is immediately visible to `git status` there, ready to be committed in that repo like any
+  other working-tree edit. This is the only path that ever writes to a real content project's
+  tree. **Note the double semicolon** - a bare `;shutdown();` silently does
   nothing on this world: a single leading `;` is ToastStunt's "eval" command alias
   (`parse_cmd.cc`), which needs a real `eval` verb to dispatch to (ToastCore ships one; this
   `Minimal.db`-derived world never installed one) - confirmed live via the same root cause as
