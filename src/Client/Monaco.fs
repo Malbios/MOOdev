@@ -177,6 +177,10 @@ type ITextModel =
     abstract getLineMaxColumn: lineNumber: int -> int
     /// Confirmed in the installed package's own `editor.api.d.ts:2064`.
     abstract getLineCount: unit -> int
+    /// Confirmed in the installed package's own `editor.api.d.ts:2068`. Used
+    /// to read back each line's post-reindent leading whitespace - see
+    /// `App.fs`'s `tabIndentDeltas` for why.
+    abstract getLineContent: lineNumber: int -> string
 
 /// Just enough of Monaco's `IEditorAction` to invoke a built-in action by
 /// id - see `reindentLinesActionId` below for the one this app actually
@@ -411,5 +415,6 @@ let wireLsp
     (getCurrentDocument: unit -> (int64 * string) option)
     (jumpTo: int64 -> string -> int -> int -> unit)
     (showCaveat: string -> unit)
+    (getIndentDelta: int64 -> string -> int[] option)
     : unit =
-    wire monaco getCurrentDocument jumpTo showCaveat
+    wire monaco getCurrentDocument jumpTo showCaveat getIndentDelta

@@ -99,6 +99,24 @@ ws.onmessage <-
 let private documentUri (objRef: int64) (verbName: string) : string =
     sprintf "moodev-verb://%d/%s" objRef (System.Uri.EscapeDataString verbName)
 
+/// The inverse of `documentUri` - `None` for anything not in that exact
+/// shape (the `moodev-caveat://` sentinel `provideReferences` also sees on
+/// this same wire, for one). Used to look up a reference *result*'s own
+/// verb (not necessarily the currently-open one) for its own reindent
+/// delta - see `provideReferences`' own comment.
+let private tryParseDocumentUri (uri: string) : (int64 * string) option =
+    let prefix = "moodev-verb://"
+
+    if not (uri.StartsWith(prefix)) then
+        None
+    else
+        match uri.Substring(prefix.Length).Split('/') with
+        | [| objNum; verbName |] ->
+            match System.Int64.TryParse objNum with
+            | true, objRef -> Some(objRef, System.Uri.UnescapeDataString verbName)
+            | false, _ -> None
+        | _ -> None
+
 let private textDocumentPositionParams (objRef: int64) (verbName: string) (lspLine: int) (lspCharacter: int) : obj =
     createObj
         [ "textDocument" ==> createObj [ "uri" ==> documentUri objRef verbName ]
@@ -386,6 +404,36 @@ let getMoocodeDocsAsync () : Async<(string * string * string * string)[]> =
                 |> Array.map (fun o -> (o?name: string), (o?signature: string), (o?description: string), (o?kind: string))
     }
 
+/// Converts a Monaco (1-based) `(lineNumber, column)` to an LSP (0-based)
+/// `(line, character)`, undoing the client-side reindent-on-load offset for
+/// that line first if `delta` has one - see `App.fs`'s `tabIndentDeltas` for
+/// why this exists: the server's AST is positioned against the *raw* verb
+/// source, but `editor.getPosition()` reports columns in the *displayed*
+/// (locally reindented-for-readability) buffer, which diverge in leading
+/// whitespace as soon as they differ at all. `delta.[i]` is
+/// `displayedIndent - rawIndent` for 0-based line `i`, so subtracting it
+/// from the displayed column recovers the equivalent raw column. Missing/
+/// out-of-range entries mean "no adjustment" (the delta wasn't tracked, or
+/// this line wasn't in it), same as the unadjusted behavior before this
+/// existed.
+let private toRawPosition (delta: int[] option) (lineNumber: int) (column: int) : int * int =
+    let offset =
+        delta
+        |> Option.bind (fun d -> if lineNumber - 1 < d.Length then Some d.[lineNumber - 1] else None)
+        |> Option.defaultValue 0
+
+    (lineNumber - 1, column - 1 - offset)
+
+/// The inverse of `toRawPosition` - an LSP (0-based) `(line, character)` to
+/// Monaco (1-based) `(lineNumber, column)`, re-applying the same line's
+/// offset. Used for a same-document go-to-definition jump (a local
+/// variable's declaration, always inside the currently-open, already-
+/// reindented verb) - see `provideDefinition` below.
+let private toDisplayedPosition (delta: int[] option) (lspLine: int) (lspChar: int) : int * int =
+    let offset = delta |> Option.bind (fun d -> if lspLine < d.Length then Some d.[lspLine] else None) |> Option.defaultValue 0
+
+    (lspLine + 1, lspChar + 1 + offset)
+
 /// Wires hover, go-to-definition, completions, signature help,
 /// find-references, and the custom `moodev-verb://` URI opener into the
 /// given Monaco instance for the "moocode" language.
@@ -406,11 +454,15 @@ let getMoocodeDocsAsync () : Async<(string * string * string * string)[]> =
 /// - `showCaveat`: surfaces find-references' "N call sites couldn't be
 ///   statically confirmed" note (see `provideReferences` below) - wired to
 ///   the same diagnostics area save errors already use.
+/// - `getIndentDelta`: `App.fs`'s `tabIndentDeltas` lookup, `None` for a
+///   verb never fetched this session (or reset right after a save) - every
+///   position conversion here treats that the same as "no adjustment."
 let wire
     (monaco: obj)
     (getCurrentDocument: unit -> (int64 * string) option)
     (jumpTo: int64 -> string -> int -> int -> unit)
     (showCaveat: string -> unit)
+    (getIndentDelta: int64 -> string -> int[] option)
     : unit =
     // Monaco can invoke a provider again before an earlier call's websocket
     // round-trip has come back - moving the mouse across a word re-fires
@@ -436,9 +488,8 @@ let wire
             match getCurrentDocument () with
             | None -> return null
             | Some(objRef, verbName) ->
-                // Monaco positions are 1-based; LSP positions are 0-based.
-                let lspLine = (position?lineNumber: int) - 1
-                let lspCol = (position?column: int) - 1
+                let lspLine, lspCol =
+                    toRawPosition (getIndentDelta objRef verbName) (position?lineNumber: int) (position?column: int)
 
                 let! result = requestAsync "textDocument/hover" (textDocumentPositionParams objRef verbName lspLine lspCol)
 
@@ -460,8 +511,8 @@ let wire
             match getCurrentDocument () with
             | None -> return null
             | Some(objRef, verbName) ->
-                let lspLine = (position?lineNumber: int) - 1
-                let lspCol = (position?column: int) - 1
+                let currentDelta = getIndentDelta objRef verbName
+                let lspLine, lspCol = toRawPosition currentDelta (position?lineNumber: int) (position?column: int)
 
                 let! result = requestAsync "textDocument/definition" (textDocumentPositionParams objRef verbName lspLine lspCol)
 
@@ -479,17 +530,26 @@ let wire
                     // already open); for a cross-verb dispatch jump this is
                     // still just (1,1) server-side (`locationOfVerb` has no
                     // per-statement spans to offer), so this doesn't change
-                    // that case's behavior. LSP positions are 0-based;
-                    // Monaco's are 1-based.
+                    // that case's behavior. Only re-applies the reindent
+                    // delta for the *same-document* case (`uri` matches the
+                    // verb we just queried against) - a cross-verb jump's
+                    // (1,1) placeholder isn't a real position to begin with,
+                    // so adjusting it by any delta (this document's or the
+                    // target's, once it's opened and gets its own) wouldn't
+                    // be principled.
+                    let responseDelta = if uri = documentUri objRef verbName then currentDelta else None
+                    let startLine, startCol = toDisplayedPosition responseDelta (range?start?line: int) (range?start?character: int)
+                    let endLine, endCol = toDisplayedPosition responseDelta (range?``end``?line: int) (range?``end``?character: int)
+
                     return
                         createObj
                             [ "uri" ==> monaco?Uri?parse (uri)
                               "range" ==>
                                 createObj
-                                    [ "startLineNumber" ==> ((range?start?line: int) + 1)
-                                      "startColumn" ==> ((range?start?character: int) + 1)
-                                      "endLineNumber" ==> ((range?``end``?line: int) + 1)
-                                      "endColumn" ==> ((range?``end``?character: int) + 1) ] ]
+                                    [ "startLineNumber" ==> startLine
+                                      "startColumn" ==> startCol
+                                      "endLineNumber" ==> endLine
+                                      "endColumn" ==> endCol ] ]
         }
         |> Async.StartAsPromise
 
@@ -501,8 +561,8 @@ let wire
             match getCurrentDocument () with
             | None -> return createObj [ "suggestions" ==> [||] ]
             | Some(objRef, verbName) ->
-                let lspLine = (position?lineNumber: int) - 1
-                let lspCol = (position?column: int) - 1
+                let lspLine, lspCol =
+                    toRawPosition (getIndentDelta objRef verbName) (position?lineNumber: int) (position?column: int)
 
                 let! result = requestAsync "textDocument/completion" (textDocumentPositionParams objRef verbName lspLine lspCol)
 
@@ -557,8 +617,8 @@ let wire
             match getCurrentDocument () with
             | None -> return null
             | Some(objRef, verbName) ->
-                let lspLine = (position?lineNumber: int) - 1
-                let lspCol = (position?column: int) - 1
+                let lspLine, lspCol =
+                    toRawPosition (getIndentDelta objRef verbName) (position?lineNumber: int) (position?column: int)
 
                 let! result = requestAsync "textDocument/signatureHelp" (textDocumentPositionParams objRef verbName lspLine lspCol)
 
@@ -608,8 +668,8 @@ let wire
             match getCurrentDocument () with
             | None -> return [||]
             | Some(objRef, verbName) ->
-                let lspLine = (position?lineNumber: int) - 1
-                let lspCol = (position?column: int) - 1
+                let lspLine, lspCol =
+                    toRawPosition (getIndentDelta objRef verbName) (position?lineNumber: int) (position?column: int)
 
                 let! result = requestAsync "textDocument/references" (textDocumentPositionParams objRef verbName lspLine lspCol)
 
@@ -630,15 +690,31 @@ let wire
                             else
                                 let range: obj = loc?range
 
+                                // Best-effort: this location's own verb
+                                // might not be the currently-open one, and
+                                // might never have been fetched this session
+                                // at all - `getIndentDelta` returns `None`
+                                // for that case, same as "no adjustment"
+                                // (today's behavior, not a regression).
+                                // Covered whenever the target happens to
+                                // already be cached (e.g. it's the verb
+                                // currently open, or was opened earlier this
+                                // session).
+                                let locationDelta =
+                                    tryParseDocumentUri uri |> Option.bind (fun (o, v) -> getIndentDelta o v)
+
+                                let startLine, startCol = toDisplayedPosition locationDelta (range?start?line: int) (range?start?character: int)
+                                let endLine, endCol = toDisplayedPosition locationDelta (range?``end``?line: int) (range?``end``?character: int)
+
                                 Some(
                                     createObj
                                         [ "uri" ==> monaco?Uri?parse (uri)
                                           "range" ==>
                                             createObj
-                                                [ "startLineNumber" ==> ((range?start?line: int) + 1)
-                                                  "startColumn" ==> ((range?start?character: int) + 1)
-                                                  "endLineNumber" ==> ((range?``end``?line: int) + 1)
-                                                  "endColumn" ==> ((range?``end``?character: int) + 1) ] ]
+                                                [ "startLineNumber" ==> startLine
+                                                  "startColumn" ==> startCol
+                                                  "endLineNumber" ==> endLine
+                                                  "endColumn" ==> endCol ] ]
                                 ))
 
                     match caveatSuffix with
@@ -707,12 +783,14 @@ let wire
             match getCurrentDocument () with
             | None -> return noHints
             | Some(objRef, verbName) ->
+                let delta = getIndentDelta objRef verbName
+                let startLspLine, startLspChar = toRawPosition delta (range?startLineNumber: int) (range?startColumn: int)
+                let endLspLine, endLspChar = toRawPosition delta (range?endLineNumber: int) (range?endColumn: int)
+
                 let lspRange =
                     createObj
-                        [ "start" ==>
-                            createObj [ "line" ==> ((range?startLineNumber: int) - 1); "character" ==> ((range?startColumn: int) - 1) ]
-                          "end" ==>
-                            createObj [ "line" ==> ((range?endLineNumber: int) - 1); "character" ==> ((range?endColumn: int) - 1) ] ]
+                        [ "start" ==> createObj [ "line" ==> startLspLine; "character" ==> startLspChar ]
+                          "end" ==> createObj [ "line" ==> endLspLine; "character" ==> endLspChar ] ]
 
                 let p =
                     createObj
@@ -730,10 +808,11 @@ let wire
                         lspHints
                         |> Array.map (fun h ->
                             let pos: obj = h?position
+                            let lineNumber, column = toDisplayedPosition delta (pos?line: int) (pos?character: int)
 
                             createObj
                                 [ "label" ==> (h?label: string)
-                                  "position" ==> createObj [ "lineNumber" ==> ((pos?line: int) + 1); "column" ==> ((pos?character: int) + 1) ]
+                                  "position" ==> createObj [ "lineNumber" ==> lineNumber; "column" ==> column ]
                                   "kind" ==> h?kind
                                   "paddingLeft" ==> h?paddingLeft
                                   "paddingRight" ==> h?paddingRight ])

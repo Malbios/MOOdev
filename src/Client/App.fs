@@ -768,6 +768,54 @@ let private looksWaifShaped (text: string) : bool = text.Trim().StartsWith("[[")
 /// this only ever holds *currently open* tabs' content.
 let mutable private tabContent: Map<int64 * string, string> = Map.empty
 
+/// Per-line column offset between the *raw* verb source (what the LSP's
+/// last-saved AST is positioned against) and the *displayed* buffer (what
+/// `editor.getPosition()` reports) - `delta.[i] = displayedIndent.[i] -
+/// rawIndent.[i]` for 0-based line `i`, since `Monaco.reindentLinesActionId`
+/// only ever rewrites a line's leading whitespace, never adds/removes lines
+/// or touches anything past the first non-whitespace character. No entry
+/// (or a line index past the array's end) means "no adjustment needed" -
+/// same as today's unadjusted behavior, never worse. Computed once per
+/// fetch (see `moodev-edit-content`'s handler), reset to "no adjustment"
+/// right after a successful save (the server's raw source becomes exactly
+/// what's displayed at that instant), and cleared on tab close, same
+/// lifecycle as `tabContent` above. Consumed by `LspClient.wire`'s
+/// `getIndentDelta` callback.
+let mutable private tabIndentDeltas: Map<int64 * string, int[]> = Map.empty
+
+/// Leading whitespace character count of `line` - `0` for an empty line
+/// (matches `indentationRules`' own treatment: nothing to offset).
+let private leadingWhitespaceLength (line: string) : int =
+    let trimmed = line.TrimStart(' ', '\t')
+    line.Length - trimmed.Length
+
+/// Builds `tabIndentDeltas`' entry for `(objRef, verbName)` by comparing
+/// `rawLines` (the server's own text, exactly as fetched) against the
+/// editor's current (just-reindented) model content line-by-line. Silently
+/// skips (leaves no entry - "no adjustment") if the line counts somehow
+/// differ, since that would mean reindent-lines did something beyond
+/// leading-whitespace rewriting and the whole per-line-offset premise no
+/// longer holds - safer to fall back to unadjusted than to compute garbage.
+let private recordIndentDelta (objRef: int64) (verbName: string) (rawLines: string list) (model: Monaco.ITextModel) : unit =
+    let lineCount = model.getLineCount ()
+
+    if lineCount = List.length rawLines then
+        let delta =
+            rawLines
+            |> List.mapi (fun i rawLine ->
+                let displayedLine = model.getLineContent (i + 1)
+                leadingWhitespaceLength displayedLine - leadingWhitespaceLength rawLine)
+            |> Array.ofList
+
+        tabIndentDeltas <- Map.add (objRef, verbName) delta tabIndentDeltas
+
+/// The `int[] option` `LspClient.wire`'s `getIndentDelta` callback needs -
+/// `None` for "not tracked" (never fetched this session, or explicitly
+/// reset after a save), which every position-conversion call site already
+/// treats the same as "no adjustment."
+let private getIndentDeltaFor (objRef: int64) (verbName: string) : int[] option =
+    Map.tryFind (objRef, verbName) tabIndentDeltas
+
 /// VS Code's "preview tab" mechanic: at most one open verb tab is ever a
 /// preview at a time, shown in italics. Opening a brand-new verb while a
 /// preview tab exists *replaces* it (same slot in `openVerbTabs`) rather
@@ -2034,6 +2082,7 @@ and private closeTabImmediate (objRef: int64, verbName: string) : unit =
     saveInFlight <- Set.remove key saveInFlight
     failedSaveTabs <- Set.remove key failedSaveTabs
     pendingSaveResolvers <- Map.remove key pendingSaveResolvers
+    tabIndentDeltas <- Map.remove key tabIndentDeltas
 
     if wasActive then
         // `switchToTab` below still sees `activeTab = VerbTab(objRef,
@@ -5104,6 +5153,12 @@ ws.onmessage <-
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
                         tabContent <- Map.add (objRef, verb) content tabContent
+                        // `lines` is the raw, un-reindented text exactly as
+                        // the server sent it - compare it against the model
+                        // *after* the reindent above already ran, capturing
+                        // this fetch's raw-vs-displayed offset before
+                        // anything else touches the buffer.
+                        recordIndentDelta objRef verb (List.ofArray lines) (editor.getModel ())
                         // A fresh load is a clean baseline - any earlier
                         // failed/in-flight save for this tab no longer
                         // describes anything real.
@@ -5120,6 +5175,7 @@ ws.onmessage <-
                                 let idx = openVerbTabs |> List.findIndex (fun t -> t = oldPreview)
                                 openVerbTabs <- openVerbTabs |> List.mapi (fun i t -> if i = idx then (objRef, verb) else t)
                                 tabContent <- Map.remove oldPreview tabContent
+                                tabIndentDeltas <- Map.remove oldPreview tabIndentDeltas
                                 tabOrder <- tabOrder |> List.map (fun t -> if t = VerbTab oldPreview then VerbTab(objRef, verb) else t)
                             | None ->
                                 openVerbTabs <- openVerbTabs @ [ (objRef, verb) ]
@@ -5163,6 +5219,15 @@ ws.onmessage <-
 
                         failedSaveTabs <-
                             if ok then Set.remove key failedSaveTabs else Set.add key failedSaveTabs
+
+                        // A successful save makes the server's raw source
+                        // exactly what's currently displayed - continuing to
+                        // apply the pre-save delta would now introduce drift
+                        // instead of correcting it, so drop it back to "no
+                        // adjustment" (same as a tab that's never been
+                        // fetched).
+                        if ok then
+                            tabIndentDeltas <- Map.remove key tabIndentDeltas
 
                         // Resolve any awaiters (e.g. `closeTab`, waiting to
                         // decide whether to confirm a discard) *before* the
@@ -5883,5 +5948,6 @@ Monaco.wireLsp
             // once it's open.
             revealAndOpenVerb objRef verbName)
     (fun message -> editorDiagnosticsEl.textContent <- message)
+    getIndentDeltaFor
 
 inputEl.focus ()
