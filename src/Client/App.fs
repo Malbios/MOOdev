@@ -5846,6 +5846,7 @@ let private runRenameSymbolFlow () : unit =
             |> Async.StartImmediate
 
 Monaco.registerRenameAction editor (fun () -> runRenameSymbolFlow ())
+Monaco.registerShowHoverKeybinding editor
 
 Monaco.wireLsp
     (fun () -> currentVerbDoc ())
