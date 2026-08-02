@@ -26,16 +26,23 @@ type Connection =
 
 let private sentinel = "###MOOVCS"
 
-/// Opens a TCP connection to the MOO and logs in as the wizard - the same
-/// passwordless `connect wizard` convention this project's own dev tooling
-/// already relies on (see `moo-client.ps1`'s `Send-MooCommands`). Only
-/// suitable for a dev/test instance with an unsecured wizard account.
-let connect (host: string) (port: int) (ct: CancellationToken) : Task<Connection> =
+/// Opens a TCP connection to the MOO and logs in as `username` - a bare
+/// `connect <username>`, no password. Works unmodified against a bare
+/// `Minimal.db` world (no real accounting - any text logs in as Wizard, see
+/// MOOdy's CLAUDE.md) with the default `"wizard"`, and equally against a
+/// real, separately-accounted world *if* the target account's password is
+/// genuinely blank - confirmed live against a real HellMOO-derived world
+/// where the wizard-equivalent character's own name (not literally
+/// "wizard") had to be passed here instead; a world requiring a real,
+/// non-blank password needs a different mechanism entirely (not just an
+/// extra CLI argument), out of scope for this project's own single-developer
+/// dev tooling.
+let connect (host: string) (port: int) (username: string) (ct: CancellationToken) : Task<Connection> =
     task {
         let client = new TcpClient()
         do! client.ConnectAsync(host, port, ct)
         let stream = client.GetStream()
-        let login = Encoding.UTF8.GetBytes("connect wizard\r\n")
+        let login = Encoding.UTF8.GetBytes("connect " + username + "\r\n")
         do! stream.WriteAsync(login, 0, login.Length, ct)
 
         return
