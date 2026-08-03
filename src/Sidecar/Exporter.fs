@@ -294,7 +294,9 @@ let getMaxObject (evalRunner: EvalRunner) (ct: CancellationToken) : Task<int64> 
 /// always handled separately (normally corponym'd, or via its own
 /// export-time exception). Most objects in this range have zero
 /// directly-defined verbs, so the response payload stays bounded by the
-/// actual anon-verb-bearing population rather than chunk size.
+/// actual anon-verb-bearing population rather than chunk size - the *scan*
+/// itself costs one `valid()` + one `maphaskey()` check per objnum in the
+/// chunk (plus `verbs()` only for objects that pass both).
 ///
 /// Chunked (by `exportTree`'s caller loop) rather than one single
 /// `[#1..max_object()]` eval covering the whole world: a world with
@@ -304,6 +306,18 @@ let getMaxObject (evalRunner: EvalRunner) (ct: CancellationToken) : Task<int64> 
 /// running into ToastStunt's own foreground task time/tick limits on a
 /// truly large world. Chunking trades that for periodic round trips
 /// `exportTree` can report progress on.
+///
+/// `corponym_nums` is built as a MOO **map** keyed by objnum, checked via
+/// `maphaskey()` (an O(log n) red-black-tree lookup, confirmed against
+/// `ToastStunt/src/map.cc`'s `maplookup`/`rbfind`) - not a list checked via
+/// `in`, which is an O(n) linear scan (`ToastStunt/src/collection.cc`'s
+/// `ismember`) and was confirmed live to time out scanning a real
+/// ~633k-object world's range against a ~426-entry corponym list, even with
+/// chunking applied (chunking bounds the *objnum range* per round trip, not
+/// the *corponym-list* cost paid per object within that range). `in` on a
+/// *map* is a different, still-O(n) trap (it walks the map's *values* via
+/// `mapforeach`, not its keys) - `maphaskey()` is the only correct, fast
+/// idiom here; don't revert to either `in` form.
 let getAnonVerbs
     (evalRunner: EvalRunner)
     (corponymObjnums: Set<int64>)
@@ -313,13 +327,13 @@ let getAnonVerbs
     : Task<(int64 * VerbExport list) list> =
     task {
         let corponymNumsLiteral =
-            corponymObjnums |> Set.toList |> List.map (sprintf "#%d") |> String.concat ", " |> sprintf "{%s}"
+            corponymObjnums |> Set.toList |> List.map (sprintf "#%d -> 1") |> String.concat ", " |> sprintf "[%s]"
 
         let statements =
             $"""corponym_nums = {corponymNumsLiteral};
 anon = {{}};
 for i in [#{loObj}..#{hiObj}]
-  if (valid(i) && !(i in corponym_nums))
+  if (valid(i) && !maphaskey(corponym_nums, i))
     vlist = verbs(i);
     if (length(vlist) > 0)
       vout = {{}};
