@@ -275,22 +275,40 @@ endif"""
                       Aliases = aliases }
     }
 
-/// Non-corified verb capture tier: one eval, connection-wide, walking every
-/// valid objnum via `[#1..max_object()]` (FORMAT.md §5's enumeration
-/// fallback, documented but never previously used to *keep* anything - only
-/// to filter non-corified objects out). Returns directly-defined verb data
-/// for every valid object that has no corponym (per `corponymObjnums`) and
-/// at least one directly-defined verb - `#0` is never included, since it's
+/// One eval, connection-wide - `tostr(max_object())` (see `parseVerb`'s
+/// sibling helpers: an OBJ value never survives `generate_json()` bare, it
+/// must be `tostr()`'d first, same as every other objnum this file emits).
+/// Only used to size/report progress on `getAnonVerbs`'s chunked scan below.
+let getMaxObject (evalRunner: EvalRunner) (ct: CancellationToken) : Task<int64> =
+    task {
+        let! json = evalRunner "" "[\"max\" -> tostr(max_object())]" ct
+        return int64 ((getString json.RootElement "max").TrimStart('#'))
+    }
+
+/// Non-corified verb capture tier, one chunk of the objnum range at a time
+/// (FORMAT.md §5's enumeration fallback, documented but never previously
+/// used to *keep* anything - only to filter non-corified objects out).
+/// Returns directly-defined verb data for every valid object in
+/// `[loObj..hiObj]` that has no corponym (per `corponymObjnums`) and at
+/// least one directly-defined verb - `#0` is never included, since it's
 /// always handled separately (normally corponym'd, or via its own
 /// export-time exception). Most objects in this range have zero
 /// directly-defined verbs, so the response payload stays bounded by the
-/// actual anon-verb-bearing population rather than total object count - only
-/// the *scan* itself costs one `valid()`+`verbs()` check per objnum, still a
-/// single eval round-trip either way (mirrors `getBuiltinFunctions`/
-/// `getCorponyms`'s "one eval, not N" shape).
+/// actual anon-verb-bearing population rather than chunk size.
+///
+/// Chunked (by `exportTree`'s caller loop) rather than one single
+/// `[#1..max_object()]` eval covering the whole world: a world with
+/// hundreds of thousands of objects turns that into one MOO-side loop long
+/// enough to look indistinguishable from a hang (no output at all until it
+/// either returns or the connection's read loop times out), and risks
+/// running into ToastStunt's own foreground task time/tick limits on a
+/// truly large world. Chunking trades that for periodic round trips
+/// `exportTree` can report progress on.
 let getAnonVerbs
     (evalRunner: EvalRunner)
     (corponymObjnums: Set<int64>)
+    (loObj: int64)
+    (hiObj: int64)
     (ct: CancellationToken)
     : Task<(int64 * VerbExport list) list> =
     task {
@@ -300,7 +318,7 @@ let getAnonVerbs
         let statements =
             $"""corponym_nums = {corponymNumsLiteral};
 anon = {{}};
-for i in [#1..max_object()]
+for i in [#{loObj}..#{hiObj}]
   if (valid(i) && !(i in corponym_nums))
     vlist = verbs(i);
     if (length(vlist) > 0)
@@ -327,6 +345,12 @@ endfor"""
                 objnum, verbs)
             |> List.ofSeq
     }
+
+/// Object-count width of one `getAnonVerbs` round trip - see that function's
+/// own comment for why the scan is chunked at all. 10,000 keeps each
+/// round-trip's MOO-side loop well short of typical foreground task limits
+/// while still giving frequent progress output on a large world.
+let private anonVerbChunkSize = 10_000L
 
 /// Resolves a FORMAT.md tree-relative path to `(corponym, label)` - shared by
 /// `IdeActions.searchHistory` (labeling a pickaxe-search hit) and
@@ -487,6 +511,12 @@ let renderVerbFile (selfRefText: string) (v: VerbExport) : string =
 // Orchestration.
 // ---------------------------------------------------------------------------
 
+/// How often (in objects processed) `exportTree` prints a progress line -
+/// needed so a large world (hundreds of thousands of objects) doesn't sit
+/// silent long enough to look hung. Applies to both the per-corponym export
+/// loop and the chunked non-corified-verb scan below.
+let private progressInterval = 250
+
 /// Walks every corponym, fetches its object's export data, and writes the
 /// full tree to `outputDir`. Overwrites whatever's already there - callers
 /// that want a clean tree should clear `outputDir` first (the round-trip
@@ -511,6 +541,10 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         let sortedByName =
             corponymList |> List.sortWith (fun (a, _) (b, _) -> String.Compare(a, b, StringComparison.OrdinalIgnoreCase))
 
+        let totalCorponyms = sortedByName.Length
+        printfn "Exporting %d corponym-bearing object(s)..." totalCorponyms
+        let mutable exportedCount = 0
+
         for name, objRef in sortedByName do
             let! dataOpt = getObjectExport evalRunner objRef ct
 
@@ -531,6 +565,11 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
 
                 for verb, fileName in verbFileNames do
                     File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
+
+            exportedCount <- exportedCount + 1
+
+            if exportedCount % progressInterval = 0 || exportedCount = totalCorponyms then
+                printfn "Exported %d/%d objects..." exportedCount totalCorponyms
 
         // FORMAT.md §1's one exception: #0 (System Object) always gets a
         // directory even without a corponym of its own to be discovered by
@@ -568,7 +607,18 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         // parity with the corponym-keyed tree (see the card's own
         // accepted-resolution note for the reasoning).
         let corponymObjnums = corponymsByObjnum |> Map.toList |> List.map fst |> Set.ofList
-        let! anonVerbsByObjnum = getAnonVerbs evalRunner corponymObjnums ct
+        let! maxObj = getMaxObject evalRunner ct
+        printfn "Scanning #1..#%d for non-corified verbs..." maxObj
+
+        let anonVerbsByObjnum = ResizeArray<int64 * VerbExport list>()
+        let mutable chunkLo = 1L
+
+        while chunkLo <= maxObj do
+            let chunkHi = min maxObj (chunkLo + anonVerbChunkSize - 1L)
+            let! chunkResults = getAnonVerbs evalRunner corponymObjnums chunkLo chunkHi ct
+            anonVerbsByObjnum.AddRange(chunkResults)
+            printfn "Scanned %d/%d objects for non-corified verbs..." chunkHi maxObj
+            chunkLo <- chunkHi + 1L
 
         for objnum, verbs in anonVerbsByObjnum do
             let objDir = Path.Combine(outputDir, "objects", "_anon", string objnum)
