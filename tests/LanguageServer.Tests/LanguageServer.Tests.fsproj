@@ -17,6 +17,9 @@
     <Compile Include="CallGraphTests.fs" />
     <Compile Include="VerbSummaryTests.fs" />
     <Compile Include="VerbMetricsTests.fs" />
+    <Compile Include="MoocodeDocsTests.fs" />
+    <Compile Include="DocumentHighlightTests.fs" />
+    <Compile Include="SemanticTokensTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

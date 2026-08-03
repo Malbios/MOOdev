@@ -471,6 +471,36 @@ let private toDisplayedPosition (delta: int[] option) (lspLine: int) (lspChar: i
 
     (lspLine + 1, lspChar + 1 + offset)
 
+/// The client's own copy of the token-type/modifier vocabulary
+/// `Handlers.classifySemanticToken` emits (`Handlers.fs`'s `SemanticTokenEntry`
+/// doc comment) - hardcoded to match rather than negotiated, since both ends
+/// are this project's own code and there's no real `SemanticTokensProvider`
+/// capability to declare a legend through (see that same doc comment for
+/// why). Order matters - it's the index Monaco's own delta-encoded `data`
+/// array (`provideDocumentSemanticTokens` below) and `getLegend` both use.
+let private semanticTokenTypes = [| "variable"; "function"; "method"; "property" |]
+let private semanticTokenModifiers = [| "defaultLibrary"; "unresolved" |]
+
+let private semanticTokenTypeIndex (t: string) : int =
+    semanticTokenTypes |> Array.tryFindIndex ((=) t) |> Option.defaultValue 0
+
+let private semanticTokenModifiersBitmask (mods: string[]) : int =
+    mods
+    |> Array.fold
+        (fun acc m ->
+            match semanticTokenModifiers |> Array.tryFindIndex ((=) m) with
+            | Some idx -> acc ||| (1 <<< idx)
+            | None -> acc)
+        0
+
+/// Monaco's `SemanticTokens.data` is typed as a real `Uint32Array`, not a
+/// plain JS array - confirmed live: handing it a plain array (Fable's
+/// default `ResizeArray`/`uint32[]` compilation target) rendered only a
+/// handful of tokens seemingly at random rather than every token, instead of
+/// erroring outright, so this is easy to miss without checking the actual
+/// rendered decorations.
+let private toUint32Array (xs: uint32[]) : obj = emitJsExpr xs "new Uint32Array($0)"
+
 /// Wires hover, go-to-definition, completions, signature help,
 /// find-references, and the custom `moodev-verb://` URI opener into the
 /// given Monaco instance for the "moocode" language.
@@ -516,6 +546,8 @@ let wire
     let mutable definitionGen = 0
     let mutable completionGen = 0
     let mutable signatureHelpGen = 0
+    let mutable documentHighlightGen = 0
+    let mutable semanticTokensGen = 0
 
     let provideHover (_model: obj) (position: obj) : JS.Promise<obj> =
         hoverGen <- hoverGen + 1
@@ -589,6 +621,118 @@ let wire
                                       "endColumn" ==> endCol ] ]
         }
         |> Async.StartAsPromise
+
+    /// Every occurrence of the symbol under the cursor, scoped to the
+    /// currently-open verb only - always the same document as the request,
+    /// so unlike `provideDefinition` there's no cross-document branching,
+    /// every returned range just gets remapped through `currentDelta`
+    /// directly. Monaco's `DocumentHighlightKind.Text = 0` (confirmed
+    /// against `monaco-editor`'s own `editor.api.d.ts` - not assumed to
+    /// line up with the LSP spec's own enum the way `monacoCompletionKind`'s
+    /// own doc comment warns those two can diverge).
+    let provideDocumentHighlights (_model: obj) (position: obj) : JS.Promise<obj> =
+        documentHighlightGen <- documentHighlightGen + 1
+        let myGen = documentHighlightGen
+
+        async {
+            match getCurrentDocument () with
+            | None -> return null
+            | Some(objRef, verbName) ->
+                let currentDelta = getIndentDelta objRef verbName
+                let lspLine, lspCol = toRawPosition currentDelta (position?lineNumber: int) (position?column: int)
+
+                let! result = requestAsync "textDocument/documentHighlight" (textDocumentPositionParams objRef verbName lspLine lspCol)
+
+                if myGen <> documentHighlightGen then
+                    return null
+                elif isNullOrUndefined result then
+                    return null
+                else
+                    let items: obj[] = unbox result
+
+                    let monacoHighlights =
+                        items
+                        |> Array.map (fun h ->
+                            let range: obj = h?range
+                            let startLine, startCol = toDisplayedPosition currentDelta (range?start?line: int) (range?start?character: int)
+                            let endLine, endCol = toDisplayedPosition currentDelta (range?``end``?line: int) (range?``end``?character: int)
+
+                            createObj
+                                [ "range" ==>
+                                    createObj
+                                        [ "startLineNumber" ==> startLine
+                                          "startColumn" ==> startCol
+                                          "endLineNumber" ==> endLine
+                                          "endColumn" ==> endCol ]
+                                  "kind" ==> 0 ])
+
+                    return box monacoHighlights
+        }
+        |> Async.StartAsPromise
+
+    /// Resolver-driven semantic highlighting for the whole currently-open
+    /// verb (no position - `moodev/getSemanticTokens` classifies every
+    /// reference in one shot). The wire response is a plain flat array
+    /// (`Handlers.SemanticTokenEntry`, 0-based line/char, string token
+    /// type/modifiers), not the real LSP delta-encoded shape - this
+    /// function does both position remapping *and* the delta encoding
+    /// Monaco expects, locally: remap each entry's `(line, startChar)`
+    /// through `toDisplayedPosition currentDelta` (subtracting 1 back off
+    /// the 1-based Monaco result, since Monaco's own semantic-token `data`
+    /// array is 0-based like the LSP spec, unlike its position API), sort
+    /// by the *displayed* position (remapping can reorder tokens across a
+    /// reindented line), then delta-encode relative to the previous token.
+    let provideDocumentSemanticTokens (_model: obj) : JS.Promise<obj> =
+        semanticTokensGen <- semanticTokensGen + 1
+        let myGen = semanticTokensGen
+
+        let noTokens () = createObj [ "data" ==> toUint32Array [||] ]
+
+        async {
+            match getCurrentDocument () with
+            | None -> return noTokens ()
+            | Some(objRef, verbName) ->
+                let currentDelta = getIndentDelta objRef verbName
+
+                let! result = requestAsync "moodev/getSemanticTokens" (createObj [ "objRef" ==> float objRef; "verbName" ==> verbName ])
+
+                if myGen <> semanticTokensGen then
+                    return noTokens ()
+                elif isNullOrUndefined result then
+                    return noTokens ()
+                else
+                    let items: obj[] = unbox result
+
+                    let positioned =
+                        items
+                        |> Array.map (fun o ->
+                            let monacoLine, monacoCol = toDisplayedPosition currentDelta (o?line: int) (o?startChar: int)
+                            monacoLine - 1, monacoCol - 1, (o?length: int), (o?tokenType: string), (o?tokenModifiers: string[]))
+                        |> Array.sortBy (fun (line, col, _, _, _) -> line, col)
+
+                    let data = ResizeArray<uint32>()
+                    let mutable prevLine = 0
+                    let mutable prevCol = 0
+
+                    for line, col, length, tokenType, tokenModifiers in positioned do
+                        let deltaLine = line - prevLine
+                        let deltaCol = if deltaLine = 0 then col - prevCol else col
+
+                        data.Add(uint32 deltaLine)
+                        data.Add(uint32 deltaCol)
+                        data.Add(uint32 length)
+                        data.Add(uint32 (semanticTokenTypeIndex tokenType))
+                        data.Add(uint32 (semanticTokenModifiersBitmask tokenModifiers))
+
+                        prevLine <- line
+                        prevCol <- col
+
+                    return createObj [ "data" ==> toUint32Array (data.ToArray()) ]
+        }
+        |> Async.StartAsPromise
+
+    let getSemanticTokensLegend () : obj =
+        createObj [ "tokenTypes" ==> semanticTokenTypes; "tokenModifiers" ==> semanticTokenModifiers ]
 
     let provideCompletionItems (model: obj) (position: obj) : JS.Promise<obj> =
         completionGen <- completionGen + 1
@@ -778,6 +922,21 @@ let wire
     monaco?languages?registerDefinitionProvider (
         "moocode",
         createObj [ "provideDefinition" ==> System.Func<obj, obj, JS.Promise<obj>>(fun m p -> provideDefinition m p) ]
+    )
+    |> ignore
+
+    monaco?languages?registerDocumentHighlightProvider (
+        "moocode",
+        createObj [ "provideDocumentHighlights" ==> System.Func<obj, obj, JS.Promise<obj>>(fun m p -> provideDocumentHighlights m p) ]
+    )
+    |> ignore
+
+    monaco?languages?registerDocumentSemanticTokensProvider (
+        "moocode",
+        createObj
+            [ "getLegend" ==> System.Func<obj>(fun () -> getSemanticTokensLegend ())
+              "provideDocumentSemanticTokens" ==> System.Func<obj, obj, obj, JS.Promise<obj>>(fun m _lastResultId _tok -> provideDocumentSemanticTokens m)
+              "releaseDocumentSemanticTokens" ==> System.Action<obj>(fun _resultId -> ()) ]
     )
     |> ignore
 
