@@ -617,6 +617,18 @@ let private buildTryDispatch
 
                     do! IdeActions.renameVerb config session webSocket (getObj ()) (getStr "oldName") (getStr "newName") sites ct
                     return true
+                | "bulk-replace" ->
+                    let sites =
+                        root.GetProperty("sites").EnumerateArray()
+                        |> Seq.map (fun s ->
+                            s.GetProperty("objRef").GetInt64(),
+                            s.GetProperty("verbName").GetString(),
+                            s.GetProperty("line").GetInt32(),
+                            s.GetProperty("col").GetInt32())
+                        |> List.ofSeq
+
+                    do! IdeActions.bulkReplace config session webSocket (getStr "query") (getStr "replacement") sites ct
+                    return true
                 | "corponym-history" ->
                     do! IdeActions.corponymHistory config webSocket ct
                     return true

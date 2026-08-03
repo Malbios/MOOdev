@@ -76,10 +76,12 @@ let private viewServerStatusBtn = document.getElementById ("view-server-status")
 let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadCodeBtn = document.getElementById ("view-dead-code")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
+let private viewTodosBtn = document.getElementById ("view-todos")
 let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
 let private viewPropertySearchBtn = document.getElementById ("view-property-search")
+let private viewBulkReplaceBtn = document.getElementById ("view-bulk-replace")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -143,6 +145,16 @@ let private treeDeadCodeListEl = document.getElementById ("tree-dead-code-list")
 let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
 let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
 let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
+let private sidebarViewTodosEl = document.getElementById ("sidebar-view-todos")
+let private treeTodosSummaryEl = document.getElementById ("tree-todos-summary")
+let private treeTodosListEl = document.getElementById ("tree-todos-list")
+let private sidebarViewBulkReplaceEl = document.getElementById ("sidebar-view-bulk-replace")
+let private bulkReplaceSearchInputEl = document.getElementById ("bulk-replace-search-input") :?> HTMLInputElement
+let private bulkReplaceReplaceInputEl = document.getElementById ("bulk-replace-replace-input") :?> HTMLInputElement
+let private bulkReplaceSearchBtnEl = document.getElementById ("bulk-replace-search-btn")
+let private treeBulkReplaceSummaryEl = document.getElementById ("tree-bulk-replace-summary")
+let private treeBulkReplaceListEl = document.getElementById ("tree-bulk-replace-list")
+let private bulkReplaceApplyBtnEl = document.getElementById ("bulk-replace-apply-btn")
 let private sidebarViewPermissionRisksEl = document.getElementById ("sidebar-view-permission-risks")
 let private treePermissionRisksSummaryEl = document.getElementById ("tree-permission-risks-summary")
 let private treePermissionRisksListEl = document.getElementById ("tree-permission-risks-list")
@@ -601,6 +613,8 @@ type private SidebarView =
     | ErrorsView
     | DeadCodeView
     | GotchasView
+    | TodosView
+    | BulkReplaceView
     | PermissionRisksView
     | DocsView
     | EvalScratchpadView
@@ -767,6 +781,21 @@ let mutable private tabOrder: OpenTab list = []
 /// The tab currently mid-drag (`renderTabs`' drag-and-drop handlers), or
 /// `None` when nothing is being dragged.
 let mutable private draggedTab: OpenTab option = None
+
+/// The tree object currently mid-drag (`renderTreeRows`' drag-and-drop
+/// reparenting handlers), or `None` when nothing is being dragged. Same
+/// shape as `draggedTab` above, one level down.
+let mutable private draggedTreeObjRef: int64 option = None
+
+/// The Bulk Find-and-Replace view's own state: the search/replace terms the
+/// current result set was fetched with (threaded back through to the
+/// "bulk-replace" action on Apply, since a checkbox row itself only knows
+/// its own site, not the batch-wide query/replacement), and one checkbox
+/// per result row paired with the site it corresponds to, so Apply can read
+/// back exactly which rows are still checked without re-querying the DOM.
+let mutable private bulkReplaceQuery: string = ""
+let mutable private bulkReplaceReplacement: string = ""
+let mutable private bulkReplaceCheckboxes: (HTMLInputElement * (int64 * string * int * int)) list = []
 
 /// In-memory, session-only log of received `#0:handle_uncaught_error`/
 /// `handle_task_timeout` events - newest first. Not persisted; a page
@@ -1366,6 +1395,8 @@ let private allSidebarViews =
       sidebarViewErrorsEl
       sidebarViewDeadCodeEl
       sidebarViewGotchasEl
+      sidebarViewTodosEl
+      sidebarViewBulkReplaceEl
       sidebarViewPermissionRisksEl
       sidebarViewDocsEl
       sidebarViewScratchpadEl
@@ -4130,6 +4161,20 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderGotchasResults results
         }
         |> Async.StartImmediate
+    | TodosView ->
+        activateOnlySidebarView sidebarViewTodosEl
+        treeTodosSummaryEl.textContent <- "Scanning..."
+        treeTodosListEl.innerHTML <- ""
+
+        async {
+            let! results = LspClient.findTodosAsync ()
+            renderTodosResults results
+        }
+        |> Async.StartImmediate
+    | BulkReplaceView ->
+        // No auto-search on switch, unlike every other scan view here -
+        // there's no default query to run one against.
+        activateOnlySidebarView sidebarViewBulkReplaceEl
     | PermissionRisksView ->
         activateOnlySidebarView sidebarViewPermissionRisksEl
         treePermissionRisksSummaryEl.textContent <- "Scanning..."
@@ -4215,6 +4260,8 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewErrorsBtn, ErrorsView
           viewDeadCodeBtn, DeadCodeView
           viewGotchasBtn, GotchasView
+          viewTodosBtn, TodosView
+          viewBulkReplaceBtn, BulkReplaceView
           viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
           viewScratchpadBtn, EvalScratchpadView
@@ -4707,6 +4754,101 @@ and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
 
         treeGotchasListEl.appendChild li |> ignore
 
+/// Renders `moodev/findTodos`' results into the TODO/FIXME sidebar view -
+/// same flat-list shape as `renderGotchasResults`, one entry per hit,
+/// clickable straight through to the verb it was found in (no line-jump on
+/// click, matching the existing Dead Code/Gotchas convention - the line
+/// number is shown in the row label text instead).
+and private renderTodosResults (results: (int64 * string * int * string * string)[]) : unit =
+    treeTodosSummaryEl.textContent <-
+        if results.Length = 0 then
+            "No TODOs or FIXMEs found."
+        else
+            sprintf "%d item(s) found." results.Length
+
+    treeTodosListEl.innerHTML <- ""
+
+    for objRef, verbName, line, text, kind in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+        li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+        li.textContent <- sprintf "#%d:%s (line %d) [%s] %s" objRef verbName line kind text
+        treeTodosListEl.appendChild li |> ignore
+
+/// Renders `moodev/findTextOccurrences`' results into the Bulk
+/// Find-and-Replace sidebar view - grouped by owning object (same
+/// `picker-group-header`-per-object shape `renderDeadCodeResults` uses),
+/// each row a checkbox (default checked) plus an inline before/after
+/// preview of that one occurrence. Rebuilds `bulkReplaceCheckboxes` from
+/// scratch so `Apply` always reads back exactly what's currently rendered.
+and private renderBulkReplaceResults (results: (int64 * string * int * int * string)[]) (query: string) (replacement: string) : unit =
+    bulkReplaceCheckboxes <- []
+    treeBulkReplaceListEl.innerHTML <- ""
+
+    if results.Length = 0 then
+        treeBulkReplaceSummaryEl.textContent <- "No matches found."
+        bulkReplaceApplyBtnEl.setAttribute ("style", "display:none")
+    else
+        treeBulkReplaceSummaryEl.textContent <- sprintf "%d occurrence(s) found." results.Length
+        bulkReplaceApplyBtnEl.setAttribute ("style", "")
+
+        let objRefs = results |> Array.map (fun (o, _, _, _, _) -> o) |> Array.distinct |> Array.sort
+
+        for objRef in objRefs do
+            let objLabel = treeNodes |> Map.tryFind objRef |> Option.map (fun n -> n.Name) |> Option.defaultValue ""
+
+            let header = document.createElement ("li")
+            header.classList.add "picker-group-header"
+            header.textContent <- if objLabel = "" then sprintf "#%d" objRef else sprintf "#%d %s" objRef objLabel
+            treeBulkReplaceListEl.appendChild header |> ignore
+
+            for oRef, verbName, line, col, lineText in results do
+                if oRef = objRef then
+                    let li = document.createElement ("li")
+                    li.classList.add "picker-item"
+
+                    let checkbox = document.createElement ("input") :?> HTMLInputElement
+                    checkbox.setAttribute ("type", "checkbox")
+                    checkbox.``checked`` <- true
+                    li.appendChild checkbox |> ignore
+
+                    let label = document.createElement ("span")
+                    label.classList.add "inspector-link"
+                    label.onclick <- fun _ -> openOrSwitchToVerb oRef verbName
+
+                    // Slice the line around the match to build an inline
+                    // "prefix[match -> replacement]suffix" preview -
+                    // clamped to the line's own length in case the search
+                    // snapshot is stale by the time this renders.
+                    let prefixLen = min (col - 1) lineText.Length
+                    let matchEnd = min (prefixLen + query.Length) lineText.Length
+                    let prefix = lineText.Substring(0, prefixLen)
+                    let matched = lineText.Substring(prefixLen, matchEnd - prefixLen)
+                    let suffix = lineText.Substring(matchEnd)
+
+                    label.appendChild (document.createTextNode (sprintf "#%d:%s (line %d) " oRef verbName line)) |> ignore
+                    label.appendChild (document.createTextNode prefix) |> ignore
+
+                    let matchSpan = document.createElement ("span")
+                    matchSpan.classList.add "bulk-replace-match"
+                    matchSpan.textContent <- matched
+                    label.appendChild matchSpan |> ignore
+
+                    label.appendChild (document.createTextNode " → ") |> ignore
+
+                    let replSpan = document.createElement ("span")
+                    replSpan.classList.add "bulk-replace-replacement"
+                    replSpan.textContent <- replacement
+                    label.appendChild replSpan |> ignore
+
+                    label.appendChild (document.createTextNode suffix) |> ignore
+
+                    li.appendChild label |> ignore
+                    treeBulkReplaceListEl.appendChild li |> ignore
+
+                    bulkReplaceCheckboxes <- (checkbox, (oRef, verbName, line, col)) :: bulkReplaceCheckboxes
+
 /// Human-readable label for one of `Handlers.PermissionRiskEntry`'s
 /// plain-string `Kind` tags - same client-side-presentation reasoning as
 /// `gotchaKindLabel` above.
@@ -5123,6 +5265,56 @@ and private renderTreeRows (rows: TreeRow list) : unit =
 
                     renderTree ()
 
+            // Drag-to-reparent: dropping node A onto node B adds B as an
+            // additional parent of A (never replaces A's existing parents -
+            // MOO supports true multiple inheritance, and a drag gesture
+            // silently discarding every other parent would be a severe,
+            // surprising action for what looks like a lightweight gesture).
+            // Reuses the existing "+" parent-add action verbatim
+            // (`sendAction "add-parent"`, same call shape the inspector's
+            // own Parents-section "+" field already sends) - this is pure
+            // client-side drag/drop, no new Sidecar action needed.
+            li.setAttribute ("draggable", "true")
+
+            li.ondragstart <-
+                fun ev ->
+                    draggedTreeObjRef <- Some objRef
+                    ev.stopPropagation ()
+                    li.classList.add "dragging"
+
+            li.ondragover <-
+                fun ev ->
+                    match draggedTreeObjRef with
+                    | Some dragged when dragged <> objRef ->
+                        ev.preventDefault ()
+                        li.classList.add "tree-drop-target"
+                    | _ -> ()
+
+            li.ondragleave <- fun _ -> li.classList.remove "tree-drop-target"
+
+            li.ondrop <-
+                fun ev ->
+                    ev.preventDefault ()
+                    ev.stopPropagation ()
+                    li.classList.remove "tree-drop-target"
+
+                    match draggedTreeObjRef with
+                    | Some dragged when dragged <> objRef ->
+                        let nameOf (r: int64) =
+                            Map.tryFind r treeNodes |> Option.map (fun n -> n.Name) |> Option.defaultValue (sprintf "#%d" r)
+
+                        if window.confirm (sprintf "Add %s as a parent of %s?" (nameOf objRef) (nameOf dragged)) then
+                            sendAction [ "action" ==> "add-parent"; "obj" ==> int dragged; "parentExpr" ==> sprintf "#%d" objRef ]
+
+                        draggedTreeObjRef <- None
+                    | _ -> ()
+
+            li.ondragend <-
+                fun _ ->
+                    draggedTreeObjRef <- None
+                    li.classList.remove "dragging"
+                    li.classList.remove "tree-drop-target"
+
             treeListEl.appendChild li |> ignore
 
 /// Sets (or overwrites) the tree-color rule for `objRef` - called from its
@@ -5493,6 +5685,8 @@ viewServerStatusBtn.onclick <- fun _ -> onActivityBtnClick ServerStatusView
 viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
 viewDeadCodeBtn.onclick <- fun _ -> onActivityBtnClick DeadCodeView
 viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
+viewTodosBtn.onclick <- fun _ -> onActivityBtnClick TodosView
+viewBulkReplaceBtn.onclick <- fun _ -> onActivityBtnClick BulkReplaceView
 viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
@@ -5556,6 +5750,52 @@ let private runPropertySearch () : unit =
 
 propertySearchNameInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runPropertySearch ()
 propertySearchExprInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runPropertySearch ()
+
+/// Runs the Bulk Find-and-Replace view's search step
+/// (`moodev/findTextOccurrences`) against whatever's typed in the search
+/// box - the replace box's value is just carried alongside for the preview
+/// and the eventual Apply action, never itself required to be non-empty
+/// (replacing with nothing is a valid deletion).
+let private runBulkReplaceSearch () : unit =
+    let query = bulkReplaceSearchInputEl.value.Trim()
+    let replacement = bulkReplaceReplaceInputEl.value
+
+    if query <> "" then
+        bulkReplaceQuery <- query
+        bulkReplaceReplacement <- replacement
+        treeBulkReplaceSummaryEl.textContent <- "Searching..."
+        treeBulkReplaceListEl.innerHTML <- ""
+        bulkReplaceApplyBtnEl.setAttribute ("style", "display:none")
+
+        async {
+            let! results = LspClient.findTextOccurrencesAsync query
+            renderBulkReplaceResults results query replacement
+        }
+        |> Async.StartImmediate
+
+bulkReplaceSearchBtnEl.onclick <- fun _ -> runBulkReplaceSearch ()
+bulkReplaceSearchInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runBulkReplaceSearch ()
+bulkReplaceReplaceInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runBulkReplaceSearch ()
+
+// Applies every still-checked row's replacement in one batch
+// (`"bulk-replace"` Sidecar action) - confirms the count first, same
+// pattern `runRenameSymbolFlow` uses for its own batch apply.
+bulkReplaceApplyBtnEl.onclick <-
+    fun _ ->
+        let checkedSites = bulkReplaceCheckboxes |> List.filter (fun (cb, _) -> cb.``checked``) |> List.map snd
+
+        if not (List.isEmpty checkedSites) then
+            if window.confirm (sprintf "Apply %d replacement(s)? This edits verb source directly." checkedSites.Length) then
+                let sitesJson =
+                    checkedSites
+                    |> List.map (fun (objRef, verbName, line, col) ->
+                        createObj [ "objRef" ==> float objRef; "verbName" ==> verbName; "line" ==> line; "col" ==> col ])
+
+                sendAction
+                    [ "action" ==> "bulk-replace"
+                      "query" ==> bulkReplaceQuery
+                      "replacement" ==> bulkReplaceReplacement
+                      "sites" ==> sitesJson ]
 
 errorsClearBtn.onclick <-
     fun _ ->
@@ -6573,6 +6813,15 @@ onWsMessage <-
                         fetchVerb renameObjRef renameVerbName
                 else
                     window.alert ("Rename failed:\n" + String.concat "\n" lines)
+            elif header.StartsWith("moodev-bulk-replace-result") then
+                if not (Array.isEmpty lines) then
+                    window.alert ("Bulk replace finished, with warnings:\n" + String.concat "\n" lines)
+
+                // Blast radius isn't limited to whichever verb was open when
+                // Apply was clicked - refresh every currently open verb tab,
+                // same convention the rename flow above uses.
+                for replaceObjRef, replaceVerbName in openVerbTabs do
+                    fetchVerb replaceObjRef replaceVerbName
         else
             let text = decoder.decode (ev.data: obj)
             appendOutput text

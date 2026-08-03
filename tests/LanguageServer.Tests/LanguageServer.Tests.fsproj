@@ -20,6 +20,9 @@
     <Compile Include="MoocodeDocsTests.fs" />
     <Compile Include="DocumentHighlightTests.fs" />
     <Compile Include="SemanticTokensTests.fs" />
+    <Compile Include="TodoFinderTests.fs" />
+    <Compile Include="FoldingRangeTests.fs" />
+    <Compile Include="TextOccurrenceFinderTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

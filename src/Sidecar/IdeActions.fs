@@ -599,6 +599,89 @@ let renameVerb
             do! sendWire webSocket (sprintf "moodev-rename-result object: #%d ok: 1" objRef) diagnostics ct
     }
 
+/// `bulk-replace {query, replacement, sites}` - the apply step behind the
+/// "Bulk find-and-replace" sidebar view's confirm button. `sites` is
+/// `(objRef, verbName, line, col)`, exactly `moodev/findTextOccurrences`'
+/// own result shape (minus `LineText`, which the client only needed for its
+/// own preview) - the client forwards whichever checked rows survived, and
+/// `query`/`replacement` are constant for the whole batch (one "find X,
+/// replace with Y" operation applied to N occurrences, not a different
+/// replacement per site).
+///
+/// Unlike `renameVerb`'s per-site independent refetch-and-save (safe there
+/// because call sites are almost always one-per-line-per-verb), bulk
+/// replace routinely produces *multiple hits on the same line* (a common
+/// local variable name) - refetching and saving after every single site
+/// would silently invalidate later same-line column offsets whenever
+/// `replacement.Length <> query.Length`. Instead: group sites by `(objRef,
+/// verbName)`, fetch each verb's code once, apply every edit for that verb
+/// in one pass sorted by `(line desc, col desc)` (rightmost/lowest edits
+/// first, so every edit still lands against its original, untouched
+/// column), verifying the exact substring at each site still matches
+/// `query` (case-insensitive, matching the search step's own case
+/// convention) immediately before splicing - the same site-text-
+/// verification safety net `renameVerb` uses, against a stale search
+/// snapshot - then one `set_verb_code` + one `exportAndCommitObject` call
+/// per verb group, matching the established "one batch operation = one
+/// commit" convention.
+let bulkReplace
+    (config: Config)
+    (session: Session)
+    (webSocket: WebSocket)
+    (query: string)
+    (replacement: string)
+    (sites: (int64 * string * int * int) list)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let quote (s: string) = "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+        let queryLower = query.ToLowerInvariant()
+        let failures = ResizeArray<string>()
+
+        let groups = sites |> List.groupBy (fun (objRef, verbName, _, _) -> objRef, verbName)
+
+        for (objRef, verbName), groupSites in groups do
+            let o = sprintf "#%d" objRef
+            let verbLit = quote verbName
+
+            let fetchStatements =
+                resolveVerbIndexStatements o verbLit
+                + $""" code = (idx == 0) ? {{}} | verb_code({o}, idx, 0, 1);"""
+
+            let! codeJson = evalOnSession session fetchStatements "code" ct
+            let codeLines = codeJson.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> Array.ofSeq
+
+            let orderedSites = groupSites |> List.sortByDescending (fun (_, _, line, col) -> line, col)
+
+            for _, _, line, col in orderedSites do
+                if line < 1 || line > codeLines.Length then
+                    failures.Add(sprintf "#%d:%s - line %d out of range, skipped" objRef verbName line)
+                else
+                    let targetLine = codeLines.[line - 1]
+
+                    if col < 1 || col - 1 + query.Length > targetLine.Length || targetLine.Substring(col - 1, query.Length).ToLowerInvariant() <> queryLower then
+                        failures.Add(sprintf "#%d:%s - occurrence at line %d no longer matches, skipped" objRef verbName line)
+                    else
+                        codeLines.[line - 1] <- targetLine.Remove(col - 1, query.Length).Insert(col - 1, replacement)
+
+            let newCodeLiteral = "{" + (codeLines |> Array.map quote |> String.concat ", ") + "}"
+
+            let saveStatements =
+                resolveVerbIndexStatements o verbLit
+                + $""" errs = (idx == 0) ? {{"verb not found"}} | set_verb_code({o}, idx, {newCodeLiteral});"""
+
+            let! errsJson = evalOnSession session saveStatements "errs" ct
+            let errs = errsJson.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+
+            if errs.IsEmpty then
+                let! gitError = exportAndCommitObject config session objRef verbName GitStore.Modified true ct
+                gitError |> Option.iter (fun m -> failures.Add(sprintf "#%d:%s - saved, but git commit failed: %s" objRef verbName m))
+            else
+                failures.Add(sprintf "#%d:%s - %s" objRef verbName (String.concat "; " errs))
+
+        do! sendWire webSocket "moodev-bulk-replace-result ok: 1" (List.ofSeq failures) ct
+    }
+
 /// `ide_get_properties(objRef)` replacement. `properties(obj)` already
 /// only lists properties *defined* on `obj` (confirmed against
 /// `property.cc:bf_properties`, see `Importer.fs`'s own note on this) -
