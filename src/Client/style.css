@@ -772,6 +772,33 @@ html, body {
   margin-bottom: 0.6em;
 }
 
+.dashboard-summary {
+  color: #999;
+  margin-bottom: 0.6em;
+  padding: 0 0.2em;
+}
+
+.verb-metrics-sortable-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.verb-metrics-sortable-header:hover {
+  color: #6cf;
+}
+
+.env-doctor-ok {
+  color: #6c6;
+}
+
+.env-doctor-fail {
+  color: #e55;
+}
+
+.env-doctor-warn {
+  color: #e2a03f;
+}
+
 /* --- Permission risks view ---------------------------------------------- */
 
 #sidebar-view-permission-risks {

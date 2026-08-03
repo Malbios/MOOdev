@@ -167,6 +167,15 @@ let private watchAddInputEl = document.getElementById ("watch-add-input") :?> HT
 let private watchListEl = document.getElementById ("watch-list")
 let private viewInheritanceGraphBtn = document.getElementById ("view-inheritance-graph")
 let private sidebarViewInheritanceGraphEl = document.getElementById ("sidebar-view-inheritance-graph")
+let private viewVerbMetricsBtn = document.getElementById ("view-verb-metrics")
+let private sidebarViewVerbMetricsEl = document.getElementById ("sidebar-view-verb-metrics")
+let private viewEnvDoctorBtn = document.getElementById ("view-env-doctor")
+let private sidebarViewEnvDoctorEl = document.getElementById ("sidebar-view-env-doctor")
+let private envDoctorSummaryEl = document.getElementById ("env-doctor-summary")
+let private envDoctorListEl = document.getElementById ("env-doctor-list")
+let private viewWorldHealthBtn = document.getElementById ("view-world-health")
+let private sidebarViewWorldHealthEl = document.getElementById ("sidebar-view-world-health")
+let private worldHealthListEl = document.getElementById ("world-health-list")
 
 /// Carries the active ANSI style and any not-yet-complete escape sequence
 /// bytes across calls - a single WebSocket frame can split a sequence in
@@ -603,6 +612,9 @@ type private SidebarView =
     | PropertySearchView
     | WatchView
     | InheritanceGraphView
+    | VerbMetricsView
+    | EnvDoctorView
+    | WorldHealthView
 
 let mutable private activeSidebarView: SidebarView = TreeView
 
@@ -1109,6 +1121,24 @@ let private stopWatchInterval () : unit =
     watchIntervalId |> Option.iter JS.clearInterval
     watchIntervalId <- None
 
+/// One sortable column of the "Verb complexity size metrics dashboard" -
+/// see `renderVerbMetricsTable` (part of the big mutually-recursive render
+/// chain below, so it needs this type declared ahead of it, same reasoning
+/// `SidebarView` itself is declared as a standalone type rather than folded
+/// into that chain).
+type private VerbMetricsColumn =
+    | VMVerb
+    | VMObject
+    | VMLines
+    | VMCalls
+    | VMDepth
+
+/// The last-fetched metrics + current sort state, cached at module scope so
+/// clicking a column header can re-sort without a round trip.
+let mutable private verbMetricsData: (int64 * string * int * int * int)[] = [||]
+let mutable private verbMetricsSortColumn: VerbMetricsColumn = VMLines
+let mutable private verbMetricsSortDescending: bool = true
+
 // Wired here rather than alongside the tree-filter-settings popover wiring
 // above (which is plain top-level code that runs before `sendAction` itself
 // is even defined) - F# requires a name to be lexically defined before use
@@ -1347,7 +1377,10 @@ let private allSidebarViews =
       sidebarViewScratchpadEl
       sidebarViewPropertySearchEl
       sidebarViewWatchEl
-      sidebarViewInheritanceGraphEl ]
+      sidebarViewInheritanceGraphEl
+      sidebarViewVerbMetricsEl
+      sidebarViewEnvDoctorEl
+      sidebarViewWorldHealthEl ]
 
 let private activateOnlySidebarView (viewEl: HTMLElement) : unit =
     for v in allSidebarViews do
@@ -2843,6 +2876,97 @@ and private renderInheritanceGraphView () : unit =
         placeholder.textContent <- "Open an object's inspector to see its inheritance graph."
         sidebarViewInheritanceGraphEl.appendChild placeholder |> ignore
 
+/// Renders `verbMetricsData` (already fetched, cached at module scope so a
+/// column-header click can re-sort without a round trip) into a real
+/// sortable `<table>` - the first genuinely new table shape in this file;
+/// every other multi-column table (`propsTable`/`verbsTable` in the
+/// inspector) is read-only with no header interaction. Clicking a header
+/// toggles ascending/descending if it's already the active sort column, or
+/// switches to that column (descending first - "worst offenders on top" is
+/// the useful default for a hotspot report) otherwise.
+and private renderVerbMetricsTable () : unit =
+    sidebarViewVerbMetricsEl.innerHTML <- ""
+
+    let summary = document.createElement ("div")
+    summary.classList.add "dashboard-summary"
+    summary.textContent <- if verbMetricsData.Length = 0 then "No verbs found." else sprintf "%d verb(s)." verbMetricsData.Length
+    sidebarViewVerbMetricsEl.appendChild summary |> ignore
+
+    if verbMetricsData.Length > 0 then
+        let sortedAscending =
+            match verbMetricsSortColumn with
+            | VMVerb -> verbMetricsData |> Array.sortBy (fun (_, v, _, _, _) -> v)
+            | VMObject -> verbMetricsData |> Array.sortBy (fun (o, _, _, _, _) -> o)
+            | VMLines -> verbMetricsData |> Array.sortBy (fun (_, _, l, _, _) -> l)
+            | VMCalls -> verbMetricsData |> Array.sortBy (fun (_, _, _, c, _) -> c)
+            | VMDepth -> verbMetricsData |> Array.sortBy (fun (_, _, _, _, d) -> d)
+
+        let sorted = if verbMetricsSortDescending then Array.rev sortedAscending else sortedAscending
+
+        let table = document.createElement ("table")
+        table.classList.add "inspector-table"
+
+        let thead = document.createElement ("thead")
+        let headerRow = document.createElement ("tr")
+
+        let columnLabel =
+            function
+            | VMVerb -> "Verb"
+            | VMObject -> "Object"
+            | VMLines -> "Lines"
+            | VMCalls -> "Calls"
+            | VMDepth -> "Max depth"
+
+        for col in [ VMVerb; VMObject; VMLines; VMCalls; VMDepth ] do
+            let th = document.createElement ("th")
+            th.classList.add "verb-metrics-sortable-header"
+
+            let arrow =
+                if col = verbMetricsSortColumn then
+                    (if verbMetricsSortDescending then " ▼" else " ▲")
+                else
+                    ""
+
+            th.textContent <- columnLabel col + arrow
+
+            th.onclick <-
+                fun _ ->
+                    if verbMetricsSortColumn = col then
+                        verbMetricsSortDescending <- not verbMetricsSortDescending
+                    else
+                        verbMetricsSortColumn <- col
+                        verbMetricsSortDescending <- true
+
+                    renderVerbMetricsTable ()
+
+            headerRow.appendChild th |> ignore
+
+        thead.appendChild headerRow |> ignore
+        table.appendChild thead |> ignore
+
+        let tbody = document.createElement ("tbody")
+
+        for objRef, verbName, lineCount, callCount, maxDepth in sorted do
+            let tr = document.createElement ("tr")
+            tr.classList.add "inspector-verb-row"
+            tr.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+
+            let mkCell (text: string) =
+                let td = document.createElement ("td")
+                td.textContent <- text
+                tr.appendChild td |> ignore
+
+            mkCell verbName
+            mkCell (sprintf "#%d" objRef)
+            mkCell (string lineCount)
+            mkCell (string callCount)
+            mkCell (string maxDepth)
+
+            tbody.appendChild tr |> ignore
+
+        table.appendChild tbody |> ignore
+        sidebarViewVerbMetricsEl.appendChild table |> ignore
+
 /// Builds the inspector pane's DOM from a `moodev/getObjectInfo` result:
 /// header, a clickable owner link, permission-flag badges, clickable
 /// parents/children lists, a read-only verbs table, and a properties table
@@ -4048,6 +4172,41 @@ and private switchToSidebarView (view: SidebarView) : unit =
     | InheritanceGraphView ->
         activateOnlySidebarView sidebarViewInheritanceGraphEl
         renderInheritanceGraphView ()
+    | VerbMetricsView ->
+        activateOnlySidebarView sidebarViewVerbMetricsEl
+        sidebarViewVerbMetricsEl.innerHTML <- "Scanning..."
+
+        async {
+            let! results = LspClient.getVerbMetricsAsync ()
+            verbMetricsData <- results
+            renderVerbMetricsTable ()
+        }
+        |> Async.StartImmediate
+    | EnvDoctorView ->
+        activateOnlySidebarView sidebarViewEnvDoctorEl
+        if isLoggedIn then loadEnvDoctor () else (envDoctorListEl.innerHTML <- ""; envDoctorSummaryEl.textContent <- "")
+    | WorldHealthView ->
+        activateOnlySidebarView sidebarViewWorldHealthEl
+        worldHealthListEl.innerHTML <- "Scanning..."
+
+        // Four independent LSP requests with nothing to share between them -
+        // `Async.StartChild` starts each immediately so they run concurrently,
+        // then this awaits all four (plain `Async.Parallel` needs a
+        // homogeneous array, which these four different result types aren't).
+        async {
+            let! deadVerbsChild = Async.StartChild(LspClient.findDeadVerbsAsync ())
+            let! deadPropertiesChild = Async.StartChild(LspClient.findDeadPropertiesAsync ())
+            let! permissionRisksChild = Async.StartChild(LspClient.findPermissionRisksAsync ())
+            let! gotchasChild = Async.StartChild(LspClient.findGotchasAsync ())
+
+            let! deadVerbs = deadVerbsChild
+            let! deadProperties = deadPropertiesChild
+            let! permissionRisks = permissionRisksChild
+            let! gotchas = gotchasChild
+
+            renderWorldHealthResults deadVerbs deadProperties permissionRisks gotchas
+        }
+        |> Async.StartImmediate
 
     for btn, v in
         [ viewTreeBtn, TreeView
@@ -4063,7 +4222,10 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewScratchpadBtn, EvalScratchpadView
           viewPropertySearchBtn, PropertySearchView
           viewWatchBtn, WatchView
-          viewInheritanceGraphBtn, InheritanceGraphView ] do
+          viewInheritanceGraphBtn, InheritanceGraphView
+          viewVerbMetricsBtn, VerbMetricsView
+          viewEnvDoctorBtn, EnvDoctorView
+          viewWorldHealthBtn, WorldHealthView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
@@ -4307,6 +4469,88 @@ and private renderServerStatusResults (listeners: (int64 * int64 * string * bool
             li.appendChild ownerLink |> ignore
 
             serverStatusListEl.appendChild li |> ignore
+
+and private loadEnvDoctor () : unit =
+    envDoctorListEl.innerHTML <- ""
+    envDoctorSummaryEl.textContent <- "Checking..."
+    sendAction [ "action" ==> "env-doctor-check" ]
+
+/// Renders `env-doctor-check`'s results (`IdeActions.envDoctorCheck`) -
+/// one row per bootstrap-prerequisite check, three-state (`ok`: 1 = pass,
+/// 0 = fail, 2 = warn/optional-missing). No click-through target - these
+/// are facts about `#0`/the LSP-bridge listener, not object/verb
+/// references to navigate to.
+and private renderEnvDoctorResults (results: (string * int * string) list) : unit =
+    envDoctorListEl.innerHTML <- ""
+
+    let failCount = results |> List.filter (fun (_, ok, _) -> ok = 0) |> List.length
+    let warnCount = results |> List.filter (fun (_, ok, _) -> ok = 2) |> List.length
+
+    envDoctorSummaryEl.textContent <-
+        if failCount = 0 && warnCount = 0 then
+            sprintf "All %d check(s) passed." results.Length
+        else
+            sprintf "%d check(s): %d failed, %d warning(s)." results.Length failCount warnCount
+
+    for name, ok, detail in results do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add (if ok = 1 then "env-doctor-ok" elif ok = 0 then "env-doctor-fail" else "env-doctor-warn")
+
+        let icon = if ok = 1 then "✓" elif ok = 0 then "✗" else "⚠"
+        let label = document.createElement ("span")
+        label.textContent <- sprintf "%s %s - %s" icon name detail
+        li.appendChild label |> ignore
+
+        envDoctorListEl.appendChild li |> ignore
+
+/// Renders the World-health scorecard - five counts aggregated from four
+/// already-shipped corpus-wide scans, no new detection logic. The two
+/// `findGotchas` rows are subsets of `gotchas` filtered by `Kind`
+/// (`gotchaKindLabel` has the matching display strings for these same
+/// literal tags) - the other four Kinds it can return
+/// (`missing-x-bit`/`unbounded-loop`/`zero-index`/`arg-shape-mismatch`)
+/// aren't part of this scorecard's five named checks and are deliberately
+/// left uncounted here (the Gotchas panel itself already covers them).
+/// Each row clicks through to its own full panel via `switchToSidebarView`
+/// directly, not `onActivityBtnClick` - the sidebar is already open while
+/// viewing this panel, so there's no collapsed state to also toggle.
+and private renderWorldHealthResults
+    (deadVerbs: (int64 * string * string * string * string * bool)[])
+    (deadProperties: (int64 * string * bool)[])
+    (permissionRisks: (int64 * string * string)[])
+    (gotchas: (int64 * string * string)[])
+    : unit =
+    worldHealthListEl.innerHTML <- ""
+
+    let inheritanceCycleCount =
+        gotchas
+        |> Array.filter (fun (_, _, kind) -> kind = "inheritance-cycle" || kind = "diamond-verb-ambiguity")
+        |> Array.length
+
+    let verbSignatureCount =
+        gotchas
+        |> Array.filter (fun (_, _, kind) -> kind = "verb-argspec-mismatch" || kind = "verb-return-mismatch")
+        |> Array.length
+
+    let rows =
+        [ "Dead verbs", deadVerbs.Length, DeadVerbsView
+          "Dead properties", deadProperties.Length, DeadPropertiesView
+          "Permission risks", permissionRisks.Length, PermissionRisksView
+          "Circular inheritance", inheritanceCycleCount, GotchasView
+          "Verb signature consistency", verbSignatureCount, GotchasView ]
+
+    for label, count, view in rows do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add (if count = 0 then "env-doctor-ok" else "env-doctor-warn")
+        li.onclick <- fun _ -> switchToSidebarView view
+
+        let labelSpan = document.createElement ("span")
+        labelSpan.textContent <- sprintf "%s: %d" label count
+        li.appendChild labelSpan |> ignore
+
+        worldHealthListEl.appendChild li |> ignore
 
 /// Rebuilds the Errors view's list from `errorLog`. Traceback lines are
 /// plain text, not structured per-frame data yet - no click-to-jump in this
@@ -5237,6 +5481,9 @@ viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
 viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
 viewWatchBtn.onclick <- fun _ -> onActivityBtnClick WatchView
 viewInheritanceGraphBtn.onclick <- fun _ -> onActivityBtnClick InheritanceGraphView
+viewVerbMetricsBtn.onclick <- fun _ -> onActivityBtnClick VerbMetricsView
+viewEnvDoctorBtn.onclick <- fun _ -> onActivityBtnClick EnvDoctorView
+viewWorldHealthBtn.onclick <- fun _ -> onActivityBtnClick WorldHealthView
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
@@ -6210,6 +6457,16 @@ onWsMessage <-
                         |> List.ofArray
 
                     renderServerStatusResults listeners
+            elif header.StartsWith("moodev-env-doctor-result") then
+                if activeSidebarView = EnvDoctorView then
+                    let results =
+                        lines
+                        |> Array.map (fun line ->
+                            let o: obj = JS.JSON.parse line
+                            (o?name: string), int (o?ok: float), (o?detail: string))
+                        |> List.ofArray
+
+                    renderEnvDoctorResults results
             elif header.StartsWith("moodev-kill-task-result") then
                 let ok = headerField "ok: " header = Some "1"
 
