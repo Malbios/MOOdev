@@ -511,6 +511,47 @@ let renderVerbFile (selfRefText: string) (v: VerbExport) : string =
 // Orchestration.
 // ---------------------------------------------------------------------------
 
+/// Wall-clock cap on a single eval round trip, applied uniformly to every
+/// `evalRunner` call `exportTree` makes below (the corponym/builtins
+/// queries, each per-object fetch, each anon-verb scan chunk). Without this,
+/// a MOO-side task that never notify()s its tagged response back - hits
+/// ToastStunt's own foreground task time/tick limit on an unusually large
+/// object, or (confirmed live against a large real-world db running under
+/// WSL2) sits idle long enough for the WSL2 NAT to silently drop the TCP
+/// mapping with no FIN/RST ever reaching the Windows side - leaves
+/// `MooEval.readTaggedLine`'s blocking socket read waiting forever: no
+/// exception, no output, indistinguishable from the exporter still working.
+/// This turns that into a clear, bounded failure instead.
+let private evalTimeout = TimeSpan.FromSeconds(90.0)
+
+/// Wraps `inner` so every call races against `evalTimeout`, throwing
+/// `TimeoutException` on expiry instead of hanging. The timeout token is
+/// linked to (not a replacement for) the caller's own `ct`, so external
+/// cancellation still works exactly as before - the `when` guard tells a
+/// genuine caller-driven cancellation apart from our own `CancelAfter` and
+/// re-raises that as-is rather than mislabeling it a timeout.
+///
+/// Safe to keep using the same connection for the next call after a
+/// timeout: cancelling `NetworkStream.ReadAsync` genuinely aborts that
+/// pending read at the socket layer (a real .NET guarantee, not just
+/// "stop waiting and leave it running in the background"), and every
+/// response is tagged with a unique, never-reused sentinel
+/// (`MooEval.nextTag`) - so if the timed-out MOO task somehow still
+/// notify()s its stale response later, the next call's own read just
+/// discards it as an unrecognized line, per `MooEval.readTaggedLine`'s
+/// existing behavior.
+let private withEvalTimeout (inner: EvalRunner) : EvalRunner =
+    fun statements resultExpr ct ->
+        task {
+            use cts = CancellationTokenSource.CreateLinkedTokenSource(ct)
+            cts.CancelAfter(evalTimeout)
+
+            try
+                return! inner statements resultExpr cts.Token
+            with :? OperationCanceledException when not ct.IsCancellationRequested ->
+                return raise (TimeoutException(sprintf "timed out after %gs" evalTimeout.TotalSeconds))
+        }
+
 /// Walks every corponym, fetches its object's export data, and writes the
 /// full tree to `outputDir`. Overwrites whatever's already there - callers
 /// that want a clean tree should clear `outputDir` first (the round-trip
@@ -520,7 +561,7 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         Directory.CreateDirectory(outputDir) |> ignore
         File.WriteAllText(Path.Combine(outputDir, "FORMAT_VERSION"), "1\n")
 
-        let evalRunner = MooEval.runAndAwaitJson conn
+        let evalRunner = MooEval.runAndAwaitJson conn |> withEvalTimeout
         let! corponymsByObjnum = getCorponyms evalRunner ct
         let corponymList = corponymsByObjnum |> Map.toList |> List.map (fun (n, name) -> name, n)
 
@@ -544,25 +585,29 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
             // a laggy connection), the last line on screen still names what's
             // currently in flight instead of going silent until it returns.
             printfn "[%d/%d] %s (#%d)..." (i + 1) totalCorponyms name objRef
-            let! dataOpt = getObjectExport evalRunner objRef ct
 
-            match dataOpt with
-            | None ->
-                eprintfn "Skipping %s (#%d): corponym points at an invalid object" name objRef
-            | Some data ->
-                let objDir = Path.Combine(outputDir, "objects", name)
-                let verbsDir = Path.Combine(objDir, "verbs")
-                Directory.CreateDirectory(verbsDir) |> ignore
+            try
+                let! dataOpt = getObjectExport evalRunner objRef ct
 
-                let verbFileNames = assignVerbFileNames data.Verbs
+                match dataOpt with
+                | None ->
+                    eprintfn "Skipping %s (#%d): corponym points at an invalid object" name objRef
+                | Some data ->
+                    let objDir = Path.Combine(outputDir, "objects", name)
+                    let verbsDir = Path.Combine(objDir, "verbs")
+                    Directory.CreateDirectory(verbsDir) |> ignore
 
-                File.WriteAllText(
-                    Path.Combine(objDir, "object.moo"),
-                    renderObjectMoo corponymsByObjnum ("$" + name) data verbFileNames
-                )
+                    let verbFileNames = assignVerbFileNames data.Verbs
 
-                for verb, fileName in verbFileNames do
-                    File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
+                    File.WriteAllText(
+                        Path.Combine(objDir, "object.moo"),
+                        renderObjectMoo corponymsByObjnum ("$" + name) data verbFileNames
+                    )
+
+                    for verb, fileName in verbFileNames do
+                        File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
+            with :? TimeoutException as ex ->
+                eprintfn "Skipping %s (#%d): %s - continuing with the rest of the export" name objRef ex.Message
 
         // FORMAT.md §1's one exception: #0 (System Object) always gets a
         // directory even without a corponym of its own to be discovered by
@@ -575,21 +620,24 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         // here would just duplicate every verb/property under a second,
         // redundant `objects/0/` directory.
         if not (Map.containsKey 0L corponymsByObjnum) then
-            let! systemObjectData = getObjectExport evalRunner 0L ct
+            try
+                let! systemObjectData = getObjectExport evalRunner 0L ct
 
-            match systemObjectData with
-            | None -> eprintfn "Skipping #0: object.moo export query failed"
-            | Some data ->
-                let objDir = Path.Combine(outputDir, "objects", "0")
-                let verbsDir = Path.Combine(objDir, "verbs")
-                Directory.CreateDirectory(verbsDir) |> ignore
+                match systemObjectData with
+                | None -> eprintfn "Skipping #0: object.moo export query failed"
+                | Some data ->
+                    let objDir = Path.Combine(outputDir, "objects", "0")
+                    let verbsDir = Path.Combine(objDir, "verbs")
+                    Directory.CreateDirectory(verbsDir) |> ignore
 
-                let verbFileNames = assignVerbFileNames data.Verbs
+                    let verbFileNames = assignVerbFileNames data.Verbs
 
-                File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "#0" data verbFileNames)
+                    File.WriteAllText(Path.Combine(objDir, "object.moo"), renderObjectMoo corponymsByObjnum "#0" data verbFileNames)
 
-                for verb, fileName in verbFileNames do
-                    File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
+                    for verb, fileName in verbFileNames do
+                        File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile "#0" verb)
+            with :? TimeoutException as ex ->
+                eprintfn "Skipping #0: %s" ex.Message
 
         // Non-corified verb capture tier: objects with no corponym can still
         // carry real, directly-defined verb code (a one-off override nobody
@@ -610,8 +658,13 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
             // Announced before the round trip - see the corponym loop above
             // for why.
             printfn "Scanning #%d..#%d/#%d for non-corified verbs..." chunkLo chunkHi maxObj
-            let! chunkResults = getAnonVerbs evalRunner corponymObjnums chunkLo chunkHi ct
-            anonVerbsByObjnum.AddRange(chunkResults)
+
+            try
+                let! chunkResults = getAnonVerbs evalRunner corponymObjnums chunkLo chunkHi ct
+                anonVerbsByObjnum.AddRange(chunkResults)
+            with :? TimeoutException as ex ->
+                eprintfn "Skipping #%d..#%d: %s - continuing with the rest of the scan" chunkLo chunkHi ex.Message
+
             chunkLo <- chunkHi + 1L
 
         for objnum, verbs in anonVerbsByObjnum do
