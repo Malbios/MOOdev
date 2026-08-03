@@ -16,6 +16,7 @@
     <Compile Include="PermissionRiskFinderTests.fs" />
     <Compile Include="CallGraphTests.fs" />
     <Compile Include="VerbSummaryTests.fs" />
+    <Compile Include="VerbMetricsTests.fs" />
   </ItemGroup>
 
   <ItemGroup>

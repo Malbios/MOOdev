@@ -21,7 +21,12 @@ type Config =
     { TreeDir: string
       SessionId: string
       GitAuthorName: string
-      GitAuthorEmail: string }
+      GitAuthorEmail: string
+      /// The target's own LSP-bridge port (`Moo:LspBridgePort`) - only
+      /// `envDoctorCheck` reads this today, to confirm the dedicated
+      /// listener is actually bound (`listen()` doesn't persist across a
+      /// MOO restart, so this must always be a live check).
+      LspBridgePort: int }
 
 /// Not `private` - `Program.fs`'s `"get-moo-target"`/`"reconfigure-target"`
 /// actions send responses this same way but don't operate on a live MOO
@@ -1795,6 +1800,118 @@ result = out;"""
             |> List.ofSeq
 
         do! sendWire webSocket "moodev-server-status" lines ct
+    }
+
+/// The "Environment doctor health check" - turns the bootstrap
+/// prerequisites MOOdy's own CLAUDE.md documents (and has repeatedly
+/// bitten real sessions on) into one live, one-round-trip check. Every
+/// check here is a genuinely live MOO fact, not something the exported
+/// tree could ever answer: `#0` carries no corponym (never appears in the
+/// exported tree at all), and `listen()` doesn't persist across a server
+/// restart - so none of this could be a `findGotchas`-style static check
+/// over `Graph`, only a live eval, same shape as `getServerStatus` above.
+///
+/// Each row's `ok` is three-state, not boolean: `1` = pass, `0` = fail,
+/// `2` = warn (an optional verb - `do_start_script`/`handle_uncaught_error`/
+/// `handle_task_timeout` - simply isn't present; a real gap for the
+/// features that depend on it, but not the load-bearing kind of failure
+/// `#0` missing its wizard/programmer flags is).
+///
+/// `verb_code()` throwing `E_VERBNF` for a nonexistent verb (confirmed
+/// against `ToastStunt/src/verbs.cc`'s `bf_verb_code`, same error
+/// `verb_info()` throws) is what every existence check below is built on.
+let envDoctorCheck (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
+    task {
+        let statements =
+            $$"""checks = {};
+if (#0.wizard == 1 && #0.programmer == 1)
+  checks = {@checks, ["name" -> "#0 has wizard+programmer flags", "ok" -> 1, "detail" -> "wizard=1 programmer=1"]};
+else
+  checks = {@checks, ["name" -> "#0 has wizard+programmer flags", "ok" -> 0, "detail" -> ("wizard=" + tostr(#0.wizard) + " programmer=" + tostr(#0.programmer))]};
+endif
+try
+  ucCode = verb_code(#0, "user_connected");
+  hasHook = 0;
+  for line in (ucCode)
+    if (index(line, "#$#moodev-login-result") != 0)
+      hasHook = 1;
+    endif
+  endfor
+  if (hasHook)
+    checks = {@checks, ["name" -> "#0:user_connected has the moodev login hook", "ok" -> 1, "detail" -> "found"]};
+  else
+    checks = {@checks, ["name" -> "#0:user_connected has the moodev login hook", "ok" -> 0, "detail" -> "verb exists, but the #$#moodev-login-result notify lines are missing"]};
+  endif
+except (E_VERBNF)
+  checks = {@checks, ["name" -> "#0:user_connected has the moodev login hook", "ok" -> 0, "detail" -> "verb does not exist"]};
+endtry
+try
+  verb_code(#0, "do_command");
+  checks = {@checks, ["name" -> "#0:do_command exists", "ok" -> 1, "detail" -> "found"]};
+except (E_VERBNF)
+  checks = {@checks, ["name" -> "#0:do_command exists", "ok" -> 0, "detail" -> "verb does not exist - the ;;-eval transport will hang"]};
+endtry
+try
+  verb_code(#0, "do_start_script");
+  checks = {@checks, ["name" -> "#0:do_start_script exists (optional)", "ok" -> 1, "detail" -> "found"]};
+except (E_VERBNF)
+  checks = {@checks, ["name" -> "#0:do_start_script exists (optional)", "ok" -> 2, "detail" -> "not present - only needed for a -f bootstrap.moo startup"]};
+endtry
+try
+  verb_code(#0, "handle_uncaught_error");
+  checks = {@checks, ["name" -> "#0:handle_uncaught_error exists (optional)", "ok" -> 1, "detail" -> "found"]};
+except (E_VERBNF)
+  checks = {@checks, ["name" -> "#0:handle_uncaught_error exists (optional)", "ok" -> 2, "detail" -> "not present - the Errors tab will not populate for uncaught errors"]};
+endtry
+try
+  verb_code(#0, "handle_task_timeout");
+  checks = {@checks, ["name" -> "#0:handle_task_timeout exists (optional)", "ok" -> 1, "detail" -> "found"]};
+except (E_VERBNF)
+  checks = {@checks, ["name" -> "#0:handle_task_timeout exists (optional)", "ok" -> 2, "detail" -> "not present - the Errors tab will not populate for task timeouts"]};
+endtry
+lspBridgeFound = 0;
+lspListenerObj = #-1;
+for l in (listeners())
+  if (l["port"] == {{config.LspBridgePort}})
+    lspBridgeFound = 1;
+    lspListenerObj = l["object"];
+  endif
+endfor
+if (lspBridgeFound)
+  checks = {@checks, ["name" -> "LSP-bridge listener bound on port {{config.LspBridgePort}}", "ok" -> 1, "detail" -> ("bound to " + tostr(lspListenerObj))]};
+else
+  checks = {@checks, ["name" -> "LSP-bridge listener bound on port {{config.LspBridgePort}}", "ok" -> 0, "detail" -> "not bound - listen() doesn't persist across a restart, must be re-bound every launch"]};
+endif
+if (lspBridgeFound)
+  try
+    verb_code(lspListenerObj, "do_login_command");
+    checks = {@checks, ["name" -> "LSP-bridge listener has do_login_command", "ok" -> 1, "detail" -> ("found on " + tostr(lspListenerObj))]};
+  except (E_VERBNF)
+    checks = {@checks, ["name" -> "LSP-bridge listener has do_login_command", "ok" -> 0, "detail" -> ("missing on " + tostr(lspListenerObj))]};
+  endtry
+  try
+    verb_code(lspListenerObj, "do_command");
+    checks = {@checks, ["name" -> "LSP-bridge listener has do_command", "ok" -> 1, "detail" -> ("found on " + tostr(lspListenerObj))]};
+  except (E_VERBNF)
+    checks = {@checks, ["name" -> "LSP-bridge listener has do_command", "ok" -> 0, "detail" -> ("missing on " + tostr(lspListenerObj))]};
+  endtry
+endif
+result = checks;"""
+
+        let! json = evalOnSession session statements "result" ct
+        let root = json.RootElement
+
+        let lines =
+            root.EnumerateArray()
+            |> Seq.map (fun c ->
+                JsonSerializer.Serialize(
+                    {| name = c.GetProperty("name").GetString()
+                       ok = c.GetProperty("ok").GetInt32()
+                       detail = c.GetProperty("detail").GetString() |}
+                ))
+            |> List.ofSeq
+
+        do! sendWire webSocket "moodev-env-doctor-result" lines ct
     }
 
 type PropertyLiteralParse =

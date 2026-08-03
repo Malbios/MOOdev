@@ -618,8 +618,9 @@ let private computeReferenceResolution (graph: Graph) : System.Collections.Gener
 /// above, which resolves the identical call sites but only keeps the target
 /// side (folded into a flat set) since dead-verb/gotcha detection never
 /// needed the caller side retained. `getCallGraph` needs both ends kept as
-/// real edges instead.
-type private CallEdge =
+/// real edges instead. Not `private` - see `allCallEdges`'s own comment on
+/// why the function itself needs to be public now too.
+type CallEdge =
     { ContainingObj: ObjRef
       ContainingVerbName: string
       TargetObj: ObjRef
@@ -628,8 +629,11 @@ type private CallEdge =
 /// Every `allVerbCallReferences` call site that resolves to a real callable
 /// target, kept as a full `(caller -> callee)` edge - same resolve-callee
 /// pattern `computeReferenceResolution`/`TextDocumentInlayHint` both already
-/// use, just retaining the edge instead of folding one side away.
-let private allCallEdges (graph: Graph) : CallEdge list =
+/// use, just retaining the edge instead of folding one side away. Not
+/// `private` - `computeVerbMetrics` (below) also aggregates over the full
+/// edge list corpus-wide (call counts per verb), not just one symbol's
+/// one-hop neighbors the way `getCallGraph` does.
+let allCallEdges (graph: Graph) : CallEdge list =
     [ for containingObj, containingVerbName, r in allVerbCallReferences graph do
           match r.Ref with
           | AstQuery.RefVerbCall(receiver, StrLit callName, _) ->
@@ -693,6 +697,85 @@ let getCallGraph (graph: Graph) (objRef: ObjRef) (verbName: string) : CallGraphR
             |> Array.ofList
 
         { Callees = callees; Callers = callers }
+
+/// One verb's maintenance-hotspot metrics for the "Verb complexity size
+/// metrics dashboard" - line count, corpus-wide call count, and deepest
+/// control-flow nesting, aggregated once per verb rather than the
+/// per-symbol on-demand shape `getCallGraph`/`ResolveEffectiveMember` use.
+type VerbMetricsEntry =
+    { ObjRef: ObjRef
+      VerbName: string
+      LineCount: int
+      CallCount: int
+      MaxDepth: int }
+
+/// Deepest nesting depth anywhere in `stmts` - a flat statement list (no
+/// nesting constructs at all) is depth 0; each `If`/`ForList`/`ForRange`/
+/// `While`/`Fork`/`TryExcept`/`TryFinally` contributes `1 +` whatever's
+/// deepest inside its own body/arms. Same match-arm structure as
+/// `Ast.countErrors` (`Language/Ast.fs:181-198`), just measuring depth
+/// instead of counting errors - kept here rather than alongside
+/// `countErrors` since, like `mayReturnValue` above, this is single-purpose
+/// to one corpus-wide check, not shared infrastructure multiple consumers
+/// need.
+let private maxNestingDepth (stmts: Stmt list) : int =
+    let maxOrZero (xs: int list) = if List.isEmpty xs then 0 else List.max xs
+
+    let rec go (stmts: Stmt list) : int =
+        stmts
+        |> List.map (fun s ->
+            match s with
+            | ErrorStmt _ -> 0
+            | If(arms, elsePart) ->
+                1 + maxOrZero ((arms |> List.map (fun (_, body) -> go body)) @ (elsePart |> Option.map go |> Option.toList))
+            | ForList(_, _, _, body) -> 1 + go body
+            | ForRange(_, _, _, body) -> 1 + go body
+            | While(_, _, body) -> 1 + go body
+            | Fork(_, _, body) -> 1 + go body
+            | TryExcept(body, arms) -> 1 + maxOrZero (go body :: (arms |> List.map (fun a -> go a.Body)))
+            | TryFinally(body, handler) -> 1 + max (go body) (go handler)
+            | ExprStmt _
+            | Return _
+            | Break _
+            | Continue _ -> 0)
+        |> maxOrZero
+
+    go stmts
+
+/// Corpus-wide maintenance-hotspot report: every verb's own line count
+/// (from `Tokens` - cheaper than re-reading `SourcePath` off disk per verb),
+/// corpus-wide call count (aggregated from the same `allCallEdges` list
+/// `getCallGraph` uses per-symbol), and deepest nesting. Verbs with no
+/// parsed `Ast`/`Tokens` (capture-only, never successfully lexed) are
+/// skipped - there's nothing to measure.
+let computeVerbMetrics (graph: Graph) : VerbMetricsEntry[] =
+    let callCounts =
+        allCallEdges graph
+        |> List.countBy (fun e -> e.TargetObj, e.TargetVerbName)
+        |> Map.ofList
+
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Verbs
+        |> Seq.choose (fun v ->
+            match v.Meta.Names, v.Ast, v.Tokens with
+            | primary :: _, Some stmts, Some tokens ->
+                let lineCount =
+                    if Array.isEmpty tokens then
+                        0
+                    else
+                        let lines = tokens |> Array.map (fun t -> t.Line)
+                        Array.max lines - Array.min lines + 1
+
+                Some
+                    { ObjRef = num
+                      VerbName = primary
+                      LineCount = lineCount
+                      CallCount = callCounts |> Map.tryFind (num, primary) |> Option.defaultValue 0
+                      MaxDepth = maxNestingDepth stmts }
+            | _ -> None))
+    |> Array.ofSeq
 
 /// Corpus-wide counterpart to `TextDocumentReferences` - instead of
 /// resolving every call site against one target verb, resolves every call
@@ -2126,6 +2209,12 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// at a time via `TextDocumentReferences`.
     member _.FindDeadVerbs(_p: obj) : Async<Result<DeadVerbEntry[], JsonRpc.Error>> =
         async { return Ok(findDeadVerbs graph) }
+
+    /// Custom method (`moodev/getVerbMetrics`, no params) - the "Verb
+    /// complexity size metrics dashboard": every verb's line count, call
+    /// count, and max nesting depth, corpus-wide, in one pass.
+    member _.GetVerbMetrics(_p: obj) : Async<Result<VerbMetricsEntry[], JsonRpc.Error>> =
+        async { return Ok(computeVerbMetrics graph) }
 
     /// Custom method (`moodev/findDeadProperties`, no params) - the same
     /// "what's safe to delete" report as `FindDeadVerbs`, for properties.

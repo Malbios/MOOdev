@@ -559,6 +559,9 @@ let private buildTryDispatch
                 | "get-server-status" ->
                     do! IdeActions.getServerStatus config session webSocket ct
                     return true
+                | "env-doctor-check" ->
+                    do! IdeActions.envDoctorCheck config session webSocket ct
+                    return true
                 | "parse-property-literal" ->
                     do! IdeActions.parsePropertyLiteralAction webSocket (getObj ()) (getStr "name") (getStr "valueText") ct
                     return true
@@ -777,7 +780,8 @@ let main args =
                             { TreeDir = currentTarget.TreeDir
                               SessionId = Guid.NewGuid().ToString("N")
                               GitAuthorName = gitAuthorName
-                              GitAuthorEmail = gitAuthorEmail }
+                              GitAuthorEmail = gitAuthorEmail
+                              LspBridgePort = currentTarget.LspBridgePort }
 
                         let tryDispatch = buildTryDispatch ideConfig
                         let endpoint: MooEndpoint = { Host = currentTarget.Host; Port = currentTarget.Port }
