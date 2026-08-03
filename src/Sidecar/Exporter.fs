@@ -285,46 +285,55 @@ let getMaxObject (evalRunner: EvalRunner) (ct: CancellationToken) : Task<int64> 
         return int64 ((getString json.RootElement "max").TrimStart('#'))
     }
 
-/// Non-corified verb capture tier, one chunk of the objnum range at a time
-/// (FORMAT.md §5's enumeration fallback, documented but never previously
-/// used to *keep* anything - only to filter non-corified objects out).
-/// Returns directly-defined verb data for every valid object in
-/// `[loObj..hiObj]` that has no corponym (per `corponymObjnums`) and at
-/// least one directly-defined verb - `#0` is never included, since it's
-/// always handled separately (normally corponym'd, or via its own
-/// export-time exception). Most objects in this range have zero
+/// Non-corified verb capture tier (FORMAT.md §5's enumeration fallback,
+/// documented but never previously used to *keep* anything - only to filter
+/// non-corified objects out). Returns directly-defined verb data for every
+/// valid object in `[startObj..maxObj]` that has no corponym (per
+/// `corponymObjnums`) and at least one directly-defined verb - `#0` is never
+/// included, since it's always handled separately (normally corponym'd, or
+/// via its own export-time exception). Most objects in this range have zero
 /// directly-defined verbs, so the response payload stays bounded by the
-/// actual anon-verb-bearing population rather than chunk size - the *scan*
-/// itself costs one `valid()` + one `maphaskey()` check per objnum in the
-/// chunk (plus `verbs()` only for objects that pass both).
+/// actual anon-verb-bearing population rather than range width.
 ///
-/// Chunked (by `exportTree`'s caller loop) rather than one single
-/// `[#1..max_object()]` eval covering the whole world: a world with
-/// hundreds of thousands of objects turns that into one MOO-side loop long
-/// enough to look indistinguishable from a hang (no output at all until it
-/// either returns or the connection's read loop times out), and risks
-/// running into ToastStunt's own foreground task time/tick limits on a
-/// truly large world. Chunking trades that for periodic round trips
-/// `exportTree` can report progress on.
+/// Self-limiting, not fixed-chunk: rather than scanning a fixed-size slice
+/// of the objnum range per call (which risks either wasting round trips on
+/// a sparse slice or dying mid-slice on a dense one - verb density varies
+/// wildly and isn't knowable in advance), this checks `ticks_left()` once
+/// per object and bails out - recording where it stopped as `resumeFrom` -
+/// before ToastStunt's own foreground tick limit kills the task outright.
+/// `moocode-reference.md` documents this exact idiom
+/// (`ticks_left() < 5000`) for exactly this situation; the `10000` threshold
+/// here is doubled from that baseline because the real cost driver measured
+/// live against a large HellMOO-derived world (~633k objects) is
+/// `verb_info`/`verb_args`/`verb_code` - `verb_code` worst, since it
+/// decompiles bytecode back to source per verb - at roughly 20-30 ticks per
+/// verb, not the cheap `valid()`/`maphaskey()` checks alone; the extra
+/// margin covers an unusually verb-rich single object between checks.
+/// Confirmed live: a task's tick limit resolves near-instantly once
+/// exceeded (it doesn't run for a while and then die - it dies the moment
+/// it crosses the budget), so a fixed 10,000-object chunk over that same
+/// world's dense low-objnum region (`#1..#500` alone holds most of the
+/// verbs in `#1..#2000`) reliably died this way - not from the corponym
+/// membership check (a prior fix already made that an O(log n)
+/// `maphaskey()` lookup instead of an O(n) `in` scan - correct, but never
+/// the actual bottleneck).
 ///
-/// `corponym_nums` is built as a MOO **map** keyed by objnum, checked via
-/// `maphaskey()` (an O(log n) red-black-tree lookup, confirmed against
-/// `ToastStunt/src/map.cc`'s `maplookup`/`rbfind`) - not a list checked via
-/// `in`, which is an O(n) linear scan (`ToastStunt/src/collection.cc`'s
-/// `ismember`) and was confirmed live to time out scanning a real
-/// ~633k-object world's range against a ~426-entry corponym list, even with
-/// chunking applied (chunking bounds the *objnum range* per round trip, not
-/// the *corponym-list* cost paid per object within that range). `in` on a
-/// *map* is a different, still-O(n) trap (it walks the map's *values* via
+/// The caller (`exportTree`) resumes from `resumeFrom` until it exceeds
+/// `maxObj` - see its own comment. `corponym_nums` is still a MOO **map**
+/// keyed by objnum, checked via `maphaskey()` (an O(log n) red-black-tree
+/// lookup, confirmed against `ToastStunt/src/map.cc`'s `maplookup`/
+/// `rbfind`) - not a list checked via `in`, which is an O(n) linear scan
+/// (`ToastStunt/src/collection.cc`'s `ismember`); `in` on a *map* is a
+/// different, still-O(n) trap (it walks the map's *values* via
 /// `mapforeach`, not its keys) - `maphaskey()` is the only correct, fast
 /// idiom here; don't revert to either `in` form.
 let getAnonVerbs
     (evalRunner: EvalRunner)
     (corponymObjnums: Set<int64>)
-    (loObj: int64)
-    (hiObj: int64)
+    (startObj: int64)
+    (maxObj: int64)
     (ct: CancellationToken)
-    : Task<(int64 * VerbExport list) list> =
+    : Task<(int64 * VerbExport list) list * int64> =
     task {
         let corponymNumsLiteral =
             corponymObjnums |> Set.toList |> List.map (sprintf "#%d -> 1") |> String.concat ", " |> sprintf "[%s]"
@@ -332,7 +341,12 @@ let getAnonVerbs
         let statements =
             $"""corponym_nums = {corponymNumsLiteral};
 anon = {{}};
-for i in [#{loObj}..#{hiObj}]
+resume_from = #{maxObj + 1L};
+for i in [#{startObj}..#{maxObj}]
+  if (ticks_left() < 10000)
+    resume_from = i;
+    break;
+  endif
   if (valid(i) && !maphaskey(corponym_nums, i))
     vlist = verbs(i);
     if (length(vlist) > 0)
@@ -348,23 +362,31 @@ for i in [#{loObj}..#{hiObj}]
   endif
 endfor"""
 
-        let! json = evalRunner statements "anon" ct
+        let! json = evalRunner statements """["anon" -> anon, "resume_from" -> tostr(resume_from)]""" ct
         let root = json.RootElement
 
-        return
-            root.EnumerateArray()
+        let results =
+            root.GetProperty("anon").EnumerateArray()
             |> Seq.map (fun el ->
                 let objnum = int64 ((getString el "objnum").TrimStart('#'))
                 let verbs = el.GetProperty("verbs").EnumerateArray() |> Seq.map parseVerb |> List.ofSeq
                 objnum, verbs)
             |> List.ofSeq
+
+        let resumeFrom = int64 ((getString root "resume_from").TrimStart('#'))
+
+        return results, resumeFrom
     }
 
-/// Object-count width of one `getAnonVerbs` round trip - see that function's
-/// own comment for why the scan is chunked at all. 10,000 keeps each
-/// round-trip's MOO-side loop well short of typical foreground task limits
-/// while still giving frequent progress output on a large world.
-let private anonVerbChunkSize = 10_000L
+/// Fallback step for the anon-verb scan's timeout-recovery path only (see
+/// `exportTree`) - not a chunk width for the normal case, which is now
+/// entirely tick-budget-paced (`getAnonVerbs`'s own `resumeFrom`). A real
+/// `TimeoutException` here means a genuine transport-level hang (network
+/// stall, the documented WSL2 NAT idle-drop case) rather than tick
+/// exhaustion, which is now handled inside the eval and returns well within
+/// the timeout - so this path should be rare, but still needs a way to make
+/// forward progress without knowing how far the dead call actually got.
+let private timeoutFallbackStep = 1_000L
 
 /// Resolves a FORMAT.md tree-relative path to `(corponym, label)` - shared by
 /// `IdeActions.searchHistory` (labeling a pickaxe-search hit) and
@@ -696,21 +718,24 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         let! maxObj = getMaxObject evalRunner ct
 
         let anonVerbsByObjnum = ResizeArray<int64 * VerbExport list>()
-        let mutable chunkLo = 1L
+        let mutable current = 1L
 
-        while chunkLo <= maxObj do
-            let chunkHi = min maxObj (chunkLo + anonVerbChunkSize - 1L)
-            // Announced before the round trip - see the corponym loop above
-            // for why.
-            printfn "Scanning #%d..#%d/#%d for non-corified verbs..." chunkLo chunkHi maxObj
+        // Resume-cursor loop, not a fixed-chunk one - see `getAnonVerbs`'s
+        // own comment. Each round trip covers however much of the range its
+        // tick budget allows (a sparse stretch may finish in one call; a
+        // dense one takes smaller steps), so progress is reported against
+        // where the scan actually got to rather than an a-priori boundary.
+        while current <= maxObj do
+            printfn "Scanning from #%d/#%d for non-corified verbs..." current maxObj
 
             try
-                let! chunkResults = getAnonVerbs evalRunner corponymObjnums chunkLo chunkHi ct
+                let! chunkResults, resumeFrom = getAnonVerbs evalRunner corponymObjnums current maxObj ct
                 anonVerbsByObjnum.AddRange(chunkResults)
+                current <- resumeFrom
             with :? TimeoutException as ex ->
-                eprintfn "Skipping #%d..#%d: %s - continuing with the rest of the scan" chunkLo chunkHi ex.Message
-
-            chunkLo <- chunkHi + 1L
+                let skippedHi = min maxObj (current + timeoutFallbackStep - 1L)
+                eprintfn "Skipping #%d..#%d: %s - continuing with the rest of the scan" current skippedHi ex.Message
+                current <- current + timeoutFallbackStep
 
         for objnum, verbs in anonVerbsByObjnum do
             let objDir = Path.Combine(outputDir, "objects", "_anon", string objnum)
