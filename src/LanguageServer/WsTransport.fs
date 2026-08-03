@@ -25,6 +25,10 @@ let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge)
             "moodev/findReferencesToObject"
             (Server.serverRequestHandling (fun (s: MooLspServer) (p: FindReferencesToObjectParams) -> s.FindReferencesToObject p))
         |> Map.add "moodev/findGotchas" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.FindGotchas p))
+        |> Map.add "moodev/findTodos" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetTodos p))
+        |> Map.add
+            "moodev/findTextOccurrences"
+            (Server.serverRequestHandling (fun (s: MooLspServer) (p: FindTextOccurrencesParams) -> s.GetTextOccurrences p))
         |> Map.add "moodev/findPermissionRisks" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.FindPermissionRisks p))
         |> Map.add "moodev/getMoocodeDocs" (Server.serverRequestHandling (fun (s: MooLspServer) (p: obj) -> s.GetMoocodeDocs p))
         |> Map.add "moodev/reloadGraph" (Server.serverRequestHandling (fun (s: MooLspServer) (p: ReloadGraphParams) -> s.ReloadGraph p))

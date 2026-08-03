@@ -513,6 +513,15 @@ html, body {
   background: none;
 }
 
+.bulk-replace-match {
+  color: #f77;
+  text-decoration: line-through;
+}
+
+.bulk-replace-replacement {
+  color: #7f7;
+}
+
 .tree-row {
   display: flex;
   align-items: center;
@@ -536,6 +545,15 @@ html, body {
 
 .tree-icon-object {
   color: #6cf;
+}
+
+.tree-row.dragging {
+  opacity: 0.5;
+}
+
+.tree-row.tree-drop-target {
+  outline: 2px solid #6cf;
+  outline-offset: -2px;
 }
 
 /* --- Main area (Game + open-verb tabs, one shared row) --------------- */

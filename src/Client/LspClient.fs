@@ -403,6 +403,42 @@ let findGotchasAsync () : Async<(int64 * string * string)[]> =
             return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string), (o?kind: string))
     }
 
+/// Custom method (`moodev/findTodos`, no params) - manually triggered
+/// corpus-wide TODO/FIXME scan (matches `Handlers.MooLspServer.GetTodos`/
+/// `Handlers.findTodos`). `kind` is `"TODO"` or `"FIXME"`.
+let findTodosAsync () : Async<(int64 * string * int * string * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findTodos" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+
+            return
+                items
+                |> Array.map (fun o ->
+                    int64 (o?objRef: float), (o?verbName: string), int (o?line: float), (o?text: string), (o?kind: string))
+    }
+
+/// Custom method (`moodev/findTextOccurrences {query}`) - the "Bulk
+/// find-and-replace" sidebar view's search step (matches
+/// `Handlers.MooLspServer.GetTextOccurrences`/`Handlers.findTextOccurrences`).
+let findTextOccurrencesAsync (query: string) : Async<(int64 * string * int * int * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findTextOccurrences" (createObj [ "query" ==> query ])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+
+            return
+                items
+                |> Array.map (fun o ->
+                    int64 (o?objRef: float), (o?verbName: string), int (o?line: float), int (o?col: float), (o?lineText: string))
+    }
+
 /// Custom method (`moodev/findPermissionRisks`, no params) - the permission
 /// flag audit report (matches `Handlers.MooLspServer.FindPermissionRisks`/
 /// `Handlers.findPermissionRisks`). `Kind` is one of the plain-string tags
@@ -1020,6 +1056,40 @@ let wire
     monaco?languages?registerInlayHintsProvider (
         "moocode",
         createObj [ "provideInlayHints" ==> System.Func<obj, obj, obj, JS.Promise<obj>>(fun m r _tok -> provideInlayHints m r) ]
+    )
+    |> ignore
+
+    /// Folding ranges for the whole currently-open verb (no position -
+    /// `textDocument/foldingRange` is a standard LSP method, called
+    /// directly by name like `provideDefinition` does, not a custom
+    /// `moodev/*` method). No indent-delta remap needed - folding ranges
+    /// are line-only (no column), and the reindent delta only ever shifts
+    /// columns, never line counts (every other provider here only ever
+    /// applies it to column math) - just a flat `+1` for LSP's 0-based line
+    /// numbers to Monaco's 1-based ones.
+    let provideFoldingRanges (_model: obj) : JS.Promise<obj[]> =
+        async {
+            match getCurrentDocument () with
+            | None -> return [||]
+            | Some(objRef, verbName) ->
+                let p = createObj [ "textDocument" ==> createObj [ "uri" ==> documentUri objRef verbName ] ]
+                let! result = requestAsync "textDocument/foldingRange" p
+
+                if isNullOrUndefined result then
+                    return [||]
+                else
+                    let ranges: obj[] = unbox result
+
+                    return
+                        ranges
+                        |> Array.map (fun r -> createObj [ "start" ==> (1 + (r?startLine: int)); "end" ==> (1 + (r?endLine: int)) ])
+        }
+        |> Async.StartAsPromise
+
+    monaco?languages?registerFoldingRangeProvider (
+        "moocode",
+        createObj
+            [ "provideFoldingRanges" ==> System.Func<obj, obj, obj, JS.Promise<obj[]>>(fun m _ctx _tok -> provideFoldingRanges m) ]
     )
     |> ignore
 

@@ -119,6 +119,10 @@ type ObjectReferenceEntry =
 /// corpus-wide scan).
 type FindReferencesToObjectParams = { ObjRef: ObjRef }
 
+/// `moodev/findTextOccurrences`' params - the "Bulk find-and-replace"
+/// sidebar view's search step.
+type FindTextOccurrencesParams = { Query: string }
+
 /// `moodev/reloadGraph`'s params - the path to reload `GraphStore` from,
 /// matching whatever content tree the sidecar's own `"reconfigure-target"`
 /// action just switched to (see `MOOdy`'s "Configurable MOO server
@@ -517,6 +521,138 @@ let private leadingDocComment (stmts: Stmt list) : string option =
     match takeLeadingStrings [] stmts with
     | [] -> None
     | lines -> Some(String.concat "\n" lines)
+
+/// Token-stream counterpart to `leadingDocComment` - same "leading run of
+/// bare string-literal statements" definition (a `TStr` token immediately
+/// followed by `TSemicolon`, zero or more times from the very start), but
+/// walking the token stream instead of `Stmt list` so each line gets a real
+/// line number, which `StrLit` AST nodes never carry (see this file's own
+/// header note on which `Expr` cases carry position). Used by `findTodos`
+/// only - `leadingDocComment` itself stays `Stmt`-based since
+/// `corifiedVerbDocEntries` has no use for per-line positions.
+let private leadingDocCommentLines (tokens: Language.Lexer.Token[]) : (int * string) list =
+    let rec go (i: int) (acc: (int * string) list) : (int * string) list =
+        if i + 1 >= tokens.Length then
+            List.rev acc
+        else
+            match tokens.[i].Kind, tokens.[i + 1].Kind with
+            | Language.Lexer.TStr text, Language.Lexer.TSemicolon -> go (i + 2) ((tokens.[i].Line, text) :: acc)
+            | _ -> List.rev acc
+
+    go 0 []
+
+/// One TODO:/FIXME: hit inside a verb's leading doc-comment (see
+/// `leadingDocComment`) - the "MOOcode gotchas"/"dead code" report family's
+/// shape, applied to that existing informal doc-comment convention. `Kind`
+/// is `"TODO"` or `"FIXME"`, matched case-insensitively against the trimmed
+/// line's prefix (real-world usage won't always be exact-case).
+type TodoEntry =
+    { ObjRef: ObjRef
+      VerbName: string
+      Line: int
+      Text: string
+      Kind: string }
+
+/// Corpus-wide TODO/FIXME tracker - only the *leading* doc-comment run
+/// counts, same scope `leadingDocComment` itself documents (MOOcode has no
+/// comment syntax outside this convention, so a note later in a verb's real
+/// code is invisible to any static scan, not just this one).
+let findTodos (graph: Graph) : TodoEntry[] =
+    graph.Objects
+    |> Map.toSeq
+    |> Seq.collect (fun (num, o) ->
+        o.Verbs
+        |> Seq.collect (fun v ->
+            match v.Meta.Names, v.Tokens with
+            | primary :: _, Some tokens ->
+                leadingDocCommentLines tokens
+                |> List.choose (fun (line, text) ->
+                    let trimmed = text.Trim()
+                    let upper = trimmed.ToUpperInvariant()
+
+                    if upper.StartsWith("TODO:") then
+                        Some { ObjRef = num; VerbName = primary; Line = line; Text = trimmed; Kind = "TODO" }
+                    elif upper.StartsWith("FIXME:") then
+                        Some { ObjRef = num; VerbName = primary; Line = line; Text = trimmed; Kind = "FIXME" }
+                    else
+                        None)
+            | _ -> []))
+    |> Array.ofSeq
+
+/// One line-based substring occurrence for the "Bulk find-and-replace"
+/// sidebar view's preview step - one row per *occurrence* (not per line
+/// the way `IdeActions.searchContent` is), since a replace UI needs to
+/// check/uncheck individual hits, including more than one on the same
+/// line. Reads `VerbNode.SourcePath` directly rather than globbing files on
+/// disk by name the way `searchContent`/`Exporter.describePath` do -
+/// `describePath`'s label comes from a *sanitized* filename
+/// (`Exporter.baseVerbFileName`), which isn't reliably the verb's real
+/// declared name that `set_verb_code` needs to look the verb up by;
+/// `SourcePath` is already keyed by the verb's real `Meta.Names` via the
+/// graph, sidestepping that reconstruction entirely.
+type TextOccurrenceEntry =
+    { ObjRef: ObjRef
+      VerbName: string
+      Line: int
+      Col: int
+      LineText: string }
+
+/// Corpus-wide substring search (case-insensitive, matching
+/// `IdeActions.searchContent`'s own case convention) over every verb's
+/// captured source on disk. Verbs with no capture yet (`SourcePath = None`)
+/// or whose capture no longer exists on disk are silently skipped, same
+/// degrade-gracefully convention `VerbNode.SourcePath`'s own doc comment
+/// describes.
+///
+/// Parses each file through `Metadata.TreeFormat.parseVerbFile` rather than
+/// reading raw lines directly - a captured `.moo` file's first two lines
+/// are the `@verb`/`@program` header and its last is a bare `.` terminator
+/// (`TreeFormat.parseVerbFileLines`'s own doc comment), none of which are
+/// part of the verb's actual code. `Line` here must land on the same
+/// numbering `verb_code()` itself uses (1-based, code body only) since
+/// `IdeActions.bulkReplace` (the apply step this search feeds) splices
+/// against a fresh `verb_code()` fetch, not this file - searching the raw
+/// file including its header/trailer would report line numbers 2 lines off
+/// from where the splice actually needs to land.
+let findTextOccurrences (graph: Graph) (query: string) : TextOccurrenceEntry[] =
+    if query = "" then
+        [||]
+    else
+        let queryLower = query.ToLowerInvariant()
+
+        let occurrencesInLine (num: ObjRef) (primary: string) (lineIdx: int) (line: string) : TextOccurrenceEntry list =
+            let lineLower = line.ToLowerInvariant()
+
+            let rec go (startAt: int) (acc: TextOccurrenceEntry list) =
+                let idx = lineLower.IndexOf(queryLower, startAt)
+
+                if idx < 0 then
+                    List.rev acc
+                else
+                    let entry =
+                        { ObjRef = num
+                          VerbName = primary
+                          Line = lineIdx + 1
+                          Col = idx + 1
+                          LineText = line }
+
+                    go (idx + query.Length) (entry :: acc)
+
+            go 0 []
+
+        graph.Objects
+        |> Map.toSeq
+        |> Seq.collect (fun (num, o) ->
+            o.Verbs
+            |> Seq.collect (fun v ->
+                match v.Meta.Names, v.SourcePath with
+                | primary :: _, Some path when System.IO.File.Exists path ->
+                    Metadata.TreeFormat.parseVerbFile(path).Code
+                    |> Array.ofList
+                    |> Array.mapi (occurrencesInLine num primary)
+                    |> List.concat
+                | _ -> []))
+        |> Array.ofSeq
 
 /// One docs entry per corified verb (reachable via `$name:verb()`) that
 /// actually has a leading doc-comment (see `leadingDocComment`) - most
@@ -1828,6 +1964,88 @@ let findPermissionRisks (graph: Graph) : PermissionRiskEntry[] =
         Seq.append riskyVerbs riskyProps)
     |> Array.ofSeq
 
+/// One foldable range for `TextDocumentFoldingRange` - both endpoints
+/// derived from the *union* of whatever line-bearing positions the
+/// construct's header (condition/source/delay expression, bound loop
+/// variable) and full body (recursively) carry, not read directly off the
+/// `Stmt` (block-carrying cases like `If`/`ForList`/... don't have their
+/// own line/col - see this file's own header note on which `Expr` cases
+/// do). Taking the union rather than requiring the header alone to be
+/// non-empty matters in practice: a literal-bounds loop like `for i in
+/// [1..3]` or `fork (0)` has a header expression (`IntLit`) that carries no
+/// position at all - `computeFoldingRanges` below folds that case in via
+/// the loop variable's own `BoundName` position where one exists, and
+/// falls back to the body's own earliest line otherwise, rather than
+/// silently emitting no fold. This is an approximation either way:
+/// `EndLine` lands on the last real statement/expression inside the block,
+/// not the closing `endif`/`endfor` keyword's own line (which the AST never
+/// tracks at all) - acceptable for Monaco's folding UX, which doesn't
+/// require covering the closing keyword.
+type FoldingRangeEntry = { StartLine: int; EndLine: int }
+
+/// Every line number found anywhere inside one expression -
+/// `AstQuery.collectReferences` already recurses through every nested
+/// sub-expression to find reference-bearing nodes, so wrapping a single
+/// `Expr` as a one-statement list reuses that same traversal rather than
+/// re-deriving position logic.
+let private linesInExpr (e: Expr) : int list =
+    AstQuery.collectReferences [ ExprStmt e ] |> List.map (fun r -> r.Line)
+
+/// Every line number found anywhere inside a statement list -
+/// `AstQuery.collectReferences` already recurses fully through nested block
+/// bodies (`If`/`ForList`/`While`/...), so this needs no separate recursion
+/// of its own.
+let private allLinesInStmts (stmts: Stmt list) : int list =
+    AstQuery.collectReferences stmts |> List.map (fun r -> r.Line)
+
+/// Recursively emits one `FoldingRangeEntry` per block-carrying statement
+/// (including nested ones - an `if` inside a `for` gets its own independent
+/// fold in addition to the outer `for`'s), skipping any block whose
+/// computed `EndLine <= StartLine` (Monaco folding needs at least 2 lines
+/// to be meaningful). `ErrorStmt` contributes no lines - a syntax-error
+/// span isn't meaningful to fold.
+let rec private computeFoldingRanges (stmts: Stmt list) : FoldingRangeEntry list =
+    let emit (headerLines: int list) (bodies: Stmt list list) : FoldingRangeEntry list =
+        let bodyLines = bodies |> List.collect allLinesInStmts
+        let allLines = headerLines @ bodyLines
+        let nested = bodies |> List.collect computeFoldingRanges
+
+        match allLines with
+        | [] -> nested
+        | _ ->
+            let startLine = List.min allLines
+            let endLine = List.max allLines
+            if endLine > startLine then { StartLine = startLine; EndLine = endLine } :: nested else nested
+
+    stmts
+    |> List.collect (fun s ->
+        match s with
+        | If(arms, elsePart) ->
+            (arms |> List.collect (fun (cond, body) -> emit (linesInExpr cond) [ body ]))
+            @ (elsePart |> Option.map (fun elseBody -> emit (allLinesInStmts elseBody) [ elseBody ]) |> Option.defaultValue [])
+        | ForList(var, indexVar, source, body) ->
+            let boundLines = var.Line :: (indexVar |> Option.map (fun v -> v.Line) |> Option.toList)
+            emit (boundLines @ linesInExpr source) [ body ]
+        | ForRange(var, lo, hi, body) -> emit (var.Line :: (linesInExpr lo @ linesInExpr hi)) [ body ]
+        | While(_, cond, body) -> emit (linesInExpr cond) [ body ]
+        | Fork(name, delay, body) ->
+            let boundLines = name |> Option.map (fun n -> n.Line) |> Option.toList
+            emit (boundLines @ linesInExpr delay) [ body ]
+        // Each `except` arm/`finally` handler is foldable independently of
+        // the try body, not merged into one blob spanning the whole
+        // construct - matches how `If`'s own arms/else each get their own
+        // fold rather than one range covering the entire if/elseif/else
+        // chain.
+        | TryExcept(body, arms) ->
+            emit (allLinesInStmts body) [ body ]
+            @ (arms |> List.collect (fun a -> emit (allLinesInStmts a.Body) [ a.Body ]))
+        | TryFinally(body, handler) -> emit (allLinesInStmts body) [ body ] @ emit (allLinesInStmts handler) [ handler ]
+        | ExprStmt _
+        | Return _
+        | Break _
+        | Continue _
+        | ErrorStmt _ -> [])
+
 /// Minimal client stub - this phase never needs to push notifications or
 /// send server-initiated requests back to the editor (no diagnostics, no
 /// progress reporting yet), so the base class's defaults are enough.
@@ -1874,7 +2092,7 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                   DocumentRangeFormattingProvider = None
                   DocumentOnTypeFormattingProvider = None
                   RenameProvider = None
-                  FoldingRangeProvider = None
+                  FoldingRangeProvider = Some(U3.C1 true)
                   SelectionRangeProvider = None
                   ExecuteCommandProvider = None
                   CallHierarchyProvider = None
@@ -2074,6 +2292,35 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                             |> Array.ofList
 
                         return Ok(Some highlights)
+        }
+
+    /// Folding ranges for the currently-open verb, computed by
+    /// `computeFoldingRanges` from its AST - see that function's own doc
+    /// comment for the approximation it makes (endpoints derived from
+    /// reference-bearing node positions, not read directly off block
+    /// statements, since MOOcode's own AST never tracks the closing
+    /// `endif`/`endfor`/... keyword's line).
+    override _.TextDocumentFoldingRange(p: FoldingRangeParams) =
+        async {
+            match verbAtUri graph p.TextDocument.Uri with
+            | None -> return Ok None
+            | Some(_, verb) ->
+                match verb.Ast with
+                | None -> return Ok None
+                | Some stmts ->
+                    let ranges =
+                        computeFoldingRanges stmts
+                        |> List.map (fun r ->
+                            { StartLine = uint32 (r.StartLine - 1)
+                              StartCharacter = None
+                              EndLine = uint32 (r.EndLine - 1)
+                              EndCharacter = None
+                              Kind = None
+                              CollapsedText = None }
+                            : FoldingRange)
+                        |> Array.ofList
+
+                    return Ok(Some ranges)
         }
 
     /// Local variables (from the currently-open verb's last-saved AST) +
@@ -2489,6 +2736,18 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// `suspend()`, or a `list[0]`-shaped index, corpus-wide.
     member _.FindGotchas(_p: obj) : Async<Result<GotchaEntry[], JsonRpc.Error>> =
         async { return Ok(findGotchas graph) }
+
+    /// Custom method (`moodev/findTodos`, no params) - the TODO/FIXME
+    /// scanner: every verb `findTodos` flags for a leading doc-comment line
+    /// starting with `TODO:`/`FIXME:`, corpus-wide.
+    member _.GetTodos(_p: obj) : Async<Result<TodoEntry[], JsonRpc.Error>> =
+        async { return Ok(findTodos graph) }
+
+    /// Custom method (`moodev/findTextOccurrences {query}`) - the "Bulk
+    /// find-and-replace" sidebar view's search step: every occurrence of
+    /// `query` across every verb's captured source, corpus-wide.
+    member _.GetTextOccurrences(p: FindTextOccurrencesParams) : Async<Result<TextOccurrenceEntry[], JsonRpc.Error>> =
+        async { return Ok(findTextOccurrences graph p.Query) }
 
     /// Custom method (`moodev/findPermissionRisks`, no params) - the
     /// permission flag audit report: every verb/property `findPermissionRisks`
