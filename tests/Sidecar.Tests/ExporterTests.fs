@@ -44,6 +44,61 @@ let ``assignVerbFileNames appends a numeric suffix on collision, in declaration 
 
     Assert.Equal<string list>([ "tell.moo"; "tell_2.moo" ], result |> List.map snd)
 
+[<Fact>]
+let ``assignVerbFileNames strips control characters sanitizeName's fixed punctuation set never covered`` () =
+    let verb names : VerbExport =
+        { Names = names
+          Owner = 2L
+          Perms = "rxd"
+          Dobj = "this"
+          Prep = "none"
+          Iobj = "this"
+          Code = [] }
+
+    // A real-world alias can contain arbitrary bytes, including a plain
+    // ASCII control code (built via `char`/`int`, not a literal control
+    // byte in this source file) spliced into otherwise-ordinary text -
+    // this crashed File.WriteAllText live with a bare "filename ... syntax
+    // is incorrect" IOException against a large, messy real-world db
+    // before this hardening pass existed.
+    let controlChar = char 7
+    let alias = "ga" + string controlChar + "y"
+    let result = assignVerbFileNames [ verb alias ]
+
+    Assert.Equal<string list>([ "gay.moo" ], result |> List.map snd)
+
+[<Fact>]
+let ``assignVerbFileNames trims a trailing dot sanitizeName's fixed punctuation set never covered`` () =
+    let verb names : VerbExport =
+        { Names = names
+          Owner = 2L
+          Perms = "rxd"
+          Dobj = "this"
+          Prep = "none"
+          Iobj = "this"
+          Code = [] }
+
+    // A trailing "." is a perfectly fine alias character but an invalid
+    // final character for an NTFS path component.
+    let result = assignVerbFileNames [ verb "greet." ]
+
+    Assert.Equal<string list>([ "greet.moo" ], result |> List.map snd)
+
+[<Fact>]
+let ``assignVerbFileNames disambiguates a name that collides with a reserved Windows device name`` () =
+    let verb names : VerbExport =
+        { Names = names
+          Owner = 2L
+          Perms = "rxd"
+          Dobj = "this"
+          Prep = "none"
+          Iobj = "this"
+          Code = [] }
+
+    let result = assignVerbFileNames [ verb "aux" ]
+
+    Assert.Equal<string list>([ "aux_.moo" ], result |> List.map snd)
+
 // ---------------------------------------------------------------------------
 // Rendering - exact text, per FORMAT.md's grammar. Explicit "\n" only, never
 // "\r\n" - these assertions are what catch a future accidental regression to

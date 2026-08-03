@@ -384,6 +384,37 @@ let sanitizeName (raw: string) : string =
     let replacements = [ " ", "_"; "*", ""; "/", ""; "\\", ""; ":", ""; "\"", ""; "<", ""; ">", ""; "|", ""; "?", "" ]
     replacements |> List.fold (fun (s: string) (find, repl) -> s.Replace(find, repl)) raw
 
+/// Windows/NTFS reserves these base names (case-insensitive, regardless of
+/// extension - "AUX.moo" is just as invalid as "AUX") - see
+/// `hardenForWindowsFilename`'s own comment for why this matters here.
+let private reservedWindowsBaseNames =
+    set
+        [ "CON"; "PRN"; "AUX"; "NUL"
+          "COM1"; "COM2"; "COM3"; "COM4"; "COM5"; "COM6"; "COM7"; "COM8"; "COM9"
+          "LPT1"; "LPT2"; "LPT3"; "LPT4"; "LPT5"; "LPT6"; "LPT7"; "LPT8"; "LPT9" ]
+
+/// A second, deliberately separate pass beyond `sanitizeName` - that
+/// function is a verbatim port of the retired `$vcs`'s own sanitizer and
+/// its exact character set shouldn't drift for parity's sake, but it never
+/// covered two things Windows/NTFS rejects outright: ASCII control
+/// characters, and a trailing space or `.` on the final path component.
+/// Confirmed live: a verb alias containing one of these crashed
+/// `File.WriteAllText` mid-export with a bare "filename ... syntax is
+/// incorrect" `IOException`, on a real, large, messy world's non-corified
+/// verb capture tier - the one place a filename is derived from arbitrary
+/// historical player/builder-typed text rather than a deliberately-chosen
+/// corponym. Also guards against a sanitized name colliding with a reserved
+/// Windows device name outright (unlikely but just as fatal if it happens,
+/// and cheap to rule out here).
+let private hardenForWindowsFilename (s: string) : string =
+    let withoutControlChars = s |> String.filter (fun c -> not (Char.IsControl(c)))
+    let trimmed = withoutControlChars.TrimEnd(' ', '.')
+
+    if reservedWindowsBaseNames.Contains(trimmed.ToUpperInvariant()) then
+        trimmed + "_"
+    else
+        trimmed
+
 /// First alias of a verb's name-spec, `*` stripped and sanitized, falling
 /// back to "verb" if that leaves nothing - mirrors the retired `$vcs`
 /// capture logic's fallback, but always derives from the canonical first
@@ -391,7 +422,7 @@ let sanitizeName (raw: string) : string =
 /// that's the exact bug `FORMAT.md` §4 documents and fixes.
 let private baseVerbFileName (names: string) : string =
     let firstAlias = names.Split(' ').[0]
-    let sanitized = sanitizeName firstAlias
+    let sanitized = sanitizeName firstAlias |> hardenForWindowsFilename
     if sanitized = "" then "verb" else sanitized
 
 /// Assigns disk filenames to a list of verbs in declaration order, adding a
