@@ -23,13 +23,22 @@
 .PARAMETER TreeDir
     Optional path to a content tree to root FileIO at (the `-i` flag). Omitted by default - most
     ad hoc uses of this script don't need FileIO wired up at all.
+
+.PARAMETER Emergency
+    Passes `-e` (emergency wizard mode) - drops into the server's own interactive console
+    (stdin/stdout, not the network port) before normal startup, for the one-time bootstrap recipe
+    in MOOdy's own CLAUDE.md ("Bootstrap verbs baked into every world"): fixing #0's wizard/
+    programmer flags and adding do_command/user_connected on a brand-new Minimal.db-derived world
+    that has no eval path yet. Type `continue` in that console to exit emergency mode and proceed
+    to normal startup against the same db - no restart needed.
 #>
 
 param(
     [Parameter(Mandatory = $true)]
     [string]$DbPath,
     [int]$Port = 7779,
-    [string]$TreeDir = ''
+    [string]$TreeDir = '',
+    [switch]$Emergency
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,9 +94,15 @@ if (Test-PortInUse -TestPort $Port) {
 $wslDbDir = ConvertTo-WslPath $dbDir
 $wslMooBinary = ConvertTo-WslPath $mooBinary
 $treeArg = if ($TreeDir) { "-i $(ConvertTo-WslPath (Resolve-Path $TreeDir).Path)" } else { '' }
+$emergencyArg = if ($Emergency) { '-e' } else { '' }
 
-Write-Host "Starting MOO server on port $Port against $dbPathFull..."
-wsl -d Ubuntu -- bash -c "cd $wslDbDir && $wslMooBinary $dbFile $dbFile.new $Port $treeArg"
+if ($Emergency) {
+    Write-Host "Starting MOO server on port $Port against $dbPathFull in EMERGENCY MODE..."
+    Write-Host "Type MOO code at the ';' prompt, or ';;' followed by a '.'-terminated block; 'continue' exits to normal startup." -ForegroundColor Yellow
+} else {
+    Write-Host "Starting MOO server on port $Port against $dbPathFull..."
+}
+wsl -d Ubuntu -- bash -c "cd $wslDbDir && $wslMooBinary $emergencyArg $dbFile $dbFile.new $Port $treeArg"
 
 Write-Host ''
 $newPath = "$dbPathFull.new"
