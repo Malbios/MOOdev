@@ -2117,10 +2117,14 @@ let parsePropertyLiteralAction
 
 /// Fixed name for the hidden scratch verb `checkVerbSyntax` compiles
 /// candidate code against - never the real verb being edited, and never
-/// exported/committed. A single space-free name (not multi-word) so the
-/// existing `resolveVerbIndexStatements` alias-matching helper can find it
-/// with a plain `in` check, same as every other verb lookup in this file.
-let private syntaxCheckScratchVerbName = "moodev_syntax_check_scratch"
+/// exported/committed (see `Exporter.syntaxCheckScratchVerbName`'s own
+/// comment - that's the single source of truth for this literal, and where
+/// it's filtered out of the exported tree; defined there rather than here
+/// since `Exporter.fs` compiles first). A single space-free name (not
+/// multi-word) so the existing `resolveVerbIndexStatements` alias-matching
+/// helper can find it with a plain `in` check, same as every other verb
+/// lookup in this file.
+let private syntaxCheckScratchVerbName = Sidecar.Exporter.syntaxCheckScratchVerbName
 
 /// Builds `checkVerbSyntax`'s eval statements - split out from the
 /// function itself purely so a unit test can assert the concatenated

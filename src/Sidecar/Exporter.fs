@@ -184,6 +184,19 @@ let private parseProperty (el: JsonElement) : PropertyExport =
       Perms = getString el "perms"
       ValueLiteral = getString el "value" }
 
+/// Name of the hidden scratch verb `IdeActions.checkVerbSyntax` creates on
+/// `#0` as a disposable compile target for the editor's live "as-you-type"
+/// syntax checking (never real content - ToastStunt has no way to check
+/// whether MOOcode parses without actually compiling it against some real
+/// verb slot, so this one fixed verb is reused as that target rather than
+/// touching whatever verb is actually being edited). Defined here, not in
+/// `IdeActions.fs` (which compiles after this file per `Sidecar.fsproj`),
+/// so both modules share one literal instead of two independently
+/// maintained copies of the same magic string - `getObjectExport` below
+/// filters it out of `#0`'s exported verb list, so it never shows up as
+/// real content in the git-tracked tree.
+let syntaxCheckScratchVerbName = "moodev_syntax_check_scratch"
+
 /// Fetches everything needed to write one object's `object.moo` and all its
 /// verb files, in a single eval. Returns `None` if the corponym turned out
 /// to point at a no-longer-valid object (recycled since the corponym map was
@@ -261,7 +274,11 @@ endif"""
             let parents = root.GetProperty("parents").EnumerateArray() |> Seq.map (fun p -> int64 (p.GetString().TrimStart('#'))) |> List.ofSeq
             let flags = root.GetProperty("flags").EnumerateArray() |> Seq.map (fun f -> f.GetString()) |> List.ofSeq
             let properties = root.GetProperty("properties").EnumerateArray() |> Seq.map parseProperty |> List.ofSeq
-            let verbs = root.GetProperty("verbs").EnumerateArray() |> Seq.map parseVerb |> List.ofSeq
+            let verbs =
+                root.GetProperty("verbs").EnumerateArray()
+                |> Seq.map parseVerb
+                |> Seq.filter (fun v -> not (v.Names.Split(' ') |> Array.contains syntaxCheckScratchVerbName))
+                |> List.ofSeq
             let aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> List.ofSeq
 
             return

@@ -1,5 +1,6 @@
 module Sidecar.Tests.ExporterTests
 
+open System.Threading
 open System.Text.Json
 open Xunit
 open Sidecar.Exporter
@@ -98,6 +99,32 @@ let ``assignVerbFileNames disambiguates a name that collides with a reserved Win
     let result = assignVerbFileNames [ verb "aux" ]
 
     Assert.Equal<string list>([ "aux_.moo" ], result |> List.map snd)
+
+// ---------------------------------------------------------------------------
+// getObjectExport - the hidden syntax-check scratch verb (IdeActions.fs's
+// checkVerbSyntax) must never leak into the exported/git-tracked tree.
+// ---------------------------------------------------------------------------
+
+[<Fact>]
+let ``getObjectExport filters out the syntax-check scratch verb but keeps real verbs`` () =
+    let json =
+        $$"""{
+            "parents": [], "owner": "#3", "flags": [], "properties": [],
+            "verbs": [
+                {"names": "do_command", "owner": "#0", "perms": "rxd", "dobj": "none", "prep": "none", "iobj": "none", "code": ["return 0;"]},
+                {"names": "{{syntaxCheckScratchVerbName}}", "owner": "#0", "perms": "rxd", "dobj": "this", "prep": "none", "iobj": "this", "code": ["return 1;"]}
+            ],
+            "name": "System Object", "aliases": []
+        }"""
+
+    let evalRunner: EvalRunner =
+        fun _ _ _ -> task { return JsonDocument.Parse(json) }
+
+    let result = (getObjectExport evalRunner 0L CancellationToken.None).Result
+
+    match result with
+    | None -> Assert.Fail("expected Some ObjectExport")
+    | Some data -> Assert.Equal<string list>([ "do_command" ], data.Verbs |> List.map (fun v -> v.Names))
 
 // ---------------------------------------------------------------------------
 // Rendering - exact text, per FORMAT.md's grammar. Explicit "\n" only, never
