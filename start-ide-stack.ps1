@@ -69,14 +69,27 @@
     MOOcode. Must already exist.
 
 .PARAMETER MooUsername
-    Account name for the initial content-tree export's own connection (`Sidecar.exe export ...
-    --user`, see `MooEval.connect`'s own comment). Default: `wizard` - correct for a bare
-    `Minimal.db` world with no real accounting. A real, separately-accounted world (confirmed live
-    against a HellMOO-derived one) needs its actual wizard-equivalent character's name instead - a
-    bare `connect wizard` there silently never authenticates, and the export just hangs until
+    Account name for the content-tree export's own connection (`Sidecar.exe export ... --user`,
+    see `MooEval.connect`'s own comment). Default: `wizard` - correct for a bare `Minimal.db`
+    world with no real accounting. A real, separately-accounted world (confirmed live against a
+    HellMOO-derived one) needs its actual wizard-equivalent character's name instead - a bare
+    `connect wizard` there silently never authenticates, and the export just hangs until
     ToastStunt's own 300-second not-logged-in connection timeout kills it. Only ever a bare
     `connect <name>`, no password - see the same comment for why that's the limit of what this
     supports.
+
+.PARAMETER RefreshExport
+    Forces a full `Sidecar.exe export` even if TreeDir already has a content tree. Omit for the
+    normal case: once a tree exists, this script skips the export entirely and starts straight
+    from what's already on disk - confirmed live that a full export against a large real-world
+    database (~633k objects) can take 30+ minutes (see the "Large real-world database
+    performance" kanban card), so re-running it unconditionally on every single launch is not
+    something day-to-day IDE starts should pay for. Most live edits made *through* the IDE
+    already keep the tree in sync incrementally on their own (`IdeActions.fs`'s per-object
+    live-save re-export) without needing this. Reach for -RefreshExport when the world was
+    changed some other way since the tree was last exported - a manual `.program`/telnet edit
+    bypassing the Sidecar entirely, or a genuinely fresh TreeDir being pointed at content that
+    already has history elsewhere.
 
 .EXAMPLE
     # Terminal 1:
@@ -95,7 +108,8 @@ param(
     [Parameter(Mandatory = $true)] [int]$LspBridgeMooPort,
     [Parameter(Mandatory = $true)] [int]$LspListenerObj,
     [Parameter(Mandatory = $true)] [string]$TreeDir,
-    [string]$MooUsername = 'wizard'
+    [string]$MooUsername = 'wizard',
+    [switch]$RefreshExport
 )
 
 $ErrorActionPreference = 'Stop'
@@ -236,20 +250,36 @@ try {
 # startup and throws hard (FORMAT.md's own "fail loudly, don't guess" policy) if
 # they don't exist yet - confirmed live: a brand-new, never-exported TreeDir made
 # the LanguageServer crash on launch with a bare FileNotFoundException, hanging
-# this script at Wait-ForPort until its own timeout. Mirrors reconfigureTarget's
+# this script at Wait-ForPort until its own timeout. So a tree that doesn't exist
+# yet always gets a full export, no way around it - but once one exists, this
+# script no longer re-exports it on every subsequent launch by default (see
+# -RefreshExport's own doc comment for why: confirmed live that a full export
+# against a large real-world database can take 30+ minutes, making "always
+# re-export" a bad default for day-to-day IDE starts). Mirrors reconfigureTarget's
 # own C# logic in Program.fs (init-if-fresh / export / stage / commit-only-if-
 # dirty) rather than test-instance-start.ps1's version, which wipes the tree
 # first - that's wrong here, TreeDir is a real content project, not disposable
 # scratch.
-Write-Host "Exporting/refreshing content tree..."
 if (-not (Test-Path (Join-Path $TreeDir '.git'))) {
     git -C $TreeDir init --initial-branch=main -q
 }
-& $sidecarExe export $TreeDir $MooHost $MooPort --user $MooUsername
-if ($LASTEXITCODE -ne 0) { throw "Export into $TreeDir failed." }
-git -C $TreeDir add -A
-if (git -C $TreeDir status --porcelain) {
-    git -C $TreeDir -c user.name="MOOdy IDE Stack" -c user.email="ide-stack@moo.local" commit -q -m "Sync on start-ide-stack.ps1 launch ($MooHost`:$MooPort)"
+
+$treeAlreadyExists = Test-Path (Join-Path $TreeDir 'corponyms.moo')
+
+if ($RefreshExport -or -not $treeAlreadyExists) {
+    if ($treeAlreadyExists) {
+        Write-Host "Refreshing content tree (-RefreshExport was passed - this can take a long time for a large database)..."
+    } else {
+        Write-Host "Content tree not found yet - exporting for the first time (this can take a long time for a large database)..."
+    }
+    & $sidecarExe export $TreeDir $MooHost $MooPort --user $MooUsername
+    if ($LASTEXITCODE -ne 0) { throw "Export into $TreeDir failed." }
+    git -C $TreeDir add -A
+    if (git -C $TreeDir status --porcelain) {
+        git -C $TreeDir -c user.name="MOOdy IDE Stack" -c user.email="ide-stack@moo.local" commit -q -m "Sync on start-ide-stack.ps1 launch ($MooHost`:$MooPort)"
+    }
+} else {
+    Write-Host "Content tree already exists - skipping export (pass -RefreshExport to force a full refresh)." -ForegroundColor Yellow
 }
 
 # --- Client bundle - unique outDir, bakes in this instance's own ws URLs --------
