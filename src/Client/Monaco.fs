@@ -281,7 +281,14 @@ let create (container: Browser.Types.HTMLElement) : IStandaloneCodeEditor =
               "language" ==> "moocode"
               "theme" ==> "vs-dark"
               "automaticLayout" ==> true
-              "minimap" ==> createObj [ "enabled" ==> true ] ]
+              "minimap" ==> createObj [ "enabled" ==> true ]
+              // Confirmed live: without this, Monaco never calls a
+              // registered `DocumentSemanticTokensProvider` at all, even
+              // though registration itself succeeds silently - this option
+              // defaults to `'configuredByTheme'` (`editor.api.d.ts`'s own
+              // doc comment), and the built-in `vs-dark` theme used here
+              // doesn't opt in on its own.
+              "semanticHighlighting.enabled" ==> true ]
 
     monaco?editor?create (container, options)
 

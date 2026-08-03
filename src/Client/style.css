@@ -501,6 +501,18 @@ html, body {
   gap: 0.4em;
 }
 
+.picker-list li.picker-group-header {
+  cursor: default;
+  color: #999;
+  font-weight: bold;
+  padding-top: 0.6em;
+  border-bottom: 1px solid #333;
+}
+
+.picker-list li.picker-group-header:hover {
+  background: none;
+}
+
 .tree-row {
   display: flex;
   align-items: center;

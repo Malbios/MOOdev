@@ -74,8 +74,7 @@ let private viewHistoryBtn = document.getElementById ("view-history")
 let private viewTasksBtn = document.getElementById ("view-tasks")
 let private viewServerStatusBtn = document.getElementById ("view-server-status")
 let private viewErrorsBtn = document.getElementById ("view-errors")
-let private viewDeadVerbsBtn = document.getElementById ("view-dead-verbs")
-let private viewDeadPropertiesBtn = document.getElementById ("view-dead-properties")
+let private viewDeadCodeBtn = document.getElementById ("view-dead-code")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
 let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
@@ -138,12 +137,9 @@ let private serverStatusListEl = document.getElementById ("server-status-list")
 let private sidebarViewErrorsEl = document.getElementById ("sidebar-view-errors")
 let private errorsListEl = document.getElementById ("errors-list")
 let private errorsClearBtn = document.getElementById ("errors-clear-btn")
-let private sidebarViewDeadVerbsEl = document.getElementById ("sidebar-view-dead-verbs")
-let private treeDeadVerbsSummaryEl = document.getElementById ("tree-dead-verbs-summary")
-let private treeDeadVerbsListEl = document.getElementById ("tree-dead-verbs-list")
-let private sidebarViewDeadPropertiesEl = document.getElementById ("sidebar-view-dead-properties")
-let private treeDeadPropertiesSummaryEl = document.getElementById ("tree-dead-properties-summary")
-let private treeDeadPropertiesListEl = document.getElementById ("tree-dead-properties-list")
+let private sidebarViewDeadCodeEl = document.getElementById ("sidebar-view-dead-code")
+let private treeDeadCodeSummaryEl = document.getElementById ("tree-dead-code-summary")
+let private treeDeadCodeListEl = document.getElementById ("tree-dead-code-list")
 let private sidebarViewGotchasEl = document.getElementById ("sidebar-view-gotchas")
 let private treeGotchasSummaryEl = document.getElementById ("tree-gotchas-summary")
 let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
@@ -603,8 +599,7 @@ type private SidebarView =
     | TasksView
     | ServerStatusView
     | ErrorsView
-    | DeadVerbsView
-    | DeadPropertiesView
+    | DeadCodeView
     | GotchasView
     | PermissionRisksView
     | DocsView
@@ -1369,8 +1364,7 @@ let private allSidebarViews =
       sidebarViewTasksEl
       sidebarViewServerStatusEl
       sidebarViewErrorsEl
-      sidebarViewDeadVerbsEl
-      sidebarViewDeadPropertiesEl
+      sidebarViewDeadCodeEl
       sidebarViewGotchasEl
       sidebarViewPermissionRisksEl
       sidebarViewDocsEl
@@ -4101,24 +4095,17 @@ and private switchToSidebarView (view: SidebarView) : unit =
     | ErrorsView ->
         activateOnlySidebarView sidebarViewErrorsEl
         renderErrorsList ()
-    | DeadVerbsView ->
-        activateOnlySidebarView sidebarViewDeadVerbsEl
-        treeDeadVerbsSummaryEl.textContent <- "Scanning..."
-        treeDeadVerbsListEl.innerHTML <- ""
+    | DeadCodeView ->
+        activateOnlySidebarView sidebarViewDeadCodeEl
+        treeDeadCodeSummaryEl.textContent <- "Scanning..."
+        treeDeadCodeListEl.innerHTML <- ""
 
         async {
-            let! results = LspClient.findDeadVerbsAsync ()
-            renderDeadVerbsResults results
-        }
-        |> Async.StartImmediate
-    | DeadPropertiesView ->
-        activateOnlySidebarView sidebarViewDeadPropertiesEl
-        treeDeadPropertiesSummaryEl.textContent <- "Scanning..."
-        treeDeadPropertiesListEl.innerHTML <- ""
-
-        async {
-            let! results = LspClient.findDeadPropertiesAsync ()
-            renderDeadPropertiesResults results
+            let! deadVerbsChild = Async.StartChild(LspClient.findDeadVerbsAsync ())
+            let! deadPropertiesChild = Async.StartChild(LspClient.findDeadPropertiesAsync ())
+            let! deadVerbs = deadVerbsChild
+            let! deadProperties = deadPropertiesChild
+            renderDeadCodeResults deadVerbs deadProperties
         }
         |> Async.StartImmediate
     | GotchasView ->
@@ -4214,8 +4201,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewTasksBtn, TasksView
           viewServerStatusBtn, ServerStatusView
           viewErrorsBtn, ErrorsView
-          viewDeadVerbsBtn, DeadVerbsView
-          viewDeadPropertiesBtn, DeadPropertiesView
+          viewDeadCodeBtn, DeadCodeView
           viewGotchasBtn, GotchasView
           viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
@@ -4291,7 +4277,7 @@ and private renderContentSearchResults (results: (int64 option * string * string
 /// view - one row per matching object, clicking through to that object's
 /// inspector with the *searched* property highlighted
 /// (`openOrSwitchToInspectorWith`, same "jump straight to the relevant row"
-/// convention `renderDeadPropertiesResults` already uses for a
+/// convention `renderDeadCodeResults` already uses for a
 /// property-shaped finding). `searchedName` is the property name the search
 /// was run with, captured at dispatch time (`lastPropertySearchName`) -
 /// distinct from each result tuple's own `name`, which is the *object's*
@@ -4534,8 +4520,8 @@ and private renderWorldHealthResults
         |> Array.length
 
     let rows =
-        [ "Dead verbs", deadVerbs.Length, DeadVerbsView
-          "Dead properties", deadProperties.Length, DeadPropertiesView
+        [ "Dead verbs", deadVerbs.Length, DeadCodeView
+          "Dead properties", deadProperties.Length, DeadCodeView
           "Permission risks", permissionRisks.Length, PermissionRisksView
           "Circular inheritance", inheritanceCycleCount, GotchasView
           "Verb signature consistency", verbSignatureCount, GotchasView ]
@@ -4584,68 +4570,87 @@ and private renderErrorsList () : unit =
 /// a matching literal name exists but couldn't be resolved statically - see
 /// `Handlers.findDeadVerbs`'s own comment) are shown distinctly rather than
 /// as a clean "nothing calls this" hit.
-and private renderDeadVerbsResults (results: (int64 * string * string * string * string * bool)[]) : unit =
-    let dynamicCount =
-        results |> Array.filter (fun (_, _, _, _, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
+/// Renders `moodev/findDeadVerbs`' and `moodev/findDeadProperties`' results
+/// merged into one view, grouped by owning object (a header row per object,
+/// its dead verbs then its dead properties nested underneath) rather than
+/// two separate flat panels. Verb rows keep the exact MOO-call-syntax shape
+/// and `openOrSwitchToVerb` click-through the old `renderDeadVerbsResults`
+/// had; property rows keep `openOrSwitchToInspector` (properties have no
+/// editor of their own) and the same "possibly referenced dynamically"
+/// suffix logic, from the old `renderDeadPropertiesResults`.
+and private renderDeadCodeResults
+    (deadVerbs: (int64 * string * string * string * string * bool)[])
+    (deadProperties: (int64 * string * bool)[])
+    : unit =
+    let dynamicVerbCount = deadVerbs |> Array.filter (fun (_, _, _, _, _, d) -> d) |> Array.length
+    let dynamicPropCount = deadProperties |> Array.filter (fun (_, _, d) -> d) |> Array.length
 
-    treeDeadVerbsSummaryEl.textContent <-
-        if results.Length = 0 then
-            "No dead verbs found."
+    let objRefs =
+        Array.append (deadVerbs |> Array.map (fun (o, _, _, _, _, _) -> o)) (deadProperties |> Array.map (fun (o, _, _) -> o))
+        |> Array.distinct
+        |> Array.sort
+
+    treeDeadCodeSummaryEl.textContent <-
+        if deadVerbs.Length = 0 && deadProperties.Length = 0 then
+            "No dead code found."
         else
-            sprintf "%d dead verb(s), %d possibly referenced dynamically" results.Length dynamicCount
+            let propNoun = if deadProperties.Length = 1 then "property" else "properties"
 
-    treeDeadVerbsListEl.innerHTML <- ""
+            sprintf
+                "%d dead verb(s), %d dead %s, %d possibly referenced dynamically, across %d object(s)"
+                deadVerbs.Length
+                deadProperties.Length
+                propNoun
+                (dynamicVerbCount + dynamicPropCount)
+                objRefs.Length
 
-    for objRef, verbName, dobj, prep, iobj, possiblyDynamic in results do
-        let li = document.createElement ("li")
-        li.classList.add "picker-item"
-        li.classList.add "inspector-link"
-        li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
+    treeDeadCodeListEl.innerHTML <- ""
 
-        let call = sprintf "#%d:%s(%s, %s, %s)" objRef verbName dobj prep iobj
+    for objRef in objRefs do
+        let objLabel =
+            treeNodes |> Map.tryFind objRef |> Option.map (fun n -> n.Name) |> Option.defaultValue ""
 
-        li.textContent <-
-            if possiblyDynamic then
-                sprintf "%s (possibly referenced dynamically)" call
-            else
-                call
+        let header = document.createElement ("li")
+        header.classList.add "picker-group-header"
+        header.textContent <- if objLabel = "" then sprintf "#%d" objRef else sprintf "#%d %s" objRef objLabel
+        treeDeadCodeListEl.appendChild header |> ignore
 
-        treeDeadVerbsListEl.appendChild li |> ignore
+        for oRef, verbName, dobj, prep, iobj, possiblyDynamic in deadVerbs do
+            if oRef = objRef then
+                let li = document.createElement ("li")
+                li.classList.add "picker-item"
+                li.classList.add "inspector-link"
+                li.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
 
-/// Same shape as `renderDeadVerbsResults`, for `moodev/findDeadProperties`'
-/// results - clicking a row opens the *owning object's inspector*
-/// (`openOrSwitchToInspector`), not a verb tab, since properties don't have
-/// an editor of their own the way verbs do.
-and private renderDeadPropertiesResults (results: (int64 * string * bool)[]) : unit =
-    let dynamicCount = results |> Array.filter (fun (_, _, possiblyDynamic) -> possiblyDynamic) |> Array.length
+                let call = sprintf "#%d:%s(%s, %s, %s)" objRef verbName dobj prep iobj
 
-    treeDeadPropertiesSummaryEl.textContent <-
-        if results.Length = 0 then
-            "No dead properties found."
-        else
-            let noun = if results.Length = 1 then "property" else "properties"
-            sprintf "%d dead %s, %d possibly referenced dynamically" results.Length noun dynamicCount
+                li.textContent <-
+                    if possiblyDynamic then
+                        sprintf "%s (possibly referenced dynamically)" call
+                    else
+                        call
 
-    treeDeadPropertiesListEl.innerHTML <- ""
+                treeDeadCodeListEl.appendChild li |> ignore
 
-    for objRef, propertyName, possiblyDynamic in results do
-        let li = document.createElement ("li")
-        li.classList.add "picker-item"
-        li.classList.add "inspector-link"
-        li.onclick <- fun _ -> openOrSwitchToInspector objRef
+        for oRef, propertyName, possiblyDynamic in deadProperties do
+            if oRef = objRef then
+                let li = document.createElement ("li")
+                li.classList.add "picker-item"
+                li.classList.add "inspector-link"
+                li.onclick <- fun _ -> openOrSwitchToInspector objRef
 
-        let label = sprintf "#%d.%s" objRef propertyName
+                let label = sprintf "#%d.%s" objRef propertyName
 
-        li.textContent <-
-            if possiblyDynamic then
-                sprintf "%s (possibly referenced dynamically)" label
-            else
-                label
+                li.textContent <-
+                    if possiblyDynamic then
+                        sprintf "%s (possibly referenced dynamically)" label
+                    else
+                        label
 
-        treeDeadPropertiesListEl.appendChild li |> ignore
+                treeDeadCodeListEl.appendChild li |> ignore
 
 /// Human-readable label for one of `Handlers.GotchaEntry`'s plain-string
-/// `Kind` tags - kept client-side (like `renderDeadVerbsResults`'s own
+/// `Kind` tags - kept client-side (like `renderDeadCodeResults`'s own
 /// "possibly referenced dynamically" phrasing) rather than sent over the
 /// wire, since it's presentation, not data.
 and private gotchaKindLabel (kind: string) : string =
@@ -4661,7 +4666,7 @@ and private gotchaKindLabel (kind: string) : string =
     | other -> other
 
 /// Renders `moodev/findGotchas`' results into the Gotchas sidebar view -
-/// same shape as `renderDeadVerbsResults`, one entry per (object, verb,
+/// same per-row shape as `renderDeadCodeResults`' verb rows, one entry per (object, verb,
 /// kind) triple (a verb can appear more than once if it trips more than one
 /// check), clickable straight through to that verb.
 and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
@@ -4704,7 +4709,7 @@ and private permissionRiskKindLabel (kind: string) : string =
 /// (object, name, kind) triple. A `"wizard-writable-verb"` entry's `Name` is
 /// a verb name (clicks through to that verb, like the Gotchas view); a
 /// `"world-writable-property"` entry's `Name` is a property name (clicks
-/// through to the object's inspector, like `renderDeadPropertiesResults`).
+/// through to the object's inspector, like `renderDeadCodeResults`' property rows).
 and private renderPermissionRisksResults (results: (int64 * string * string)[]) : unit =
     treePermissionRisksSummaryEl.textContent <-
         if results.Length = 0 then
@@ -4795,7 +4800,9 @@ and private renderDocsList (filterText: string) : unit =
             match kind with
             | "keyword" -> 0
             | "variable" -> 1
-            | "error" -> 3
+            | "builtin" -> 2
+            | "corified-verb" -> 3
+            | "error" -> 4
             | _ -> 2
 
         let filtered =
@@ -5472,8 +5479,7 @@ viewHistoryBtn.onclick <- fun _ -> onActivityBtnClick HistoryView
 viewTasksBtn.onclick <- fun _ -> onActivityBtnClick TasksView
 viewServerStatusBtn.onclick <- fun _ -> onActivityBtnClick ServerStatusView
 viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
-viewDeadVerbsBtn.onclick <- fun _ -> onActivityBtnClick DeadVerbsView
-viewDeadPropertiesBtn.onclick <- fun _ -> onActivityBtnClick DeadPropertiesView
+viewDeadCodeBtn.onclick <- fun _ -> onActivityBtnClick DeadCodeView
 viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
 viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView

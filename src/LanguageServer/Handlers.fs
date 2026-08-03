@@ -499,13 +499,60 @@ let private allKeywords: Language.Lexer.Keyword list =
 let private implicitVariableNames =
     [ "this"; "caller"; "player"; "verb"; "args"; "argstr"; "dobj"; "dobjstr"; "prep"; "prepstr"; "iobj"; "iobjstr" ]
 
+/// The doc-comment convention real ToastCore verbs actually use (confirmed
+/// against `ToastStunt/ToastCore.db`, e.g. `#0:chparent`'s single-line
+/// `"chparent(object, new-parent) -- see help on the builtin.";` or
+/// `#0:bf_force_input`'s 3-line version) - MOOcode has no comment syntax at
+/// all, so a bare string-literal expression statement (nothing assigned,
+/// nothing else on the line) doubles as one. Only the *leading* run counts -
+/// a stray string literal later in the body (a real ToastCore pattern too,
+/// e.g. a trailing caveat/TODO note) isn't part of the doc, just prose that
+/// happens to also be a no-op statement.
+let private leadingDocComment (stmts: Stmt list) : string option =
+    let rec takeLeadingStrings (acc: string list) (rest: Stmt list) : string list =
+        match rest with
+        | ExprStmt(StrLit text) :: tail -> takeLeadingStrings (text :: acc) tail
+        | _ -> List.rev acc
+
+    match takeLeadingStrings [] stmts with
+    | [] -> None
+    | lines -> Some(String.concat "\n" lines)
+
+/// One docs entry per corified verb (reachable via `$name:verb()`) that
+/// actually has a leading doc-comment (see `leadingDocComment`) - most
+/// corified verbs won't, and are silently skipped rather than padding the
+/// catalog with undocumented entries. `graph.SystemObjectProperties` is the
+/// real `$name -> #N` registry (not `lookups.toml`/`ObjectNode.Name`, which
+/// is unrelated capture-bookkeeping - see that field's own doc comment in
+/// `Schema.fs`).
+let private corifiedVerbDocEntries (graph: Graph) : MoocodeDocEntry list =
+    graph.SystemObjectProperties
+    |> Map.toList
+    |> List.collect (fun (corponym, objRef) ->
+        match Map.tryFind objRef graph.Objects with
+        | None -> []
+        | Some o ->
+            o.Verbs
+            |> List.choose (fun v ->
+                match v.Meta.Names, v.Ast with
+                | primary :: _, Some stmts ->
+                    leadingDocComment stmts
+                    |> Option.map (fun docText ->
+                        { Name = sprintf "$%s:%s" corponym primary
+                          Signature = sprintf "$%s:%s(%s, %s, %s)" corponym primary v.Meta.Dobj v.Meta.Prep v.Meta.Iobj
+                          Description = docText
+                          Kind = "corified-verb" })
+                | _ -> None))
+
 /// Full catalog for the client's docs sidebar: every control keyword,
-/// implicit variable, and live builtin - reusing the exact same prose hover
-/// already shows (`keywordHelp`/`implicitVariableHelp`/`fn.Description`), so
-/// the two surfaces can never disagree; this only ever enumerates *which*
-/// existing function to call for each name, never duplicates the text
-/// itself.
-let moocodeDocs (liveBuiltins: Map<string, BuiltinFunc>) : MoocodeDocEntry[] =
+/// implicit variable, live builtin, and documented corified verb - reusing
+/// the exact same prose hover already shows for the first three
+/// (`keywordHelp`/`implicitVariableHelp`/`fn.Description`), so those
+/// surfaces can never disagree; this only ever enumerates *which* existing
+/// function to call for each name, never duplicates the text itself. The
+/// corified-verb entries are the one genuinely new source, straight from the
+/// corpus's own doc-commented verbs.
+let moocodeDocs (graph: Graph) (liveBuiltins: Map<string, BuiltinFunc>) : MoocodeDocEntry[] =
     let keywordEntries =
         allKeywords
         |> List.map (fun k ->
@@ -533,7 +580,7 @@ let moocodeDocs (liveBuiltins: Map<string, BuiltinFunc>) : MoocodeDocEntry[] =
               Description = fn.Description |> Option.defaultValue "Built-in function."
               Kind = "builtin" })
 
-    keywordEntries @ variableEntries @ builtinEntries |> List.toArray
+    keywordEntries @ variableEntries @ builtinEntries @ corifiedVerbDocEntries graph |> List.toArray
 
 /// Hover text for a verb call whose receiver *couldn't* be resolved
 /// statically (`this:foo()`, `who:tell()`) - best-effort via
@@ -697,6 +744,100 @@ let getCallGraph (graph: Graph) (objRef: ObjRef) (verbName: string) : CallGraphR
             |> Array.ofList
 
         { Callees = callees; Callers = callers }
+
+type GetSemanticTokensParams = { ObjRef: ObjRef; VerbName: string }
+
+/// One classified reference for the resolver-driven semantic-highlighting
+/// feature - deliberately NOT the real LSP `SemanticTokens.Data`
+/// delta-encoded `uint32[]` wire shape (this is a hand-rolled client/server
+/// pair, not a generic LSP client - see `LspClient.fs`'s own top-of-file
+/// doc comment for why), so `computeSemanticTokens` just emits one plain
+/// entry per token: 0-based `Line`/`StartChar` (LSP convention, matching
+/// every other position-bearing custom method's wire shape) plus a
+/// human-readable `TokenType`/`TokenModifiers` pair the client maps to
+/// Monaco's legend indices and delta-encodes itself.
+type SemanticTokenEntry =
+    { Line: int
+      StartChar: int
+      Length: int
+      TokenType: string
+      TokenModifiers: string[] }
+
+/// Pure classification of one reference into a semantic-token entry, given
+/// already-resolved facts (`liveBuiltins`, and `resolvedVerbCalls` - whether
+/// each `(startObj, verbName)` a `RefVerbCall` in this verb resolves to a
+/// real dispatch target) - kept separate from `computeSemanticTokens`'s own
+/// live `bridge` calls so this part is unit-testable without a live
+/// connection. Mirrors `TextDocumentHover`'s exact dispatch branching
+/// (`Handlers.fs`'s `computeHover` local function) - same "what does this
+/// reference mean" facts, just classified into a token instead of hover
+/// prose.
+let classifySemanticToken
+    (graph: Graph)
+    (enclosingObj: ObjRef)
+    (liveBuiltins: Map<string, BuiltinFunc>)
+    (resolvedVerbCalls: Map<ObjRef * string, bool>)
+    (r: AstQuery.FoundReference)
+    : SemanticTokenEntry option =
+    let entry tokenType modifiers =
+        Some
+            { Line = r.Line - 1
+              StartChar = r.Col - 1
+              Length = r.Length
+              TokenType = tokenType
+              TokenModifiers = modifiers }
+
+    match r.Ref with
+    | AstQuery.RefIdent name -> entry "variable" (if (implicitVariableHelp name).IsSome then [| "defaultLibrary" |] else [||])
+    | AstQuery.RefCall(name, _) -> entry "function" (if Map.containsKey name liveBuiltins then [| "defaultLibrary" |] else [||])
+    | AstQuery.RefVerbCall(receiver, StrLit verbName, _) ->
+        match Metadata.Resolver.resolveReceiverInContext graph enclosingObj receiver with
+        | Some startObj ->
+            let resolved = resolvedVerbCalls |> Map.tryFind (startObj, verbName) |> Option.defaultValue false
+            entry "method" (if resolved then [||] else [| "unresolved" |])
+        | None -> entry "method" [| "unresolved" |]
+    | AstQuery.RefVerbCall(_, _, _) -> None
+    | AstQuery.RefProp(_, StrLit _) -> entry "property" [||]
+    | AstQuery.RefProp(_, _) -> None
+
+/// Every classified reference in a verb - resolves each *distinct*
+/// `(startObj, verbName)` a `RefVerbCall` targets once, concurrently
+/// (`Async.Parallel`), not once per call-site (a verb can call the same
+/// target many times), then hands the results to the pure
+/// `classifySemanticToken` above.
+let computeSemanticTokens
+    (graph: Graph)
+    (bridge: SidecarBridge.SidecarBridge)
+    (enclosingObj: ObjRef)
+    (stmts: Stmt list)
+    : Async<SemanticTokenEntry[]> =
+    async {
+        let refs = AstQuery.collectReferences stmts
+        let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+
+        let verbCallTargets =
+            refs
+            |> List.choose (fun r ->
+                match r.Ref with
+                | AstQuery.RefVerbCall(receiver, StrLit verbName, _) ->
+                    Metadata.Resolver.resolveReceiverInContext graph enclosingObj receiver
+                    |> Option.map (fun startObj -> startObj, verbName)
+                | _ -> None)
+            |> List.distinct
+
+        let! resolutions =
+            verbCallTargets
+            |> List.map (fun (startObj, verbName) ->
+                async {
+                    let! result = bridge.ResolveVerbDispatch startObj verbName |> Async.AwaitTask
+                    return (startObj, verbName), result.IsSome
+                })
+            |> Async.Parallel
+
+        let resolvedVerbCalls = resolutions |> Map.ofArray
+
+        return refs |> List.choose (classifySemanticToken graph enclosingObj liveBuiltins resolvedVerbCalls) |> Array.ofList
+    }
 
 /// One verb's maintenance-hotspot metrics for the "Verb complexity size
 /// metrics dashboard" - line count, corpus-wide call count, and deepest
@@ -1722,7 +1863,7 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                   TypeDefinitionProvider = None
                   ImplementationProvider = None
                   ReferencesProvider = Some(U2.C1 true)
-                  DocumentHighlightProvider = None
+                  DocumentHighlightProvider = Some(U2.C1 true)
                   DocumentSymbolProvider = None
                   CodeActionProvider = None
                   CodeLensProvider = None
@@ -1882,6 +2023,57 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                                 return Ok(Some(U2.C1(U2.C1 loc)))
                             | None -> return Ok None
                         | _ -> return Ok None
+        }
+
+    /// Highlights every occurrence, within the currently-open verb only, of
+    /// the symbol under the cursor - distinct from the project-wide "find
+    /// references" panel. MOO has no block-scoping (the same invariant
+    /// `AstQuery.fs`'s own `allBoundNames`/`firstBindingSite` comments lean
+    /// on), so matching by name/kind alone is exact within one verb, not an
+    /// approximation - unlike hover/go-to-definition this never needs
+    /// `Metadata.Resolver` dispatch resolution, since every match has to
+    /// live in the same verb as the cursor anyway.
+    override _.TextDocumentDocumentHighlight(p: DocumentHighlightParams) =
+        async {
+            match verbAtUri graph p.TextDocument.Uri with
+            | None -> return Ok None
+            | Some(_, verb) ->
+                match verb.Ast with
+                | None -> return Ok None
+                | Some stmts ->
+                    let astLine = int p.Position.Line + 1
+                    let astCol = int p.Position.Character + 1
+
+                    match AstQuery.referenceAt astLine astCol stmts with
+                    | None -> return Ok None
+                    | Some cursor ->
+                        let isCursor (r: AstQuery.FoundReference) = r.Line = cursor.Line && r.Col = cursor.Col
+
+                        // Computed-name refs (a non-`StrLit` verb/property
+                        // name) have nothing to statically match beyond
+                        // themselves - `matches` returns false for every
+                        // pair of those, so only `isCursor` keeps the
+                        // cursor's own occurrence in the result.
+                        let matches (r: AstQuery.FoundReference) : bool =
+                            match cursor.Ref, r.Ref with
+                            | AstQuery.RefIdent a, AstQuery.RefIdent b -> a = b
+                            | AstQuery.RefCall(a, _), AstQuery.RefCall(b, _) -> a = b
+                            | AstQuery.RefVerbCall(_, StrLit a, _), AstQuery.RefVerbCall(_, StrLit b, _) -> a = b
+                            | AstQuery.RefProp(_, StrLit a), AstQuery.RefProp(_, StrLit b) -> a = b
+                            | _ -> false
+
+                        let highlights =
+                            AstQuery.collectReferences stmts
+                            |> List.filter (fun r -> isCursor r || matches r)
+                            |> List.map (fun r ->
+                                { Range =
+                                    { Start = { Line = uint32 (r.Line - 1); Character = uint32 (r.Col - 1) }
+                                      End = { Line = uint32 (r.Line - 1); Character = uint32 (r.Col - 1 + r.Length) } }
+                                  Kind = Some DocumentHighlightKind.Text }
+                                : DocumentHighlight)
+                            |> Array.ofList
+
+                        return Ok(Some highlights)
         }
 
     /// Local variables (from the currently-open verb's last-saved AST) +
@@ -2270,6 +2462,27 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     member _.GetCallGraph(p: GetCallGraphParams) : Async<Result<CallGraphResult, JsonRpc.Error>> =
         async { return Ok(getCallGraph graph p.ObjRef p.VerbName) }
 
+    /// Custom method (`moodev/getSemanticTokens`, `{objRef, verbName}`) -
+    /// resolver-driven semantic highlighting for that verb. Not a real
+    /// `textDocument/semanticTokens/full` override: the wire shape
+    /// deliberately isn't the LSP spec's delta-encoded `Data: uint32[]`
+    /// array (see `SemanticTokenEntry`'s own doc comment), so declaring the
+    /// real `SemanticTokensProvider` capability would be actively
+    /// misleading to any real LSP client - this server doesn't (this
+    /// project's own client never inspects capabilities anyway, per
+    /// `LspClient.fs`'s top-of-file doc comment).
+    member _.GetSemanticTokens(p: GetSemanticTokensParams) : Async<Result<SemanticTokenEntry[], JsonRpc.Error>> =
+        async {
+            match verbAtUri graph (moodevVerbUri p.ObjRef p.VerbName) with
+            | None -> return Ok [||]
+            | Some(enclosingObj, verb) ->
+                match verb.Ast with
+                | None -> return Ok [||]
+                | Some stmts ->
+                    let! tokens = computeSemanticTokens graph bridge enclosingObj stmts
+                    return Ok tokens
+        }
+
     /// Custom method (`moodev/findGotchas`, no params) - the "MOOcode
     /// gotchas" static-check report: every verb `findGotchas` flags for a
     /// missing `x` bit despite a confirmed caller, an unbounded loop with no
@@ -2289,5 +2502,5 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     member _.GetMoocodeDocs(_p: obj) : Async<Result<MoocodeDocEntry[], JsonRpc.Error>> =
         async {
             let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
-            return Ok(moocodeDocs liveBuiltins)
+            return Ok(moocodeDocs graph liveBuiltins)
         }

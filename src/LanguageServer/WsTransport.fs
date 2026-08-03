@@ -32,6 +32,9 @@ let run (socket: WebSocket) (graph: Graph) (bridge: SidecarBridge.SidecarBridge)
             "moodev/resolveEffectiveMember"
             (Server.serverRequestHandling (fun (s: MooLspServer) (p: ResolveEffectiveMemberParams) -> s.ResolveEffectiveMember p))
         |> Map.add "moodev/getCallGraph" (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetCallGraphParams) -> s.GetCallGraph p))
+        |> Map.add
+            "moodev/getSemanticTokens"
+            (Server.serverRequestHandling (fun (s: MooLspServer) (p: GetSemanticTokensParams) -> s.GetSemanticTokens p))
 
     let clientCreator (_notify, _request) = new MooLspClient()
     let serverCreator (client: MooLspClient) = new MooLspServer(client, graph, bridge)
