@@ -284,7 +284,16 @@ $clientProc = Start-Process 'node.exe' -ArgumentList $clientArgs -WorkingDirecto
 
 try {
     Wait-ForPort -WaitPort $sidecarPort -Name 'Sidecar'
-    Wait-ForPort -WaitPort $lspPort -Name 'LSP server'
+    # 240s, not the 60s default: LanguageServer.exe loads Metadata.Loader's
+    # full metadata graph synchronously before it starts listening -
+    # confirmed live against a real ~425-object/17MB exported tree
+    # (HellMOO-World) that this alone takes 90-120s, comfortably blowing the
+    # 60s default and getting torn down by this script's own timeout right
+    # before it would have succeeded. Sidecar/Client don't have this scaling
+    # problem (Sidecar talks to the MOO live via eval(), no upfront tree
+    # parse; Client is just a static preview server), so only this wait
+    # needs the larger budget.
+    Wait-ForPort -WaitPort $lspPort -Name 'LSP server' -TimeoutSeconds 240
     Wait-ForPort -WaitPort $clientPort -Name 'Client'
 
     Write-Host ""
