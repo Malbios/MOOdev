@@ -511,12 +511,6 @@ let renderVerbFile (selfRefText: string) (v: VerbExport) : string =
 // Orchestration.
 // ---------------------------------------------------------------------------
 
-/// How often (in objects processed) `exportTree` prints a progress line -
-/// needed so a large world (hundreds of thousands of objects) doesn't sit
-/// silent long enough to look hung. Applies to both the per-corponym export
-/// loop and the chunked non-corified-verb scan below.
-let private progressInterval = 250
-
 /// Walks every corponym, fetches its object's export data, and writes the
 /// full tree to `outputDir`. Overwrites whatever's already there - callers
 /// that want a clean tree should clear `outputDir` first (the round-trip
@@ -543,9 +537,13 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
 
         let totalCorponyms = sortedByName.Length
         printfn "Exporting %d corponym-bearing object(s)..." totalCorponyms
-        let mutable exportedCount = 0
 
-        for name, objRef in sortedByName do
+        for i, (name, objRef) in List.indexed sortedByName do
+            // Announced *before* the round trip, not after - so if this
+            // particular object's fetch is slow (large properties/verb code,
+            // a laggy connection), the last line on screen still names what's
+            // currently in flight instead of going silent until it returns.
+            printfn "[%d/%d] %s (#%d)..." (i + 1) totalCorponyms name objRef
             let! dataOpt = getObjectExport evalRunner objRef ct
 
             match dataOpt with
@@ -565,11 +563,6 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
 
                 for verb, fileName in verbFileNames do
                     File.WriteAllText(Path.Combine(verbsDir, fileName), renderVerbFile ("$" + name) verb)
-
-            exportedCount <- exportedCount + 1
-
-            if exportedCount % progressInterval = 0 || exportedCount = totalCorponyms then
-                printfn "Exported %d/%d objects..." exportedCount totalCorponyms
 
         // FORMAT.md §1's one exception: #0 (System Object) always gets a
         // directory even without a corponym of its own to be discovered by
@@ -608,16 +601,17 @@ let exportTree (conn: MooEval.Connection) (outputDir: string) (ct: CancellationT
         // accepted-resolution note for the reasoning).
         let corponymObjnums = corponymsByObjnum |> Map.toList |> List.map fst |> Set.ofList
         let! maxObj = getMaxObject evalRunner ct
-        printfn "Scanning #1..#%d for non-corified verbs..." maxObj
 
         let anonVerbsByObjnum = ResizeArray<int64 * VerbExport list>()
         let mutable chunkLo = 1L
 
         while chunkLo <= maxObj do
             let chunkHi = min maxObj (chunkLo + anonVerbChunkSize - 1L)
+            // Announced before the round trip - see the corponym loop above
+            // for why.
+            printfn "Scanning #%d..#%d/#%d for non-corified verbs..." chunkLo chunkHi maxObj
             let! chunkResults = getAnonVerbs evalRunner corponymObjnums chunkLo chunkHi ct
             anonVerbsByObjnum.AddRange(chunkResults)
-            printfn "Scanned %d/%d objects for non-corified verbs..." chunkHi maxObj
             chunkLo <- chunkHi + 1L
 
         for objnum, verbs in anonVerbsByObjnum do
