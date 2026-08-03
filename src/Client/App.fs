@@ -2588,6 +2588,14 @@ and private mkEditableCell (labelText: string) (widget: HTMLElement) (onConfirm:
     editGroup.appendChild widget |> ignore
     editGroup.appendChild confirmBtn |> ignore
 
+    // Pressing Enter anywhere in the widget finishes editing the same way
+    // clicking the checkmark does - mirrors the focus-on-open query above,
+    // targeting whichever single input/select this cell's widget actually
+    // contains.
+    match editGroup.querySelector ("input, select") with
+    | null -> ()
+    | el -> (el :?> HTMLElement).onkeydown <- fun ev -> if ev.key = "Enter" then confirmBtn.click ()
+
     td.appendChild labelSpan |> ignore
     td.appendChild editBtn |> ignore
     td.appendChild editGroup |> ignore
@@ -3040,6 +3048,8 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             if newName <> "" && newName <> (info?rawName: string) then
                 sendAction [ "action" ==> "rename-object"; "obj" ==> int objRef; "name" ==> newName ]
 
+    renameInput.onkeydown <- fun ev -> if ev.key = "Enter" then renameConfirmBtn.click ()
+
     renameGroup.appendChild renameConfirmBtn |> ignore
 
     renameBtn.onclick <-
@@ -3209,6 +3219,8 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
                 link.setAttribute ("style", "")
                 editBtn.setAttribute ("style", "")
                 editGroup.setAttribute ("style", "display:none")
+
+        ownerEditInput.onkeydown <- fun ev -> if ev.key = "Enter" then ownerConfirmBtn.click ()
 
         editGroup.appendChild ownerConfirmBtn |> ignore
 
