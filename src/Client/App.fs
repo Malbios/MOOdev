@@ -1487,6 +1487,7 @@ let private allSidebarViews =
       sidebarViewWatchEl
       sidebarViewInheritanceGraphEl
       sidebarViewVerbMetricsEl
+      sidebarViewCallGraphEl
       sidebarViewEnvDoctorEl
       sidebarViewWorldHealthEl ]
 
