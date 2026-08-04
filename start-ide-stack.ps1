@@ -68,16 +68,6 @@
     Content tree for this MOO world (Moo:TreeDir) - where the Sidecar exports/reads/commits
     MOOcode. Must already exist.
 
-.PARAMETER MooUsername
-    Account name for the content-tree export's own connection (`Sidecar.exe export ... --user`,
-    see `MooEval.connect`'s own comment). Default: `wizard` - correct for a bare `Minimal.db`
-    world with no real accounting. A real, separately-accounted world (confirmed live against a
-    HellMOO-derived one) needs its actual wizard-equivalent character's name instead - a bare
-    `connect wizard` there silently never authenticates, and the export just hangs until
-    ToastStunt's own 300-second not-logged-in connection timeout kills it. Only ever a bare
-    `connect <name>`, no password - see the same comment for why that's the limit of what this
-    supports.
-
 .PARAMETER RefreshExport
     Forces a full `Sidecar.exe export` even if TreeDir already has a content tree. Omit for the
     normal case: once a tree exists, this script skips the export entirely and starts straight
@@ -118,7 +108,6 @@ param(
     [Parameter(Mandatory = $true)] [int]$LspBridgeMooPort,
     [Parameter(Mandatory = $true)] [int]$LspListenerObj,
     [Parameter(Mandatory = $true)] [string]$TreeDir,
-    [string]$MooUsername = 'wizard',
     [switch]$RefreshExport,
     [int]$ClientPort = 0
 )
@@ -294,7 +283,28 @@ if ($RefreshExport -or -not $treeAlreadyExists) {
     } else {
         Write-Host "Content tree not found yet - exporting for the first time (this can take a long time for a large database)..."
     }
-    & $sidecarExe export $TreeDir $MooHost $MooPort --user $MooUsername
+    # Routes through the LSP-bridge listener rather than the world's own player
+    # port + -MooUsername - that listener's do_login_command unconditionally
+    # logs in as its own dedicated service character regardless of what text
+    # is sent (see bootstrap-moo-world.ps1's own LSP-bridge setup:
+    # `set_verb_code(lst, "do_login_command", {"return " + tostr(svc) + ";"})`),
+    # sidestepping the connect-line convention entirely rather than needing
+    # MooEval.connect to understand every world's own login dialect. Confirmed
+    # live this must-not-assume the world speaks stock "connect <name>" at
+    # all: a real, retro-themed world (see MOOdy's CLAUDE.md) instead reads
+    # name/password as two separate lines via its own read() calls -
+    # MooEval.connect's single "connect " + username + "\r\n" line just gets
+    # parsed as raw name text there and never authenticates, leaving
+    # `Sidecar.exe export` to hang until its own eval-response wait gives up
+    # and the connection closes. The listener is re-bound above, before this
+    # point, so it's already live by the time this runs. -LspBridgeMooPort/
+    # -LspListenerObj are both mandatory parameters of this script, so this
+    # path is always available - there's no longer a -MooUsername fallback
+    # to fall back to (removed: it existed for exactly this one connection,
+    # which no longer needs it). "moodev-lsp-bridge" below is just a
+    # readable placeholder, not a real account - the listener ignores
+    # whatever text is sent either way.
+    & $sidecarExe export $TreeDir $MooHost $LspBridgeMooPort --user "moodev-lsp-bridge"
     if ($LASTEXITCODE -ne 0) { throw "Export into $TreeDir failed." }
     git -C $TreeDir add -A
     if (git -C $TreeDir status --porcelain) {
