@@ -9,6 +9,7 @@
 /// *sending* side of the client changes, not the receiving side.
 module Sidecar.IdeActions
 
+open System
 open System.Net.WebSockets
 open System.Text
 open System.Text.Json
@@ -2406,113 +2407,124 @@ else
             "connectedPlayer" -> tostr(player), "connectedPlayerName" -> connplayername];
 endif"""
 
-        let! json = evalRunner statements "result" ct
-        let root = json.RootElement
-        let hasError, _ = root.TryGetProperty("error")
+        // The whole response path is wrapped, not just the initial eval -
+        // `getCorponyms` below is a second `evalRunner` round trip and can
+        // time out on its own too, and a bare `TimeoutException` escaping
+        // this function would crash the whole browser connection (see
+        // `BridgeHandler.evalOnSession`'s own doc comment for why and the
+        // live bug this fixes: the inspector panel hanging forever on
+        // "Loading..." after the underlying MOO task died mid-eval with
+        // "Task ran out of ticks" on a real, richly-inherited object).
+        try
+            let! json = evalRunner statements "result" ct
+            let root = json.RootElement
+            let hasError, _ = root.TryGetProperty("error")
 
-        if hasError then
-            do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [] ct
-        else
-            let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
+            if hasError then
+                do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [] ct
+            else
+                let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
 
-            let refOf (objref: string) (name: string) =
-                let r = int64 (objref.TrimStart('#'))
-                {| objRef = r; name = formatLiveName corponymsByObjnum r name |}
+                let refOf (objref: string) (name: string) =
+                    let r = int64 (objref.TrimStart('#'))
+                    {| objRef = r; name = formatLiveName corponymsByObjnum r name |}
 
-            let firstAlias (nameSpec: string) =
-                nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
+                let firstAlias (nameSpec: string) =
+                    nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
 
-            // MOO has no real boolean type - `is_player()`/`.programmer`/
-            // `.wizard`/`.r`/`.w`/`.f`/`.a` are all plain integers (0/1),
-            // which the eval bridge round-trips as JSON numbers, not JSON
-            // booleans - `GetBoolean()` throws on a Number-kind element
-            // (confirmed live: this crashed the whole connection before a
-            // response was ever sent, the same "silent hang" class of bug
-            // `Exporter.getObjectExport`'s own doc comment warns about,
-            // just via a different mechanism). Read as int and compare to 1
-            // instead, so the wire payload still carries a genuine JSON
-            // boolean for `renderInspectorStructure`'s `(info?xxx: bool)`
-            // reads on the client side.
-            let flag (name: string) = root.GetProperty(name).GetInt32() = 1
+                // MOO has no real boolean type - `is_player()`/`.programmer`/
+                // `.wizard`/`.r`/`.w`/`.f`/`.a` are all plain integers (0/1),
+                // which the eval bridge round-trips as JSON numbers, not JSON
+                // booleans - `GetBoolean()` throws on a Number-kind element
+                // (confirmed live: this crashed the whole connection before a
+                // response was ever sent, the same "silent hang" class of bug
+                // `Exporter.getObjectExport`'s own doc comment warns about,
+                // just via a different mechanism). Read as int and compare to 1
+                // instead, so the wire payload still carries a genuine JSON
+                // boolean for `renderInspectorStructure`'s `(info?xxx: bool)`
+                // reads on the client side.
+                let flag (name: string) = root.GetProperty(name).GetInt32() = 1
 
-            let connectedPlayerRef = int64 (root.GetProperty("connectedPlayer").GetString().TrimStart('#'))
+                let connectedPlayerRef = int64 (root.GetProperty("connectedPlayer").GetString().TrimStart('#'))
 
-            let connectedPlayerDisplay =
-                formatLiveName corponymsByObjnum connectedPlayerRef (root.GetProperty("connectedPlayerName").GetString())
+                let connectedPlayerDisplay =
+                    formatLiveName corponymsByObjnum connectedPlayerRef (root.GetProperty("connectedPlayerName").GetString())
 
-            let payload =
-                {| name = formatLiveName corponymsByObjnum objRef (root.GetProperty("name").GetString())
-                   // The raw `.name` value (often empty for an unnamed
-                   // object) - unlike `name` above, not run through
-                   // `formatLiveName`, since the rename widget needs to
-                   // prefill with what's actually assignable back to
-                   // `.name`, not a display string like `"#6 (#6)"`.
-                   rawName = root.GetProperty("name").GetString()
-                   owner = refOf (root.GetProperty("owner").GetString()) (root.GetProperty("ownername").GetString())
-                   connectedPlayerRef = connectedPlayerRef
-                   connectedPlayerDisplay = connectedPlayerDisplay
-                   aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> Array.ofSeq
-                   player = flag "player"
-                   programmer = flag "programmer"
-                   wizard = flag "wizard"
-                   read = flag "read"
-                   write = flag "write"
-                   fertile = flag "fertile"
-                   anonymous = flag "anonymous"
-                   parents =
-                     root.GetProperty("parents").EnumerateArray()
-                     |> Seq.map (fun p -> refOf (p.GetProperty("objref").GetString()) (p.GetProperty("name").GetString()))
-                     |> Array.ofSeq
-                   children =
-                     root.GetProperty("children").EnumerateArray()
-                     |> Seq.map (fun c -> refOf (c.GetProperty("objref").GetString()) (c.GetProperty("name").GetString()))
-                     |> Array.ofSeq
-                   verbs =
-                     root.GetProperty("verbs").EnumerateArray()
-                     |> Seq.map (fun v ->
-                         let vOwnerRef = int64 (v.GetProperty("owner").GetString().TrimStart('#'))
-                         let vOwnerName = v.GetProperty("ownername").GetString()
-                         let definerRef = int64 (v.GetProperty("definer").GetString().TrimStart('#'))
-                         let definerName = v.GetProperty("definername").GetString()
+                let payload =
+                    {| name = formatLiveName corponymsByObjnum objRef (root.GetProperty("name").GetString())
+                       // The raw `.name` value (often empty for an unnamed
+                       // object) - unlike `name` above, not run through
+                       // `formatLiveName`, since the rename widget needs to
+                       // prefill with what's actually assignable back to
+                       // `.name`, not a display string like `"#6 (#6)"`.
+                       rawName = root.GetProperty("name").GetString()
+                       owner = refOf (root.GetProperty("owner").GetString()) (root.GetProperty("ownername").GetString())
+                       connectedPlayerRef = connectedPlayerRef
+                       connectedPlayerDisplay = connectedPlayerDisplay
+                       aliases = root.GetProperty("aliases").EnumerateArray() |> Seq.map (fun a -> a.GetString()) |> Array.ofSeq
+                       player = flag "player"
+                       programmer = flag "programmer"
+                       wizard = flag "wizard"
+                       read = flag "read"
+                       write = flag "write"
+                       fertile = flag "fertile"
+                       anonymous = flag "anonymous"
+                       parents =
+                         root.GetProperty("parents").EnumerateArray()
+                         |> Seq.map (fun p -> refOf (p.GetProperty("objref").GetString()) (p.GetProperty("name").GetString()))
+                         |> Array.ofSeq
+                       children =
+                         root.GetProperty("children").EnumerateArray()
+                         |> Seq.map (fun c -> refOf (c.GetProperty("objref").GetString()) (c.GetProperty("name").GetString()))
+                         |> Array.ofSeq
+                       verbs =
+                         root.GetProperty("verbs").EnumerateArray()
+                         |> Seq.map (fun v ->
+                             let vOwnerRef = int64 (v.GetProperty("owner").GetString().TrimStart('#'))
+                             let vOwnerName = v.GetProperty("ownername").GetString()
+                             let definerRef = int64 (v.GetProperty("definer").GetString().TrimStart('#'))
+                             let definerName = v.GetProperty("definername").GetString()
 
-                         {| name = firstAlias (v.GetProperty("names").GetString())
-                            // The complete, un-truncated name-spec (e.g.
-                            // "look l") - unlike `name` above (first alias
-                            // only, kept as-is since resolve-by-alias call
-                            // sites depend on it), the rename editor needs
-                            // the whole thing to prefill, or renaming would
-                            // silently drop every alias but the first.
-                            fullNames = v.GetProperty("names").GetString()
-                            owner = formatLiveName corponymsByObjnum vOwnerRef vOwnerName
-                            ownerRef = vOwnerRef
-                            perms = v.GetProperty("perms").GetString()
-                            dobj = v.GetProperty("dobj").GetString()
-                            prep = v.GetProperty("prep").GetString()
-                            iobj = v.GetProperty("iobj").GetString()
-                            // The object this verb is actually defined on -
-                            // `objRef` itself for an "own" verb, an
-                            // ancestor's ref otherwise (see this function's
-                            // own doc comment).
-                            definerRef = definerRef
-                            definerName = formatLiveName corponymsByObjnum definerRef definerName |})
-                     |> Array.ofSeq
-                   properties =
-                     root.GetProperty("properties").EnumerateArray()
-                     |> Seq.map (fun p ->
-                         let ownerRef = int64 (p.GetProperty("owner").GetString().TrimStart('#'))
-                         let ownerName = p.GetProperty("ownername").GetString()
-                         let definerRef = int64 (p.GetProperty("definer").GetString().TrimStart('#'))
-                         let definerName = p.GetProperty("definername").GetString()
+                             {| name = firstAlias (v.GetProperty("names").GetString())
+                                // The complete, un-truncated name-spec (e.g.
+                                // "look l") - unlike `name` above (first alias
+                                // only, kept as-is since resolve-by-alias call
+                                // sites depend on it), the rename editor needs
+                                // the whole thing to prefill, or renaming would
+                                // silently drop every alias but the first.
+                                fullNames = v.GetProperty("names").GetString()
+                                owner = formatLiveName corponymsByObjnum vOwnerRef vOwnerName
+                                ownerRef = vOwnerRef
+                                perms = v.GetProperty("perms").GetString()
+                                dobj = v.GetProperty("dobj").GetString()
+                                prep = v.GetProperty("prep").GetString()
+                                iobj = v.GetProperty("iobj").GetString()
+                                // The object this verb is actually defined on -
+                                // `objRef` itself for an "own" verb, an
+                                // ancestor's ref otherwise (see this function's
+                                // own doc comment).
+                                definerRef = definerRef
+                                definerName = formatLiveName corponymsByObjnum definerRef definerName |})
+                         |> Array.ofSeq
+                       properties =
+                         root.GetProperty("properties").EnumerateArray()
+                         |> Seq.map (fun p ->
+                             let ownerRef = int64 (p.GetProperty("owner").GetString().TrimStart('#'))
+                             let ownerName = p.GetProperty("ownername").GetString()
+                             let definerRef = int64 (p.GetProperty("definer").GetString().TrimStart('#'))
+                             let definerName = p.GetProperty("definername").GetString()
 
-                         {| name = p.GetProperty("name").GetString()
-                            owner = formatLiveName corponymsByObjnum ownerRef ownerName
-                            definerRef = definerRef
-                            definerName = formatLiveName corponymsByObjnum definerRef definerName
-                            ownerRef = ownerRef
-                            perms = p.GetProperty("perms").GetString() |})
-                     |> Array.ofSeq |}
+                             {| name = p.GetProperty("name").GetString()
+                                owner = formatLiveName corponymsByObjnum ownerRef ownerName
+                                definerRef = definerRef
+                                definerName = formatLiveName corponymsByObjnum definerRef definerName
+                                ownerRef = ownerRef
+                                perms = p.GetProperty("perms").GetString() |})
+                         |> Array.ofSeq |}
 
-            do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [ JsonSerializer.Serialize(payload) ] ct
+                do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [ JsonSerializer.Serialize(payload) ] ct
+        with :? TimeoutException as ex ->
+            do! sendWire webSocket (sprintf "moodev-live-info-error object: #%d" objRef) [ ex.Message ] ct
     }
 
 /// Resolves `obj`+`verbName` to its corponym and *current* on-disk path

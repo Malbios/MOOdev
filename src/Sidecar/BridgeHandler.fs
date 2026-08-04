@@ -86,6 +86,19 @@ let private tagFromHeader (header: string) : int option =
         | true, tag -> Some tag
         | false, _ -> None
 
+/// Wall-clock cap on a single `evalOnSession` round trip - confirmed live
+/// as a real gap: the object inspector's `getLiveInfo` query hung forever
+/// (a permanently "Loading..." panel) after the underlying MOO task died
+/// mid-eval with "Task ran out of ticks" on a real, richly-inherited
+/// object - the tagged `#$#bridge-eval`/`#$#:` response lines that would
+/// resolve `tcs.Task` below are only ever notify()'d by that same task, so
+/// a task that dies before reaching them leaves the wait with literally
+/// nothing to ever wake it up. Same failure shape `Exporter.fs`'s
+/// `withEvalTimeout` already fixed for the batch export path - this is the
+/// equivalent for the browser's own live session. Shorter than that one's
+/// 90s (interactive/user-waiting here, not a long unattended batch job).
+let private evalSessionTimeout = TimeSpan.FromSeconds(30.0)
+
 /// Sends a MOO command over this session's own live connection - so
 /// `player` is whichever character is actually logged into this browser
 /// tab, not a separate wizard connection - and awaits its `#$#bridge-eval`
@@ -99,6 +112,18 @@ let private tagFromHeader (header: string) : int option =
 /// see `MooEval.sendAndAwaitJson`'s own comment for the full story and the
 /// real hang it caused before that fix - the exact same hang risk applies
 /// here if this wrapping is ever skipped).
+///
+/// Throws `TimeoutException` (not a bare `OperationCanceledException`) if
+/// `evalSessionTimeout` elapses before the response arrives - deliberately
+/// distinct from a genuine caller-driven `ct` cancellation, which still
+/// surfaces as the normal `OperationCanceledException`/`TaskCanceledException`
+/// so existing `with :? OperationCanceledException -> ()` handlers
+/// (`BridgeHandler`'s own connection-pump loop) keep working unchanged.
+/// Callers that can meaningfully recover (e.g. `IdeActions.getLiveInfo`,
+/// which can tell the inspector panel to show an error instead of hanging)
+/// should catch this specifically; every other caller still benefits from
+/// `Program.buildTryDispatch`'s own catch-all safety net, so a slow/dead
+/// task can no longer take the whole browser connection down with it.
 let evalOnSession
     (session: Session)
     (statements: string)
@@ -110,7 +135,9 @@ let evalOnSession
         let tcs = TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously)
         session.Waiters.[tag] <- tcs
 
+        use timeoutCts = new CancellationTokenSource(evalSessionTimeout)
         use _reg = ct.Register(fun () -> tcs.TrySetCanceled() |> ignore)
+        use _timeoutReg = timeoutCts.Token.Register(fun () -> tcs.TrySetCanceled() |> ignore)
 
         let fullStatements =
             $"""{statements} jsonval = (`generate_json({resultExpr}) ! ANY => generate_json(["error" -> tostr(error_code)])'); notify(player, "#$#bridge-eval ref: {tag}"); notify(player, "#$#* {tag} text: " + jsonval); notify(player, "#$#: {tag}");"""
@@ -118,9 +145,12 @@ let evalOnSession
         let oneLine = fullStatements.Replace("\r\n", " ").Replace("\n", " ").Replace("\r", " ")
 
         try
-            do! writeLine session (";; " + oneLine) ct
-            let! json = tcs.Task
-            return JsonDocument.Parse(json)
+            try
+                do! writeLine session (";; " + oneLine) ct
+                let! json = tcs.Task
+                return JsonDocument.Parse(json)
+            with :? OperationCanceledException when timeoutCts.IsCancellationRequested && not ct.IsCancellationRequested ->
+                return raise (TimeoutException(sprintf "MOO eval timed out after %gs (tag %d) - the underlying task may have died mid-eval without responding, e.g. ran out of ticks" evalSessionTimeout.TotalSeconds tag))
         finally
             session.Waiters.TryRemove(tag) |> ignore
     }

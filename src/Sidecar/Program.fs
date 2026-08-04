@@ -413,253 +413,275 @@ let private buildTryDispatch
                 let getObj () = root.GetProperty("obj").GetInt64()
                 let getStr (name: string) = root.GetProperty(name).GetString()
 
-                match actionEl.GetString() with
-                | "fetch-verb" ->
-                    do! IdeActions.fetchVerb config session webSocket (getObj ()) (getStr "verb") ct
-                    return true
-                | "verb-at-parent" ->
-                    do! IdeActions.verbAtParent session webSocket (getObj ()) (getStr "verb") ct
-                    return true
-                | "save-verb" ->
-                    let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
-                    do! IdeActions.saveVerb config session webSocket (getObj ()) (getStr "verb") code ct
-                    return true
-                | "check-verb-syntax" ->
-                    let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
-                    do! IdeActions.checkVerbSyntax session webSocket (getObj ()) (getStr "verb") code ct
-                    return true
-                | "get-properties" ->
-                    do! IdeActions.getProperties config session webSocket (getObj ()) ct
-                    return true
-                | "set-property" ->
-                    do! IdeActions.setProperty config session webSocket (getObj ()) (getStr "name") (getStr "valueExpr") ct
-                    return true
-                | "add-property" ->
-                    do!
-                        IdeActions.addProperty
-                            config
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "name")
-                            (getStr "ownerExpr")
-                            (getStr "valueExpr")
-                            (getStr "perms")
-                            ct
+                try
+                    match actionEl.GetString() with
+                    | "fetch-verb" ->
+                        do! IdeActions.fetchVerb config session webSocket (getObj ()) (getStr "verb") ct
+                        return true
+                    | "verb-at-parent" ->
+                        do! IdeActions.verbAtParent session webSocket (getObj ()) (getStr "verb") ct
+                        return true
+                    | "save-verb" ->
+                        let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+                        do! IdeActions.saveVerb config session webSocket (getObj ()) (getStr "verb") code ct
+                        return true
+                    | "check-verb-syntax" ->
+                        let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+                        do! IdeActions.checkVerbSyntax session webSocket (getObj ()) (getStr "verb") code ct
+                        return true
+                    | "get-properties" ->
+                        do! IdeActions.getProperties config session webSocket (getObj ()) ct
+                        return true
+                    | "set-property" ->
+                        do! IdeActions.setProperty config session webSocket (getObj ()) (getStr "name") (getStr "valueExpr") ct
+                        return true
+                    | "add-property" ->
+                        do!
+                            IdeActions.addProperty
+                                config
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "name")
+                                (getStr "ownerExpr")
+                                (getStr "valueExpr")
+                                (getStr "perms")
+                                ct
 
-                    return true
-                | "delete-verb" ->
-                    do! IdeActions.deleteVerb config session webSocket (getObj ()) (getStr "verb") ct
-                    return true
-                | "delete-property" ->
-                    do! IdeActions.deleteProperty config session webSocket (getObj ()) (getStr "name") ct
-                    return true
-                | "recycle-object" ->
-                    do! IdeActions.recycleObject config session webSocket (getObj ()) ct
-                    return true
-                | "create-object" ->
-                    do! IdeActions.createObject config session webSocket (getStr "parentExpr") ct
-                    return true
-                | "add-verb" ->
-                    do!
-                        IdeActions.addVerb
-                            config
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "name")
-                            (getStr "ownerExpr")
-                            (getStr "perms")
-                            (getStr "dobj")
-                            (getStr "prep")
-                            (getStr "iobj")
-                            ct
+                        return true
+                    | "delete-verb" ->
+                        do! IdeActions.deleteVerb config session webSocket (getObj ()) (getStr "verb") ct
+                        return true
+                    | "delete-property" ->
+                        do! IdeActions.deleteProperty config session webSocket (getObj ()) (getStr "name") ct
+                        return true
+                    | "recycle-object" ->
+                        do! IdeActions.recycleObject config session webSocket (getObj ()) ct
+                        return true
+                    | "create-object" ->
+                        do! IdeActions.createObject config session webSocket (getStr "parentExpr") ct
+                        return true
+                    | "add-verb" ->
+                        do!
+                            IdeActions.addVerb
+                                config
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "name")
+                                (getStr "ownerExpr")
+                                (getStr "perms")
+                                (getStr "dobj")
+                                (getStr "prep")
+                                (getStr "iobj")
+                                ct
 
-                    return true
-                | "set-owner" ->
-                    do! IdeActions.setOwner config session webSocket (getObj ()) (getStr "ownerExpr") ct
-                    return true
-                | "rename-object" ->
-                    do! IdeActions.setName config session webSocket (getObj ()) (getStr "name") ct
-                    return true
-                | "set-flag" ->
-                    do! IdeActions.setFlag config session webSocket (getObj ()) (getStr "flag") (root.GetProperty("value").GetInt32() = 1) ct
-                    return true
-                | "add-parent" ->
-                    do! IdeActions.addParent config session webSocket (getObj ()) (getStr "parentExpr") ct
-                    return true
-                | "remove-parent" ->
-                    do! IdeActions.removeParent config session webSocket (getObj ()) (root.GetProperty("parent").GetInt64()) ct
-                    return true
-                | "add-child" ->
-                    do! IdeActions.addChild config session webSocket (getObj ()) (getStr "childExpr") ct
-                    return true
-                | "set-property-info" ->
-                    do!
-                        IdeActions.setPropertyInfo
-                            config
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "name")
-                            (getStr "newName")
-                            (getStr "ownerExpr")
-                            (getStr "perms")
-                            ct
+                        return true
+                    | "set-owner" ->
+                        do! IdeActions.setOwner config session webSocket (getObj ()) (getStr "ownerExpr") ct
+                        return true
+                    | "rename-object" ->
+                        do! IdeActions.setName config session webSocket (getObj ()) (getStr "name") ct
+                        return true
+                    | "set-flag" ->
+                        do! IdeActions.setFlag config session webSocket (getObj ()) (getStr "flag") (root.GetProperty("value").GetInt32() = 1) ct
+                        return true
+                    | "add-parent" ->
+                        do! IdeActions.addParent config session webSocket (getObj ()) (getStr "parentExpr") ct
+                        return true
+                    | "remove-parent" ->
+                        do! IdeActions.removeParent config session webSocket (getObj ()) (root.GetProperty("parent").GetInt64()) ct
+                        return true
+                    | "add-child" ->
+                        do! IdeActions.addChild config session webSocket (getObj ()) (getStr "childExpr") ct
+                        return true
+                    | "set-property-info" ->
+                        do!
+                            IdeActions.setPropertyInfo
+                                config
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "name")
+                                (getStr "newName")
+                                (getStr "ownerExpr")
+                                (getStr "perms")
+                                ct
 
-                    return true
-                | "set-verb-info" ->
-                    do!
-                        IdeActions.setVerbInfo
-                            config
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "verb")
-                            (getStr "newNames")
-                            (getStr "ownerExpr")
-                            (getStr "perms")
-                            ct
+                        return true
+                    | "set-verb-info" ->
+                        do!
+                            IdeActions.setVerbInfo
+                                config
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "verb")
+                                (getStr "newNames")
+                                (getStr "ownerExpr")
+                                (getStr "perms")
+                                ct
 
-                    return true
-                | "set-verb-args" ->
-                    do!
-                        IdeActions.setVerbArgs
-                            config
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "verb")
-                            (getStr "dobj")
-                            (getStr "prep")
-                            (getStr "iobj")
-                            ct
+                        return true
+                    | "set-verb-args" ->
+                        do!
+                            IdeActions.setVerbArgs
+                                config
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "verb")
+                                (getStr "dobj")
+                                (getStr "prep")
+                                (getStr "iobj")
+                                ct
 
-                    return true
-                | "fix-permission-risk" ->
-                    do! IdeActions.fixPermissionRisk config session webSocket (getObj ()) (getStr "name") (getStr "kind") ct
+                        return true
+                    | "fix-permission-risk" ->
+                        do! IdeActions.fixPermissionRisk config session webSocket (getObj ()) (getStr "name") (getStr "kind") ct
 
-                    return true
-                | "eval-watch-batch" ->
-                    let exprs = root.GetProperty("exprs").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
-                    do! IdeActions.evalWatchBatch session webSocket exprs ct
-                    return true
-                | "get-live-children" ->
-                    do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
-                    return true
-                | "get-live-roots" ->
-                    do! IdeActions.getLiveRoots config session webSocket ct
-                    return true
-                | "get-live-info" ->
-                    do! IdeActions.getLiveInfo config session webSocket (getObj ()) ct
-                    return true
-                | "get-tasks" ->
-                    do! IdeActions.getTasks config session webSocket ct
-                    return true
-                | "get-server-status" ->
-                    do! IdeActions.getServerStatus config session webSocket ct
-                    return true
-                | "env-doctor-check" ->
-                    do! IdeActions.envDoctorCheck config session webSocket ct
-                    return true
-                | "parse-property-literal" ->
-                    do! IdeActions.parsePropertyLiteralAction webSocket (getObj ()) (getStr "name") (getStr "valueText") ct
-                    return true
-                | "kill-task" ->
-                    do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
-                    return true
-                | "eval-scratchpad" ->
-                    do! IdeActions.evalScratchpad session webSocket (getStr "expr") ct
-                    return true
-                | "checkpoint" ->
-                    do! IdeActions.checkpoint config webSocket ct
-                    return true
-                | "verb-history" ->
-                    do! IdeActions.verbHistory config session webSocket (getObj ()) (getStr "verb") ct
-                    return true
-                | "verb-at-commit" ->
-                    do! IdeActions.verbAtCommit config session webSocket (getObj ()) (getStr "verb") (getStr "sha") ct
-                    return true
-                | "search-history" ->
-                    do! IdeActions.searchHistory config session webSocket (getStr "query") ct
-                    return true
-                | "search-content" ->
-                    do! IdeActions.searchContent config session webSocket (getStr "query") ct
-                    return true
-                | "search-properties" ->
-                    do! IdeActions.searchPropertiesByValue session webSocket (getStr "name") (getStr "valueExpr") ct
-                    return true
-                | "get-waif-properties" ->
-                    do! IdeActions.getWaifProperties session webSocket (getObj ()) (getStr "name") ct
-                    return true
-                | "set-waif-property" ->
-                    do!
-                        IdeActions.setWaifProperty
-                            session
-                            webSocket
-                            (getObj ())
-                            (getStr "name")
-                            (getStr "waifProp")
-                            (getStr "valueExpr")
-                            ct
+                        return true
+                    | "eval-watch-batch" ->
+                        let exprs = root.GetProperty("exprs").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
+                        do! IdeActions.evalWatchBatch session webSocket exprs ct
+                        return true
+                    | "get-live-children" ->
+                        do! IdeActions.getLiveChildren config session webSocket (getObj ()) ct
+                        return true
+                    | "get-live-roots" ->
+                        do! IdeActions.getLiveRoots config session webSocket ct
+                        return true
+                    | "get-live-info" ->
+                        do! IdeActions.getLiveInfo config session webSocket (getObj ()) ct
+                        return true
+                    | "get-tasks" ->
+                        do! IdeActions.getTasks config session webSocket ct
+                        return true
+                    | "get-server-status" ->
+                        do! IdeActions.getServerStatus config session webSocket ct
+                        return true
+                    | "env-doctor-check" ->
+                        do! IdeActions.envDoctorCheck config session webSocket ct
+                        return true
+                    | "parse-property-literal" ->
+                        do! IdeActions.parsePropertyLiteralAction webSocket (getObj ()) (getStr "name") (getStr "valueText") ct
+                        return true
+                    | "kill-task" ->
+                        do! IdeActions.killTask webSocket session (root.GetProperty("task").GetInt64()) ct
+                        return true
+                    | "eval-scratchpad" ->
+                        do! IdeActions.evalScratchpad session webSocket (getStr "expr") ct
+                        return true
+                    | "checkpoint" ->
+                        do! IdeActions.checkpoint config webSocket ct
+                        return true
+                    | "verb-history" ->
+                        do! IdeActions.verbHistory config session webSocket (getObj ()) (getStr "verb") ct
+                        return true
+                    | "verb-at-commit" ->
+                        do! IdeActions.verbAtCommit config session webSocket (getObj ()) (getStr "verb") (getStr "sha") ct
+                        return true
+                    | "search-history" ->
+                        do! IdeActions.searchHistory config session webSocket (getStr "query") ct
+                        return true
+                    | "search-content" ->
+                        do! IdeActions.searchContent config session webSocket (getStr "query") ct
+                        return true
+                    | "search-properties" ->
+                        do! IdeActions.searchPropertiesByValue session webSocket (getStr "name") (getStr "valueExpr") ct
+                        return true
+                    | "get-waif-properties" ->
+                        do! IdeActions.getWaifProperties session webSocket (getObj ()) (getStr "name") ct
+                        return true
+                    | "set-waif-property" ->
+                        do!
+                            IdeActions.setWaifProperty
+                                session
+                                webSocket
+                                (getObj ())
+                                (getStr "name")
+                                (getStr "waifProp")
+                                (getStr "valueExpr")
+                                ct
 
-                    return true
-                | "rename-verb" ->
-                    let sites =
-                        root.GetProperty("sites").EnumerateArray()
-                        |> Seq.map (fun s ->
-                            s.GetProperty("objRef").GetInt64(),
-                            s.GetProperty("verbName").GetString(),
-                            s.GetProperty("line").GetInt32(),
-                            s.GetProperty("col").GetInt32(),
-                            s.GetProperty("length").GetInt32())
-                        |> List.ofSeq
+                        return true
+                    | "rename-verb" ->
+                        let sites =
+                            root.GetProperty("sites").EnumerateArray()
+                            |> Seq.map (fun s ->
+                                s.GetProperty("objRef").GetInt64(),
+                                s.GetProperty("verbName").GetString(),
+                                s.GetProperty("line").GetInt32(),
+                                s.GetProperty("col").GetInt32(),
+                                s.GetProperty("length").GetInt32())
+                            |> List.ofSeq
 
-                    do! IdeActions.renameVerb config session webSocket (getObj ()) (getStr "oldName") (getStr "newName") sites ct
-                    return true
-                | "bulk-replace" ->
-                    let sites =
-                        root.GetProperty("sites").EnumerateArray()
-                        |> Seq.map (fun s ->
-                            s.GetProperty("objRef").GetInt64(),
-                            s.GetProperty("verbName").GetString(),
-                            s.GetProperty("line").GetInt32(),
-                            s.GetProperty("col").GetInt32())
-                        |> List.ofSeq
+                        do! IdeActions.renameVerb config session webSocket (getObj ()) (getStr "oldName") (getStr "newName") sites ct
+                        return true
+                    | "bulk-replace" ->
+                        let sites =
+                            root.GetProperty("sites").EnumerateArray()
+                            |> Seq.map (fun s ->
+                                s.GetProperty("objRef").GetInt64(),
+                                s.GetProperty("verbName").GetString(),
+                                s.GetProperty("line").GetInt32(),
+                                s.GetProperty("col").GetInt32())
+                            |> List.ofSeq
 
-                    do! IdeActions.bulkReplace config session webSocket (getStr "query") (getStr "replacement") sites ct
-                    return true
-                | "corponym-history" ->
-                    do! IdeActions.corponymHistory config webSocket ct
-                    return true
-                | "get-moo-target" ->
+                        do! IdeActions.bulkReplace config session webSocket (getStr "query") (getStr "replacement") sites ct
+                        return true
+                    | "corponym-history" ->
+                        do! IdeActions.corponymHistory config webSocket ct
+                        return true
+                    | "get-moo-target" ->
+                        do!
+                            IdeActions.sendWire
+                                webSocket
+                                (sprintf
+                                    "moodev-moo-target-result host: %s port: %d lspBridgePort: %d treeDir: %s"
+                                    currentTarget.Host
+                                    currentTarget.Port
+                                    currentTarget.LspBridgePort
+                                    currentTarget.TreeDir)
+                                []
+                                ct
+
+                        return true
+                    | "reconfigure-target" ->
+                        do!
+                            reconfigureTarget
+                                webSocket
+                                (getStr "host")
+                                (root.GetProperty("port").GetInt32())
+                                (root.GetProperty("lspBridgePort").GetInt32())
+                                (getStr "treeDir")
+                                config.GitAuthorName
+                                config.GitAuthorEmail
+                                ct
+
+                        return true
+                    | _ -> return false
+                with :? TimeoutException as ex ->
+                    // Safety net for every action handler above that calls
+                    // `IdeActions.evalOnSession` without its own specific
+                    // recovery (unlike `getLiveInfo`, which has one) - an
+                    // uncaught `TimeoutException` here would otherwise
+                    // propagate past this whole dispatch and crash the
+                    // *entire* browser connection (confirmed: the caller's
+                    // own `with :? OperationCanceledException -> ()` doesn't
+                    // match this exception type at all). Reuses the existing
+                    // Errors-tab wire message (`#0:handle_uncaught_error`'s
+                    // own channel, `App.fs`'s `moodev-error` handler) rather
+                    // than inventing a new one - same "something went wrong,
+                    // log it" shape, already wired up and visible.
                     do!
                         IdeActions.sendWire
                             webSocket
-                            (sprintf
-                                "moodev-moo-target-result host: %s port: %d lspBridgePort: %d treeDir: %s"
-                                currentTarget.Host
-                                currentTarget.Port
-                                currentTarget.LspBridgePort
-                                currentTarget.TreeDir)
-                            []
+                            "moodev-error kind: action-timeout"
+                            [ sprintf "Action '%s' timed out: %s" (actionEl.GetString()) ex.Message ]
                             ct
 
                     return true
-                | "reconfigure-target" ->
-                    do!
-                        reconfigureTarget
-                            webSocket
-                            (getStr "host")
-                            (root.GetProperty("port").GetInt32())
-                            (root.GetProperty("lspBridgePort").GetInt32())
-                            (getStr "treeDir")
-                            config.GitAuthorName
-                            config.GitAuthorEmail
-                            ct
-
-                    return true
-                | _ -> return false
     }
 
 /// Pulls `--to <sha>` (a flag *with* a value, unlike the bare `--apply`
