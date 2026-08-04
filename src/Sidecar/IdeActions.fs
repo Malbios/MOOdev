@@ -755,6 +755,7 @@ let getProperties (config: Config) (session: Session) (webSocket: WebSocket) (ob
         // `BridgeHandler.evalOnSession`'s 30-second timeout.
         let statements =
             $"""truncated = 0;
+max_list = 500;
 {ancestorChainStatements o}
 props = {{}};
 seen = {{}};
@@ -763,7 +764,7 @@ for x in (chain)
     break;
   endif
   for pn in (properties(x))
-    if (ticks_left() < 10000)
+    if (ticks_left() < 10000 || length(props) >= max_list)
       truncated = 1;
       break;
     endif
@@ -2404,9 +2405,10 @@ else
   endtry
   ownername = valid({o}.owner) ? (typeof({o}.owner.name) == STR ? {o}.owner.name | "") | "";
   truncated = 0;
+  max_list = 500;
   parents_out = {{}};
   for p in (parents({o}))
-    if (ticks_left() < 10000)
+    if (ticks_left() < 10000 || length(parents_out) >= max_list)
       truncated = 1;
       break;
     endif
@@ -2416,7 +2418,7 @@ else
   children_out = {{}};
   if (!truncated)
     for c in (children({o}))
-      if (ticks_left() < 10000)
+      if (ticks_left() < 10000 || length(children_out) >= max_list)
         truncated = 1;
         break;
       endif
@@ -2438,7 +2440,7 @@ else
     xname = typeof(x.name) == STR ? x.name | "";
     vlist = verbs(x);
     for i in [1..length(vlist)]
-      if (ticks_left() < 10000)
+      if (ticks_left() < 10000 || length(verbs_out) >= max_list)
         truncated = 1;
         break;
       endif
@@ -2452,7 +2454,7 @@ else
       break;
     endif
     for pn in (properties(x))
-      if (ticks_left() < 10000)
+      if (ticks_left() < 10000 || length(props_out) >= max_list)
         truncated = 1;
         break;
       endif
@@ -2470,17 +2472,26 @@ else
             "connectedPlayer" -> tostr(player), "connectedPlayerName" -> connplayername, "truncated" -> truncated];
 endif"""
 
-        // The verb/property scan above self-limits via `ticks_left()`
-        // (checked once per verb and once per property, same `< 10000`
-        // threshold and idiom as `Exporter.getAnonVerbs`, moocode-reference.md's
-        // documented pattern for this exact situation) rather than trying to
-        // enumerate a real, richly-inherited object's full ancestor chain in
-        // one uninterrupted task - live-verified against a ~633k-object
-        // HellMOO-derived world where an unguarded scan reliably died with
-        // "Task ran out of ticks" before ever responding. `truncated` in the
-        // result tells the client the scan stopped early so it can say so,
-        // rather than silently showing an incomplete verb/property list as
-        // if it were the whole picture.
+        // Every potentially-unbounded loop above (parents, children, the
+        // ancestor-chain walk, verbs, properties) self-limits two ways: a
+        // `ticks_left() < 10000` check (same idiom as `Exporter.getAnonVerbs`,
+        // moocode-reference.md's documented pattern) *and* a hard
+        // `length(...) >= max_list` (500) count cap. The tick check alone
+        // isn't enough for `children()`/`parents()` specifically - live-
+        // verified against #0 and #1 on a ~633k-object HellMOO-derived world,
+        // both near-universal ancestors with enormous live child
+        // populations: `children({o})` itself is cheap (it just refs an
+        // already-maintained list, doesn't scan anything), but MOO's list
+        // splice-append (`{@list, x}`) grows more expensive as the
+        // accumulator grows, so a fixed tick margin checked *before* each
+        // iteration can't bound the cost of the *next* append once the list
+        // is already large - a single append can blow through the entire
+        // remaining margin in one shot. The count cap stops accumulation
+        // long before that append cost becomes dangerous, independent of
+        // whatever ticks_left() still reports. `truncated` in the result
+        // tells the client the scan stopped early (either reason) so it can
+        // say so, rather than silently showing an incomplete verb/property
+        // list as if it were the whole picture.
         //
         // The whole response path is still wrapped, not just the initial
         // eval - `getCorponyms` below is a second `evalRunner` round trip
