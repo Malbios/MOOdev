@@ -682,10 +682,42 @@ let bulkReplace
         do! sendWire webSocket "moodev-bulk-replace-result ok: 1" (List.ofSeq failures) ct
     }
 
-/// `ide_get_properties(objRef)` replacement. `properties(obj)` already
-/// only lists properties *defined* on `obj` (confirmed against
-/// `property.cc:bf_properties`, see `Importer.fs`'s own note on this) -
-/// matching the retired verb's exact behavior, not a redesign of it.
+/// Shared MOO fragment producing `chain` (every ancestor of `o`, root-first,
+/// then `o` itself) - needed anywhere property/verb names must be
+/// discovered across the full inheritance chain, since `properties(x)`/
+/// `verbs(x)` only ever return names *directly defined* on `x`, never
+/// inherited ones. Cycle-guarded for multiple inheritance's DAG shape.
+/// Shared between `getProperties` and `getLiveInfo`, which both need it.
+let private ancestorChainStatements (o: string) : string =
+    $"""ancestor_visited = {{}};
+queue = parents({o});
+chain = {{}};
+while (length(queue) > 0)
+  p = queue[1];
+  queue = listdelete(queue, 1);
+  if (valid(p) && !(p in ancestor_visited))
+    ancestor_visited = {{@ancestor_visited, p}};
+    chain = {{@chain, p}};
+    for gp in (parents(p))
+      queue = {{@queue, gp}};
+    endfor
+  endif
+endwhile
+chain = {{@chain, {o}}};"""
+
+/// `ide_get_properties(objRef)` replacement. Walks `objRef`'s full
+/// ancestor chain to discover every *accessible* property name - own or
+/// inherited (`properties(x)` alone only lists names directly defined on
+/// `x`, so limiting this to `properties(objRef)` silently skipped every
+/// inherited property's value, not just chown'd ones with a distinct
+/// child value; this used to deliberately match the retired
+/// `$vcs:ide_get_properties` verb's own same limitation, but that's the
+/// exact bug reported against this feature, not a behavior worth
+/// preserving). The *value* is still always read at `objRef` itself
+/// (`{o}.(pn)`, never the ancestor `x` the name was discovered on) - MOO
+/// already resolves that correctly on its own: the ancestor's value when
+/// never locally overridden, `objRef`'s own distinct value when it has
+/// been.
 let getProperties (config: Config) (session: Session) (webSocket: WebSocket) (objRef: int64) (ct: CancellationToken) : Task<unit> =
     task {
         let o = sprintf "#%d" objRef
@@ -695,7 +727,17 @@ let getProperties (config: Config) (session: Session) (webSocket: WebSocket) (ob
         // moocode-reference.md and the retired $vcs:ide_get_properties'
         // own use of chr(9) for exactly this reason.
         let statements =
-            $"""props = {{}}; for pn in (properties({o})) props = {{@props, pn + chr(9) + toliteral({o}.(pn))}}; endfor"""
+            $"""{ancestorChainStatements o}
+props = {{}};
+seen = {{}};
+for x in (chain)
+  for pn in (properties(x))
+    if (!(pn in seen))
+      seen = {{@seen, pn}};
+      props = {{@props, pn + chr(9) + toliteral({o}.(pn))}};
+    endif
+  endfor
+endfor"""
 
         let! json = evalOnSession session statements "props" ct
         let lines = json.RootElement.EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
@@ -2294,6 +2336,16 @@ endfor"""
 /// copy, each correctly tagged with its own definer, rather than only the
 /// one that would actually execute - replicating exact dispatch precedence
 /// is out of scope here.
+///
+/// A property's `owner`/`perms` are queried via `property_info({o}, pn)` -
+/// at `objRef` itself, not at the ancestor `x` the name was discovered on
+/// (`definer`/`definername` still correctly track `x` for that, unrelated
+/// to this). Per MOO semantics a `c` (chown)-flagged property's owner is
+/// auto-rechowned per descendant at inheritance time, so `property_info`
+/// genuinely differs by which object you ask - querying at the definer
+/// instead of `objRef` was the reported bug (an inherited/chown'd
+/// property showed the parent's owner on every child, never the child's
+/// own).
 let getLiveInfo (config: Config) (session: Session) (webSocket: WebSocket) (objRef: int64) (ct: CancellationToken) : Task<unit> =
     task {
         let evalRunner = evalOnSession session
@@ -2326,21 +2378,7 @@ else
     cname = valid(c) ? (typeof(c.name) == STR ? c.name | "") | "";
     children_out = {{@children_out, ["objref" -> tostr(c), "name" -> cname]}};
   endfor
-  ancestor_visited = {{}};
-  queue = parents({o});
-  chain = {{}};
-  while (length(queue) > 0)
-    p = queue[1];
-    queue = listdelete(queue, 1);
-    if (valid(p) && !(p in ancestor_visited))
-      ancestor_visited = {{@ancestor_visited, p}};
-      chain = {{@chain, p}};
-      for gp in (parents(p))
-        queue = {{@queue, gp}};
-      endfor
-    endif
-  endwhile
-  chain = {{@chain, {o}}};
+  {ancestorChainStatements o}
   verbs_out = {{}};
   props_out = {{}};
   for x in (chain)
@@ -2354,7 +2392,7 @@ else
       verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "owner" -> tostr(vowner), "ownername" -> vownername, "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "definer" -> tostr(x), "definername" -> xname]}};
     endfor
     for pn in (properties(x))
-      pi = property_info(x, pn);
+      pi = property_info({o}, pn);
       powner = pi[1];
       pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
       props_out = {{@props_out, ["name" -> pn, "owner" -> tostr(powner), "ownername" -> pownername, "perms" -> pi[2], "definer" -> tostr(x), "definername" -> xname]}};

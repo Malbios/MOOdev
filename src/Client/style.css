@@ -895,6 +895,12 @@ html, body {
   padding: 0.8em 1em;
 }
 
+#scratchpad-input {
+  min-height: 4.5em;
+  resize: vertical;
+  font-family: inherit;
+}
+
 #scratchpad-result {
   margin: 0.6em 0 0;
   padding: 0.6em;

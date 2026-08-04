@@ -163,7 +163,7 @@ let private docsSearchInputEl = document.getElementById ("docs-search-input") :?
 let private docsListEl = document.getElementById ("docs-list")
 let private docsDetailEl = document.getElementById ("docs-detail")
 let private sidebarViewScratchpadEl = document.getElementById ("sidebar-view-scratchpad")
-let private scratchpadInputEl = document.getElementById ("scratchpad-input") :?> HTMLInputElement
+let private scratchpadInputEl = document.getElementById ("scratchpad-input") :?> HTMLTextAreaElement
 let private scratchpadResultEl = document.getElementById ("scratchpad-result")
 let private sidebarViewPropertySearchEl = document.getElementById ("sidebar-view-property-search")
 let private propertySearchNameInputEl = document.getElementById ("property-search-name-input") :?> HTMLInputElement
@@ -1747,6 +1747,34 @@ let private removeLiveNode (objRef: int64) : unit =
         |> Map.map (fun _ node -> { node with Children = node.Children |> Array.filter ((<>) objRef) })
 
     rootRefs <- rootRefs |> Array.filter ((<>) objRef)
+
+/// Patches one already-known tree node's Name/Parents from a fresh
+/// `get-live-info` response (see the `moodev-live-info` handler below),
+/// keeping the tree in sync with every inspector mutation that refreshes
+/// the inspector via `loadInspector` (rename, reparent, owner/flag change,
+/// child-add, ...) - not just reparent/rename specifically, which is what
+/// prompted this: `loadInspector` was already re-fetching this exact data
+/// on every one of those, the tree just never read it. A `objRef` not yet
+/// in `treeNodes` is left alone (self-heals on its next expand/live-roots
+/// fetch, same tolerance `mergeLiveChildren` already has).
+let private syncTreeNodeFromLiveInfo (objRef: int64) (name: string) (newParents: int64[]) : unit =
+    match Map.tryFind objRef treeNodes with
+    | None -> ()
+    | Some node ->
+        let oldParents = Set.ofArray node.Parents
+        let newParentSet = Set.ofArray newParents
+        treeNodes <- Map.add objRef { node with Name = name; Parents = newParents } treeNodes
+
+        for p in Set.difference oldParents newParentSet do
+            match Map.tryFind p treeNodes with
+            | Some pNode -> treeNodes <- Map.add p { pNode with Children = pNode.Children |> Array.filter ((<>) objRef) } treeNodes
+            | None -> ()
+
+        for p in Set.difference newParentSet oldParents do
+            match Map.tryFind p treeNodes with
+            | Some pNode when not (Array.contains objRef pNode.Children) ->
+                treeNodes <- Map.add p { pNode with Children = Array.append pNode.Children [| objRef |] } treeNodes
+            | _ -> ()
 
 /// Which object nodes are expanded, by objRef - a `Set`, not per-occurrence:
 /// expanding #7 once should reveal its children under *every* parent it
@@ -3649,7 +3677,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
               "Chown",
               "c",
               "This property's owner is force-locked to the object's own owner, overriding whatever owner you pick." ]
-            "rc"
+            "r"
             (fun () -> onPermsChange ())
 
     let chownCb = propPermCheckboxes |> List.find (fun (letter, _) -> letter = "c") |> snd
@@ -4025,7 +4053,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
               "Debug",
               "d",
               "Runtime errors actually raise/propagate (recommended). Without this, errors are silently swallowed." ]
-            "rx"
+            "rxd"
             (fun () -> ())
 
     // "this none this" - a normal command verb takes its own object as
@@ -5709,7 +5737,11 @@ let private runScratchpadEval () : unit =
         scratchpadResultEl.textContent <- "Running..."
         sendAction [ "action" ==> "eval-scratchpad"; "expr" ==> expr ]
 
-scratchpadInputEl.onkeydown <- fun ev -> if ev.key = "Enter" then runScratchpadEval ()
+scratchpadInputEl.onkeydown <-
+    fun ev ->
+        if ev.key = "Enter" && ev.ctrlKey then
+            ev.preventDefault ()
+            runScratchpadEval ()
 
 /// Adds whatever's typed in the Watch panel's own input to the watch list -
 /// same "Enter to submit, then clear the box" shape as the scratchpad's
@@ -6527,6 +6559,16 @@ onWsMessage <-
                                     activeInspectorProp |> Option.bind (fun (r, p) -> if r = objRef then Some p else None)
 
                                 renderInspectorStructure objRef info highlightProp
+
+                                // Keeps the tree row (name/nesting) in sync
+                                // with whatever mutation just triggered this
+                                // refresh - see `syncTreeNodeFromLiveInfo`'s
+                                // own comment.
+                                let liveParents =
+                                    (unbox info?parents: obj[]) |> Array.map (fun r -> int64 (r?objref: float))
+
+                                syncTreeNodeFromLiveInfo objRef (info?name: string) liveParents
+                                renderTree ()
                         | None -> inspectorContentEl.textContent <- sprintf "#%d - not found." objRef
                     | _ -> ()
                 | None -> ()
