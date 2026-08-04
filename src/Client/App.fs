@@ -6281,7 +6281,7 @@ onWsMessage <-
                 // (`getLineMapFor` returning `None`) degrades to identity
                 // rather than pointing at the wrong line, matching the raw
                 // real text actually being shown.
-                let displayContent, sugarUnavailable =
+                let displayContent, sugarUnavailable, isSugarDisplayed =
                     match tabKey with
                     | Some objNum, Some verb when Settings.sugarModeEnabled () ->
                         match System.Int64.TryParse objNum with
@@ -6289,12 +6289,12 @@ onWsMessage <-
                             match Sugar.toSugar content with
                             | Ok sugar ->
                                 tabSugarMaps <- Map.add (objRef, verb) sugar.Map tabSugarMaps
-                                sugar.Text, false
+                                sugar.Text, false, true
                             | Error _ ->
                                 tabSugarMaps <- Map.remove (objRef, verb) tabSugarMaps
-                                content, true
-                        | false, _ -> content, false
-                    | _ -> content, false
+                                content, true, false
+                        | false, _ -> content, false, false
+                    | _ -> content, false, false
 
                 editor.setValue displayContent
                 // `indentationRules` alone only governs newly-typed lines -
@@ -6303,7 +6303,17 @@ onWsMessage <-
                 // real corpus has no indentation at all, so without this,
                 // "indentation" would only ever be visible on lines typed
                 // fresh in the editor, never on anything just opened.
-                (editor.getAction Monaco.reindentLinesActionId).run () |> ignore
+                // Skipped for genuinely sugar-displayed content: sugar's own
+                // indentation *is* the block structure (replacing
+                // endif/endfor), but `decreaseIndentPattern` only recognizes
+                // those closer keywords, which sugar mode deliberately
+                // strips from the displayed text - running this against
+                // sugar text only ever increases indent and never dedents
+                // back after a block closes (confirmed live: an if/else
+                // followed by a for loop grew indentation monotonically,
+                // every subsequent line nesting deeper forever).
+                if not isSugarDisplayed then
+                    (editor.getAction Monaco.reindentLinesActionId).run () |> ignore
                 // Both `setValue` and the reindent above just fired
                 // `onDidChangeModelContent` - freshly-loaded (and now
                 // reindented) content is a clean baseline, not something
