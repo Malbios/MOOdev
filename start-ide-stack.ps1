@@ -91,6 +91,16 @@
     bypassing the Sidecar entirely, or a genuinely fresh TreeDir being pointed at content that
     already has history elsewhere.
 
+.PARAMETER ClientPort
+    Pins the browser Client to this fixed port instead of an auto-picked one. Omit to keep the
+    default auto-pick behavior (a free port, never colliding with a concurrent instance) - only
+    reach for this when you specifically want the same URL/origin across restarts. Sidecar and
+    LSP stay auto-picked either way; only the Client's port is user-facing in a way that matters
+    here, since browser localStorage (tab-session restore, tree filter settings, etc.) is scoped
+    to the page's own origin, which includes the port - a fresh random port every launch means a
+    fresh, empty origin every time, silently losing whatever was stored there. Throws up front if
+    the port is already in use, same as `start-moo-only.ps1`'s own `-Port` check.
+
 .EXAMPLE
     # Terminal 1:
     .\start-moo-only.ps1 -DbPath C:\dev\moo\ToastCore-World\world.db -Port 7779
@@ -109,7 +119,8 @@ param(
     [Parameter(Mandatory = $true)] [int]$LspListenerObj,
     [Parameter(Mandatory = $true)] [string]$TreeDir,
     [string]$MooUsername = 'wizard',
-    [switch]$RefreshExport
+    [switch]$RefreshExport,
+    [int]$ClientPort = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -197,10 +208,21 @@ if (-not (Test-Path (Join-Path $clientDir 'node_modules'))) {
 }
 
 # Auto-pick free ports up front - never fixed defaults, so concurrent invocations
-# never collide with each other.
+# never collide with each other. Client is the exception: pass -ClientPort to pin
+# it to a fixed port instead - see that parameter's own doc comment for why
+# (browser localStorage is scoped to the page's own origin, which includes the
+# port, so a random port every launch silently loses whatever was stored there).
 $sidecarPort = Get-FreePort
 $lspPort = Get-FreePort
-$clientPort = Get-FreePort
+
+if ($ClientPort) {
+    if (Test-PortInUse -TestPort $ClientPort) {
+        throw "Port $ClientPort is already in use - pass a different -ClientPort, or omit it to auto-pick one."
+    }
+    $clientPort = $ClientPort
+} else {
+    $clientPort = Get-FreePort
+}
 
 $sidecarLogPath = Join-Path $runLogDir "ide-stack-$sidecarPort.sidecar.log"
 $lspLogPath     = Join-Path $runLogDir "ide-stack-$sidecarPort.lsp.log"
