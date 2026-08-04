@@ -271,13 +271,25 @@ once it exists.
   a fresh one per login.)
   **On a real ToastCore-derived world, `#0:user_connected` already exists** (a real, stock
   ToastCore verb doing real work - MCP negotiation via `$mcp:(verb)(@args)`, then
-  `user.location:confunc(user)`/`user:confunc()` dispatch). Don't overwrite it - **append** these two
-  `notify()` lines to the end of its existing code (`newcode = {@verb_code(#0, "user_connected", 0,
-  1), "notify(...)", "notify(...)"}`) so both the real connection logic and the login signal work.
-  Confirmed live that the two coexist fine: the real `#$#mcp version: ...` line and our
-  `#$#moodev-login-result`/`#$#: 0` lines are independently recognized by `McpFilter.classifyHashLine`
-  without conflict (the real MCP line doesn't match the `moodev-*` shape it filters for, so it passes
-  straight through as plain terminal text, same as it would with no sidecar involved at all).
+  `user.location:confunc(user)`/`user:confunc()` dispatch). Don't overwrite it - **prepend** these
+  two `notify()` lines to the *start* of its existing code (`newcode = {"notify(...)", "notify(...)",
+  @verb_code(#0, "user_connected", 0, 1)}`) so both the real connection logic and the login signal
+  work. **Prepend, not append** - confirmed live (against a real, retro-themed world) that appending
+  is unsafe two independent ways an existing `user_connected` can trigger: its own code can throw an
+  uncaught error partway through (a `set_connection_option()` call using an option name that
+  particular fork doesn't recognize, in the confirmed case - but any uncaught error anywhere earlier
+  in the verb has the same effect), aborting the task before ever reaching appended code; and
+  separately, existing content almost always ends with an explicit `return`, which makes anything
+  appended after it permanently unreachable regardless of whether the rest of the verb even succeeds
+  - `bootstrap-moo-world.ps1` used to append and was live-verified broken by exactly this (the login
+  signal silently never fired, leaving the browser's login screen stuck forever despite the actual
+  MOO connection succeeding). Prepending sidesteps both, since the hook then always runs first,
+  before either failure mode gets a chance to matter. Confirmed live that the real connection logic
+  still runs fine afterward, and that the two message shapes coexist without conflict either way:
+  the real `#$#mcp version: ...` line and our `#$#moodev-login-result`/`#$#: 0` lines are
+  independently recognized by `McpFilter.classifyHashLine` (the real MCP line doesn't match the
+  `moodev-*` shape it filters for, so it passes straight through as plain terminal text, same as it
+  would with no sidecar involved at all).
 - **`#0:do_command`** — a minimal `;;`-eval shim: recognizes a raw `;;<code>` line and runs it via
   the real `eval()` builtin, letting a plain, unrecognized command fall through afterward (hence
   "I couldn't understand that." on every eval call - harmless noise, not a failure). This is the
