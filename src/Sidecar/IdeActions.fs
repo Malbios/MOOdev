@@ -727,12 +727,31 @@ let getProperties (config: Config) (session: Session) (webSocket: WebSocket) (ob
         // \t escape (only \" and \\ are escaped), confirmed against
         // moocode-reference.md and the retired $vcs:ide_get_properties'
         // own use of chr(9) for exactly this reason.
+        //
+        // Self-limits via `ticks_left()` the same way `getLiveInfo`'s own
+        // verb/property scan does (see that function's own comment) - a
+        // real, richly-inherited object can carry enough properties that
+        // `toliteral()`-ing every value across the full ancestor chain
+        // exhausts the task's tick budget before ever responding. Missing
+        // values just leave their input boxes unfilled client-side
+        // (`moodev-prop-content`'s handler already tolerates a property name
+        // it never receives a line for), a soft degrade rather than the
+        // task dying and the whole round trip falling back to
+        // `BridgeHandler.evalOnSession`'s 30-second timeout.
         let statements =
             $"""{ancestorChainStatements o}
 props = {{}};
 seen = {{}};
+truncated = 0;
 for x in (chain)
+  if (truncated)
+    break;
+  endif
   for pn in (properties(x))
+    if (ticks_left() < 10000)
+      truncated = 1;
+      break;
+    endif
     if (!(pn in seen))
       seen = {{@seen, pn}};
       props = {{@props, pn + chr(9) + toliteral({o}.(pn))}};
@@ -2382,17 +2401,32 @@ else
   {ancestorChainStatements o}
   verbs_out = {{}};
   props_out = {{}};
+  truncated = 0;
   for x in (chain)
+    if (truncated)
+      break;
+    endif
     xname = typeof(x.name) == STR ? x.name | "";
     vlist = verbs(x);
     for i in [1..length(vlist)]
+      if (ticks_left() < 10000)
+        truncated = 1;
+        break;
+      endif
       vi = verb_info(x, i);
       va = verb_args(x, i);
       vowner = vi[1];
       vownername = valid(vowner) ? (typeof(vowner.name) == STR ? vowner.name | "") | "";
       verbs_out = {{@verbs_out, ["names" -> vi[3], "perms" -> vi[2], "owner" -> tostr(vowner), "ownername" -> vownername, "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3], "definer" -> tostr(x), "definername" -> xname]}};
     endfor
+    if (truncated)
+      break;
+    endif
     for pn in (properties(x))
+      if (ticks_left() < 10000)
+        truncated = 1;
+        break;
+      endif
       pi = property_info({o}, pn);
       powner = pi[1];
       pownername = valid(powner) ? (typeof(powner.name) == STR ? powner.name | "") | "";
@@ -2404,17 +2438,30 @@ else
             "player" -> is_player({o}), "programmer" -> {o}.programmer, "wizard" -> {o}.wizard,
             "read" -> {o}.r, "write" -> {o}.w, "fertile" -> {o}.f, "anonymous" -> {o}.a,
             "parents" -> parents_out, "children" -> children_out, "verbs" -> verbs_out, "properties" -> props_out,
-            "connectedPlayer" -> tostr(player), "connectedPlayerName" -> connplayername];
+            "connectedPlayer" -> tostr(player), "connectedPlayerName" -> connplayername, "truncated" -> truncated];
 endif"""
 
-        // The whole response path is wrapped, not just the initial eval -
-        // `getCorponyms` below is a second `evalRunner` round trip and can
-        // time out on its own too, and a bare `TimeoutException` escaping
-        // this function would crash the whole browser connection (see
-        // `BridgeHandler.evalOnSession`'s own doc comment for why and the
-        // live bug this fixes: the inspector panel hanging forever on
-        // "Loading..." after the underlying MOO task died mid-eval with
-        // "Task ran out of ticks" on a real, richly-inherited object).
+        // The verb/property scan above self-limits via `ticks_left()`
+        // (checked once per verb and once per property, same `< 10000`
+        // threshold and idiom as `Exporter.getAnonVerbs`, moocode-reference.md's
+        // documented pattern for this exact situation) rather than trying to
+        // enumerate a real, richly-inherited object's full ancestor chain in
+        // one uninterrupted task - live-verified against a ~633k-object
+        // HellMOO-derived world where an unguarded scan reliably died with
+        // "Task ran out of ticks" before ever responding. `truncated` in the
+        // result tells the client the scan stopped early so it can say so,
+        // rather than silently showing an incomplete verb/property list as
+        // if it were the whole picture.
+        //
+        // The whole response path is still wrapped, not just the initial
+        // eval - `getCorponyms` below is a second `evalRunner` round trip
+        // with no self-limiting of its own and can still time out, and a
+        // bare `TimeoutException` escaping this function would crash the
+        // whole browser connection (see `BridgeHandler.evalOnSession`'s own
+        // doc comment for why). This `try`/`with` is the fallback for that
+        // case - a genuine transport-level stall, not routine tick
+        // exhaustion, which the self-limiting scan above now avoids in the
+        // common case.
         try
             let! json = evalRunner statements "result" ct
             let root = json.RootElement
@@ -2520,7 +2567,8 @@ endif"""
                                 definerName = formatLiveName corponymsByObjnum definerRef definerName
                                 ownerRef = ownerRef
                                 perms = p.GetProperty("perms").GetString() |})
-                         |> Array.ofSeq |}
+                         |> Array.ofSeq
+                       truncated = flag "truncated" |}
 
                 do! sendWire webSocket (sprintf "moodev-live-info object: #%d" objRef) [ JsonSerializer.Serialize(payload) ] ct
         with :? TimeoutException as ex ->

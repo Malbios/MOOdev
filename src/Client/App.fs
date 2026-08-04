@@ -6580,6 +6580,18 @@ onWsMessage <-
 
                                 renderInspectorStructure objRef info highlightProp
 
+                                // `getLiveInfo`'s own verb/property scan
+                                // self-limits via `ticks_left()` on a real,
+                                // richly-inherited object rather than
+                                // dying - see its own comment. Surfaced here
+                                // rather than silently showing an incomplete
+                                // verb/property list as if it were complete.
+                                let truncated: obj = info?truncated
+
+                                if not (isNullOrUndefined truncated) && unbox<bool> truncated then
+                                    inspectorDiagnosticsEl.textContent <-
+                                        "Showing partial results - this object has too many verbs/properties across its ancestor chain to load in one pass."
+
                                 // Keeps the tree row (name/nesting) in sync
                                 // with whatever mutation just triggered this
                                 // refresh - see `syncTreeNodeFromLiveInfo`'s
