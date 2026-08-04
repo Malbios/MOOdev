@@ -253,7 +253,7 @@ let private fakeBridge: SidecarBridge =
                               Code = [] }
                 | None -> return None
             }
-      GetBuiltins = fun () -> task { return graph.Value.Builtins } }
+      GetBuiltins = fun () -> task { return Some graph.Value.Builtins } }
 
 let private server = lazy (new MooLspServer(new MooLspClient(), graph.Value, fakeBridge))
 

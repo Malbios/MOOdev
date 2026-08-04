@@ -64,7 +64,14 @@ type private ConnectionState =
 /// state directly.
 type SidecarBridge =
     { ResolveVerbDispatch: ObjRef -> string -> Task<VerbDispatchResult option>
-      GetBuiltins: unit -> Task<Map<string, BuiltinFunc>> }
+      /// `None` means the live builtins list could not be fetched this call
+      /// (Sidecar unreachable, request timed out, etc.) - distinct from
+      /// `Some builtins` genuinely not containing a given name. Callers that
+      /// make a user-facing "this doesn't exist" claim (`Handlers.fs`'s
+      /// hover) must keep the two apart; callers that just want best-effort
+      /// data (semantic tokens, completion, docs) can collapse `None` to
+      /// `Map.empty` same as before.
+      GetBuiltins: unit -> Task<Map<string, BuiltinFunc> option> }
 
 let private bufferSize = 8192
 
@@ -162,6 +169,15 @@ let create (wsUrl: string) : SidecarBridge =
                     connectLock.Release() |> ignore
         }
 
+    // Same idea as `BridgeHandler.evalOnSession`'s own `evalSessionTimeout`
+    // (`Sidecar/BridgeHandler.fs:100`) - without a bound, a request whose
+    // response the Sidecar never sends (dropped connection, or an exception
+    // on the Sidecar's own dispatch - see `LspBridge.handleRequest`'s doc
+    // comment) leaves `tcs.Task` awaited forever, which used to mean every
+    // caller (e.g. a hover request) hung indefinitely instead of degrading
+    // to "no live answer available right now".
+    let requestTimeout = TimeSpan.FromSeconds(30.0)
+
     let sendRequest (fields: (string * obj) list) : Task<JsonDocument option> =
         task {
             match! ensureConnected () with
@@ -175,13 +191,18 @@ let create (wsUrl: string) : SidecarBridge =
                 let json = JsonSerializer.Serialize(payload)
                 let bytes = Encoding.UTF8.GetBytes(json)
 
+                use timeoutCts = new CancellationTokenSource(requestTimeout)
+                use _timeoutReg = timeoutCts.Token.Register(fun () -> tcs.TrySetCanceled() |> ignore)
+
                 try
-                    do! state.Socket.SendAsync(ArraySegment(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
-                    let! doc = tcs.Task
-                    return Some doc
-                with _ ->
+                    try
+                        do! state.Socket.SendAsync(ArraySegment(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
+                        let! doc = tcs.Task
+                        return Some doc
+                    with _ ->
+                        return None
+                finally
                     state.Waiters.TryRemove(id) |> ignore
-                    return None
         }
 
     let resolveVerbDispatch (startObj: ObjRef) (verbName: string) : Task<VerbDispatchResult option> =
@@ -222,21 +243,21 @@ let create (wsUrl: string) : SidecarBridge =
     let mutable cachedBuiltins: Map<string, BuiltinFunc> option = None
     let builtinsLock = new SemaphoreSlim(1, 1)
 
-    let getBuiltins () : Task<Map<string, BuiltinFunc>> =
+    let getBuiltins () : Task<Map<string, BuiltinFunc> option> =
         task {
             match cachedBuiltins with
-            | Some m -> return m
+            | Some m -> return Some m
             | None ->
                 do! builtinsLock.WaitAsync()
 
                 try
                     match cachedBuiltins with
-                    | Some m -> return m
+                    | Some m -> return Some m
                     | None ->
                         let! response = sendRequest [ "action", box "get-builtins" ]
 
                         match response with
-                        | None -> return Map.empty
+                        | None -> return None
                         | Some doc ->
                             use doc = doc
                             let paramNames = Metadata.Loader.loadBuiltinParamNames ()
@@ -250,7 +271,7 @@ let create (wsUrl: string) : SidecarBridge =
                                 |> Map.ofSeq
 
                             cachedBuiltins <- Some builtins
-                            return builtins
+                            return Some builtins
                 finally
                     builtinsLock.Release() |> ignore
         }
