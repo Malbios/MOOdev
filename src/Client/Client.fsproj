@@ -18,4 +18,11 @@
     <PackageReference Include="Fable.Core" Version="5.2.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- Fable-compilability confirmed live (Phase 0 spike): Language.Lexer
+         cross-compiles cleanly to JS, so the sugar<->real conversion
+         (Language.Sugar) runs client-side, no extra round trip. -->
+    <ProjectReference Include="..\Language\Language.fsproj" />
+  </ItemGroup>
+
 </Project>
