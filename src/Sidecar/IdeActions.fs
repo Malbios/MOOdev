@@ -689,11 +689,26 @@ let bulkReplace
 /// `verbs(x)` only ever return names *directly defined* on `x`, never
 /// inherited ones. Cycle-guarded for multiple inheritance's DAG shape.
 /// Shared between `getProperties` and `getLiveInfo`, which both need it.
+///
+/// Self-limits via `ticks_left()` (same idiom/threshold as every other
+/// guarded loop in this file - see `getLiveInfo`'s own comment) and sets
+/// `truncated` rather than declaring a fresh one, so the caller must
+/// declare `truncated = 0;` before splicing this fragment in - a real
+/// object's *ancestor* graph is rarely huge, but multiple inheritance makes
+/// it a DAG walk, not a simple chain, and this was cheap enough to guard
+/// defensively alongside the loops that actually caused the live failures
+/// (`children({o})`, the verb/property scan). `chain` still always ends
+/// with `{o}` appended even when cut short, so nothing downstream needs to
+/// special-case a truncated chain missing its own last element.
 let private ancestorChainStatements (o: string) : string =
     $"""ancestor_visited = {{}};
 queue = parents({o});
 chain = {{}};
 while (length(queue) > 0)
+  if (ticks_left() < 10000)
+    truncated = 1;
+    break;
+  endif
   p = queue[1];
   queue = listdelete(queue, 1);
   if (valid(p) && !(p in ancestor_visited))
@@ -739,10 +754,10 @@ let getProperties (config: Config) (session: Session) (webSocket: WebSocket) (ob
         // task dying and the whole round trip falling back to
         // `BridgeHandler.evalOnSession`'s 30-second timeout.
         let statements =
-            $"""{ancestorChainStatements o}
+            $"""truncated = 0;
+{ancestorChainStatements o}
 props = {{}};
 seen = {{}};
-truncated = 0;
 for x in (chain)
   if (truncated)
     break;
@@ -2388,20 +2403,34 @@ else
   except (E_PROPNF)
   endtry
   ownername = valid({o}.owner) ? (typeof({o}.owner.name) == STR ? {o}.owner.name | "") | "";
+  truncated = 0;
   parents_out = {{}};
   for p in (parents({o}))
+    if (ticks_left() < 10000)
+      truncated = 1;
+      break;
+    endif
     pname = valid(p) ? (typeof(p.name) == STR ? p.name | "") | "";
     parents_out = {{@parents_out, ["objref" -> tostr(p), "name" -> pname]}};
   endfor
   children_out = {{}};
-  for c in (children({o}))
-    cname = valid(c) ? (typeof(c.name) == STR ? c.name | "") | "";
-    children_out = {{@children_out, ["objref" -> tostr(c), "name" -> cname]}};
-  endfor
-  {ancestorChainStatements o}
+  if (!truncated)
+    for c in (children({o}))
+      if (ticks_left() < 10000)
+        truncated = 1;
+        break;
+      endif
+      cname = valid(c) ? (typeof(c.name) == STR ? c.name | "") | "";
+      children_out = {{@children_out, ["objref" -> tostr(c), "name" -> cname]}};
+    endfor
+  endif
+  if (!truncated)
+    {ancestorChainStatements o}
+  else
+    chain = {{{o}}};
+  endif
   verbs_out = {{}};
   props_out = {{}};
-  truncated = 0;
   for x in (chain)
     if (truncated)
       break;
