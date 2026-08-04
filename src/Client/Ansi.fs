@@ -139,10 +139,45 @@ let private tryParseInt (s: string) : int =
     | true, n -> n
     | false, _ -> 0
 
-/// Scans `text` (with `state.Pending` prepended) for CSI/SGR sequences and
-/// the bare BEL byte (`@ansi-test`'s "Beep" line uses this raw, not a CSI
-/// sequence), returning the resulting styled segments plus the state to
-/// carry into the next call. Never assumes `text` starts or ends on a clean
+/// This module's original target MOO content always emits a real ESC byte
+/// (0x1B) for color codes - confirmed via `@ansi-test`. A different,
+/// real-world MOO codebase (HellMOO) was confirmed live to instead emit the
+/// LITERAL TEXT "~1b"/"~1B" (tilde followed by the byte's own 2-hex-digit
+/// value, not a real control byte at all - three ordinary printable
+/// characters) as its escape introducer, likely a "safe/textual fallback"
+/// some MUD ANSI implementations use for clients not detected as
+/// ANSI-capable. Confirmed by reading raw bytes off a plain TCP connection
+/// straight to the MOO, bypassing this whole pipeline entirely - the server
+/// itself sends these three characters, this isn't corruption introduced
+/// anywhere in MOOdy's own path. Treated as fully interchangeable with a
+/// real ESC byte below (deliberately not generalized to arbitrary "~XX"
+/// values - only this one spelling, representing ESC specifically, has
+/// actually been observed).
+///
+/// Returns the introducer's length at `text.[i]` (`1` for a real ESC byte,
+/// `3` for "~1b"/"~1B"), or `None` if this position is definitely neither.
+let private escIntroducerLenAt (text: string) (i: int) : int option =
+    if text.[i] = '\x1b' then
+        Some 1
+    elif text.[i] = '~' && i + 2 < text.Length && text.[i + 1] = '1' && (text.[i + 2] = 'b' || text.[i + 2] = 'B') then
+        Some 3
+    else
+        None
+
+/// True only when `text.[i..]` is a strict, incomplete prefix of "~1b"/
+/// "~1B" (not a real introducer yet, but could still become one once more
+/// text arrives) - lets `feed` defer a trailing partial match to the next
+/// call instead of misreading it as plain text, the same protection a lone
+/// trailing real ESC byte already gets.
+let private isPartialTextualEscAt (text: string) (i: int) : bool =
+    let remaining = text.Length - i
+    text.[i] = '~' && remaining < 3 && (remaining = 1 || text.[i + 1] = '1')
+
+/// Scans `text` (with `state.Pending` prepended) for CSI/SGR sequences
+/// (introduced by either escape form above) and the bare BEL byte
+/// (`@ansi-test`'s "Beep" line uses this raw, not a CSI sequence),
+/// returning the resulting styled segments plus the state to carry into the
+/// next call. Never assumes `text` starts or ends on a clean
 /// escape-sequence boundary.
 let feed (state: State) (text: string) : Segment list * State =
     let text = state.Pending + text
@@ -159,14 +194,13 @@ let feed (state: State) (text: string) : Segment list * State =
             plain.Clear () |> ignore
 
     while i < len && tailStart < 0 do
-        let c = text.[i]
-
-        if c = '\x1b' && i = len - 1 then
-            // Lone trailing ESC - could be the start of a CSI sequence in
-            // the next chunk.
+        match escIntroducerLenAt text i with
+        | Some introLen when i + introLen >= len ->
+            // Lone trailing introducer - could be the start of a CSI
+            // sequence in the next chunk.
             tailStart <- i
-        elif c = '\x1b' && text.[i + 1] = '[' then
-            let mutable j = i + 2
+        | Some introLen when text.[i + introLen] = '[' ->
+            let mutable j = i + introLen + 1
 
             while j < len && not (isFinalByte text.[j]) do
                 j <- j + 1
@@ -178,7 +212,7 @@ let feed (state: State) (text: string) : Segment list * State =
 
                 if final = 'm' then
                     flushPlain ()
-                    let paramsText = text.Substring(i + 2, j - (i + 2))
+                    let paramsText = text.Substring(i + introLen + 1, j - (i + introLen + 1))
 
                     let parameters =
                         if paramsText = "" then
@@ -189,15 +223,16 @@ let feed (state: State) (text: string) : Segment list * State =
                     style <- applySgr style parameters
 
                 i <- j + 1
-        elif c = '\x1b' then
-            // ESC not followed by '[' - not a CSI sequence MOO's own ANSI
-            // system ever emits (confirmed via `get_code`); drop just the
-            // ESC byte rather than risk mis-parsing something unexpected.
-            i <- i + 1
-        elif c = '\x07' then
-            i <- i + 1
-        else
-            plain.Append(c) |> ignore
+        | Some introLen ->
+            // Introducer not followed by '[' - not a CSI sequence MOO's own
+            // ANSI systems ever emit (confirmed via `get_code`, and via the
+            // "~1b"-form world's own live output); drop just the introducer
+            // rather than risk mis-parsing something unexpected.
+            i <- i + introLen
+        | None when isPartialTextualEscAt text i -> tailStart <- i
+        | None when text.[i] = '\x07' -> i <- i + 1
+        | None ->
+            plain.Append(text.[i]) |> ignore
             i <- i + 1
 
     flushPlain ()
