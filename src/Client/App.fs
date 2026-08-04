@@ -481,11 +481,12 @@ module private Settings =
     let private sugarModeKey = "moodev-sugar-mode" // "on" | "off"
 
     /// Default OFF - an experimental, editor-only dialect (no trailing
-    /// `;`, indentation implies the block closer) still being wired up
-    /// (Phase 2 of the feature; hover/go-to-def position mapping for a
-    /// sugar-displayed tab isn't generalized yet, see Phase 4). Read
-    /// directly (not cached), same reasoning as `hideEmptyLeavesEnabled` -
-    /// only checked at the moment a verb is fetched/saved, not a hot path.
+    /// `;`, indentation implies the block closer). Still defaults off
+    /// pending real browser verification, even though every phase (display,
+    /// save round trip, live-diagnostics remap, hover/go-to-def position
+    /// mapping) is implemented. Read directly (not cached), same reasoning
+    /// as `hideEmptyLeavesEnabled` - only checked at the moment a verb is
+    /// fetched/saved, not a hot path.
     let sugarModeEnabled () : bool = loadString sugarModeKey "off" = "on"
 
     let setSugarMode (enabled: bool) : unit =
@@ -906,15 +907,18 @@ let mutable private tabContent: Map<int64 * string, string> = Map.empty
 /// `getIndentDelta` callback.
 let mutable private tabIndentDeltas: Map<int64 * string, int[]> = Map.empty
 
-/// Each currently sugar-displayed tab's `Language.Sugar.LineMap` - present
-/// only when `Settings.sugarModeEnabled ()` was on and `Sugar.toSugar`
-/// succeeded for that verb at fetch time; absent otherwise (sugar mode off,
-/// or that verb's real text didn't convert cleanly, in which case it falls
-/// back to showing raw real text - see the `moodev-edit-content` handler).
-/// Not yet consumed anywhere (Phase 4 generalizes `LspClient`'s position
-/// mapping to use it) - captured now so hover/go-to-def/etc. can be gated
-/// off for a sugar-displayed tab in the meantime rather than silently
-/// pointing at the wrong line. Same lifecycle as `tabIndentDeltas`.
+/// Each currently sugar-displayed tab's most recent `Language.Sugar.LineMap`
+/// - present only when `Settings.sugarModeEnabled ()` was on and either
+/// `Sugar.toSugar` (at fetch time, `moodev-edit-content`) or `Sugar.toReal`
+/// (at save/check time, `codeLines`) most recently succeeded for that verb;
+/// absent otherwise (sugar mode off, or that verb's text didn't convert
+/// cleanly, in which case it falls back to showing raw real text). Consumed
+/// by `remapDiagnosticLine` (Phase 3, live-diagnostics line remap) - Phase 4
+/// (generalizing `LspClient`'s hover/go-to-def position mapping to use it
+/// too) is still pending, so those still silently point at the wrong line
+/// once sugar mode changes a tab's line count; gate them off for a
+/// sugar-displayed tab until Phase 4 lands. Same lifecycle as
+/// `tabIndentDeltas`.
 let mutable private tabSugarMaps: Map<int64 * string, Sugar.LineMap> = Map.empty
 
 /// Leading whitespace character count of `line` - `0` for an empty line
@@ -949,6 +953,13 @@ let private recordIndentDelta (objRef: int64) (verbName: string) (rawLines: stri
 /// treats the same as "no adjustment."
 let private getIndentDeltaFor (objRef: int64) (verbName: string) : int[] option =
     Map.tryFind (objRef, verbName) tabIndentDeltas
+
+/// The `Sugar.LineMap option` `LspClient.wire`'s `getLineMap` callback needs
+/// (Phase 4) - `None` for "not tracked" (sugar mode off, or this tab's text
+/// didn't round-trip cleanly), same "no remap" contract `getIndentDeltaFor`
+/// already has.
+let private getLineMapFor (objRef: int64) (verbName: string) : Sugar.LineMap option =
+    Map.tryFind (objRef, verbName) tabSugarMaps
 
 /// VS Code's "preview tab" mechanic: at most one open verb tab is ever a
 /// preview at a time, shown in italics. Opening a brand-new verb while a
@@ -1221,8 +1232,26 @@ treeNewObjectBtn.onclick <-
 /// the caller should show the message and send nothing, rather than
 /// sending corrupted MOOcode to the server - cheaper and faster than a
 /// round trip for something already known to be wrong client-side.
-let private codeLines (source: string) : Result<string[], string> =
-    let desugared = if Settings.sugarModeEnabled () then Sugar.toReal source |> Result.map (fun r -> r.Text) else Ok source
+///
+/// Also refreshes `tabSugarMaps`' entry for `(objRef, verbName)` from this
+/// same `toReal` call (Phase 3) - the map computed here reflects whatever
+/// the user has actually just edited, which is what the real text about to
+/// be sent (and whatever line-numbered errors come back for it) actually
+/// corresponds to, unlike the load-time map `moodev-edit-content` originally
+/// stored. Left untouched on `Error` or when sugar mode is off - a stale map
+/// from a previous successful save is still a better fallback for the live
+/// diagnostics remap than no map at all, since nothing was actually sent
+/// this time.
+let private codeLines (objRef: int64) (verbName: string) (source: string) : Result<string[], string> =
+    let desugared =
+        if Settings.sugarModeEnabled () then
+            match Sugar.toReal source with
+            | Ok r ->
+                tabSugarMaps <- Map.add (objRef, verbName) r.Map tabSugarMaps
+                Ok r.Text
+            | Error e -> Error e
+        else
+            Ok source
 
     desugared |> Result.map (fun s -> s.Replace("\r\n", "\n").Split('\n'))
 
@@ -1329,7 +1358,7 @@ let private scheduleSyntaxCheck (target: int64 * string * string) : unit =
                 (fun () ->
                     syntaxCheckTimer <- None
 
-                    match codeLines code with
+                    match codeLines objRef verbName code with
                     | Ok lines ->
                         sendAction
                             [ "action" ==> "check-verb-syntax"
@@ -1378,7 +1407,7 @@ let private saveIfDirtyAsync () : Async<bool> =
     | Some(objRef, verb, code) ->
         let key = (objRef, verb)
 
-        match codeLines code with
+        match codeLines objRef verb code with
         | Error msg ->
             // Structurally malformed sugar - nothing to send. `isDirty`
             // stays `true` (matches this function's own "only
@@ -1622,6 +1651,23 @@ let private parseErrorLine (line: string) : (int * string) option =
             None
     else
         None
+
+/// Remaps a 1-based *real* line number (`parseErrorLine`'s own output -
+/// `set_verb_code()`'s errors are always in terms of the real MOOcode that
+/// was actually sent) to the corresponding 1-based *sugar*-displayed line,
+/// via `tabSugarMaps`' entry for this tab (kept fresh by every `codeLines`
+/// call - see its own comment - so this always reflects whatever was most
+/// recently sent, not the tab's original load-time text) and
+/// `Sugar.nearestMappedSugarLine`. Passes the line through completely
+/// unchanged (today's existing behavior) when sugar mode is off or this tab
+/// has no map yet (fetch failed, or the verb didn't round-trip cleanly).
+let private remapDiagnosticLine (objRef: int64) (verbName: string) (lineNum: int, message: string) : int * string =
+    if not (Settings.sugarModeEnabled ()) then
+        lineNum, message
+    else
+        match Map.tryFind (objRef, verbName) tabSugarMaps with
+        | None -> lineNum, message
+        | Some map -> (Sugar.nearestMappedSugarLine map (lineNum - 1)) + 1, message
 
 /// Case-insensitive substring match - an empty filter matches everything.
 let private matchesFilter (filterText: string) (label: string) : bool =
@@ -6230,9 +6276,10 @@ onWsMessage <-
                 // would be lossy for this specific verb) falls back to
                 // showing raw real text with a visible notice, never
                 // blocking editing - `tabSugarMaps` gets no entry for this
-                // tab either way, so hover/go-to-def degrade gracefully
-                // (Phase 4 gates on its absence) rather than pointing at
-                // the wrong line.
+                // tab either way, so `LspClient`'s position mapping
+                // (`getLineMapFor` returning `None`) degrades to identity
+                // rather than pointing at the wrong line, matching the raw
+                // real text actually being shown.
                 let displayContent, sugarUnavailable =
                     match tabKey with
                     | Some objNum, Some verb when Settings.sugarModeEnabled () ->
@@ -6287,10 +6334,13 @@ onWsMessage <-
                         // this verb, the displayed line count no longer
                         // matches `lines`' own count - `recordIndentDelta`
                         // already treats a line-count mismatch as "no
-                        // adjustment" rather than computing garbage, so
-                        // this degrades safely on its own; Phase 4 replaces
-                        // this whole per-line-column scheme with one that
-                        // also remaps the line index via `tabSugarMaps`.
+                        // adjustment" rather than computing garbage, so this
+                        // degrades safely on its own; `tabSugarMaps`
+                        // separately remaps the line index for the same
+                        // case (`LspClient`'s position mapping and
+                        // `remapDiagnosticLine`), so the two combine to
+                        // still get the right line, even without a per-line
+                        // indent delta for that same verb.
                         recordIndentDelta objRef verb (List.ofArray lines) (editor.getModel ())
                         // A fresh load is a clean baseline - any earlier
                         // failed/in-flight save for this tab no longer
@@ -6388,7 +6438,9 @@ onWsMessage <-
 
                             editorDiagnosticsEl.textContent <- if ok then "" else String.concat "\n" lines
 
-                            let lineErrors = lines |> Array.toList |> List.choose parseErrorLine
+                            let lineErrors =
+                                lines |> Array.toList |> List.choose parseErrorLine |> List.map (remapDiagnosticLine objRef verb)
+
                             Monaco.setErrorMarkers editor (if ok then [] else lineErrors)
                     | false, _ -> ()
                 | _ -> ()
@@ -6404,7 +6456,10 @@ onWsMessage <-
                 | Some objNum, Some verb ->
                     match System.Int64.TryParse objNum with
                     | true, objRef when activeTab = VerbTab(objRef, verb) && isDirty ->
-                        Monaco.setErrorMarkers editor (lines |> Array.toList |> List.choose parseErrorLine)
+                        let lineErrors =
+                            lines |> Array.toList |> List.choose parseErrorLine |> List.map (remapDiagnosticLine objRef verb)
+
+                        Monaco.setErrorMarkers editor lineErrors
                     | _ -> ()
                 | _ -> ()
             elif header.StartsWith("moodev-login-result") then
@@ -7171,18 +7226,7 @@ Monaco.registerRenameAction editor (fun () -> runRenameSymbolFlow ())
 Monaco.registerShowHoverKeybinding editor
 
 Monaco.wireLsp
-    // `None` for a sugar-displayed tab - interim gate until Phase 4
-    // generalizes `LspClient`'s position mapping to remap *lines*, not
-    // just columns (`tabIndentDeltas`' existing scheme). Every LSP feature
-    // (hover/definition/completion/signature-help/document-highlight/
-    // references) already treats "no current document" as "nothing to do"
-    // for the game tab/inspector tab, so this reuses that exact path
-    // rather than needing its own separate off-switch per feature - a
-    // silently wrong jump is worse than a temporarily missing one.
-    (fun () ->
-        match currentVerbDoc () with
-        | Some(o, v) when Map.containsKey (o, v) tabSugarMaps -> None
-        | other -> other)
+    currentVerbDoc
     (fun objRef verbName line col ->
         if activeTab = VerbTab(objRef, verbName) then
             // Same document (e.g. a local variable's definition, which
@@ -7201,5 +7245,6 @@ Monaco.wireLsp
             revealAndOpenVerb objRef verbName)
     (fun message -> editorDiagnosticsEl.textContent <- message)
     getIndentDeltaFor
+    getLineMapFor
 
 inputEl.focus ()

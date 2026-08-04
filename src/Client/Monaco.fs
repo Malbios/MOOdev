@@ -7,6 +7,7 @@ module Client.Monaco
 open Fable.Core
 open Fable.Core.JsInterop
 open Client.LspClient
+open Language
 
 // Vite's `?worker` import suffix bundles the target module as a Web Worker
 // and gives back its constructor - the standard dependency-free way to wire
@@ -423,5 +424,6 @@ let wireLsp
     (jumpTo: int64 -> string -> int -> int -> unit)
     (showCaveat: string -> unit)
     (getIndentDelta: int64 -> string -> int[] option)
+    (getLineMap: int64 -> string -> Sugar.LineMap option)
     : unit =
-    wire monaco getCurrentDocument jumpTo showCaveat getIndentDelta
+    wire monaco getCurrentDocument jumpTo showCaveat getIndentDelta getLineMap

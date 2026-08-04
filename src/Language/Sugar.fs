@@ -42,6 +42,27 @@ type LineMap =
 
 type SugarResult = { Text: string; Map: LineMap }
 
+/// Given a 0-based *real* line index that might have no direct sugar
+/// counterpart (a dropped closer line - `map.RealToSugar.[i] = None`), finds
+/// the sugar line to attribute it to: itself if it maps directly, otherwise
+/// the nearest real line at or before it that does map. That's the last real
+/// statement whose dedent caused the closer to be inserted, matching where a
+/// human reading the sugar text would expect e.g. a "missing endif" class of
+/// result to point. Used wherever a real-line-numbered result (a compile
+/// error, an LSP position) needs a best-effort sugar-displayed line.
+let nearestMappedSugarLine (map: LineMap) (realIdx: int) : int =
+    let rec find (idx: int) : int =
+        if idx < 0 || map.RealToSugar.Length = 0 then
+            0
+        else
+            let clamped = min idx (map.RealToSugar.Length - 1)
+
+            match map.RealToSugar.[clamped] with
+            | Some sugarIdx -> sugarIdx
+            | None -> find (clamped - 1)
+
+    find realIdx
+
 let private closerKeywords = set [ Keyword.EndIf; Keyword.EndFor; Keyword.EndWhile; Keyword.EndFork; Keyword.EndTry ]
 
 let private closerText =
