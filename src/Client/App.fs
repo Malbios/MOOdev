@@ -165,6 +165,7 @@ let private docsListEl = document.getElementById ("docs-list")
 let private docsDetailEl = document.getElementById ("docs-detail")
 let private sidebarViewScratchpadEl = document.getElementById ("sidebar-view-scratchpad")
 let private scratchpadInputEl = document.getElementById ("scratchpad-input") :?> HTMLTextAreaElement
+let private scratchpadRunBtn = document.getElementById ("scratchpad-run-btn")
 let private scratchpadResultEl = document.getElementById ("scratchpad-result")
 let private sidebarViewPropertySearchEl = document.getElementById ("sidebar-view-property-search")
 let private propertySearchNameInputEl = document.getElementById ("property-search-name-input") :?> HTMLInputElement
@@ -3317,6 +3318,56 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         header.appendChild clearColorBtn |> ignore
     | None -> ()
 
+    // "Corify" this object - register it as a `$name` corponym by adding an
+    // object-valued property directly on `#0` (that's *all* a corponym is -
+    // see `Exporter.getCorponyms`, which just enumerates `properties(#0)`
+    // for anything object-typed; no separate registry). Reuses the existing
+    // `"add-property"` sidecar action wholesale (its own doc comment already
+    // calls out corponym registration as the reason it had to exist) rather
+    // than adding a new one - same reveal/confirm interaction as the rename
+    // pencil above, just with no pre-filled value since there's no existing
+    // name to default to. A name collision (already corified, or the name's
+    // taken) surfaces as an ordinary `add-property` failure via the existing
+    // diagnostics path, same as every other add-* flow in this pane - no
+    // separate "is this already corified" pre-check.
+    let corifyBtn = document.createElement ("button")
+    corifyBtn.classList.add "inspector-owner-edit-btn"
+    corifyBtn.textContent <- "©"
+    corifyBtn.title <- "Corify this object (register a $name on #0)"
+
+    let corifyGroup, corifyInput = mkQuickFillInput "corponym name" "" [] true
+    corifyGroup.setAttribute ("style", "display:none")
+
+    let corifyConfirmBtn = document.createElement ("button")
+    corifyConfirmBtn.classList.add "inspector-add-property-btn"
+    corifyConfirmBtn.textContent <- "✓"
+    corifyConfirmBtn.title <- "Confirm"
+
+    corifyConfirmBtn.onclick <-
+        fun _ ->
+            let name = corifyInput.value.Trim()
+
+            if name <> "" then
+                sendAction
+                    [ "action" ==> "add-property"
+                      "obj" ==> 0
+                      "name" ==> name
+                      "ownerExpr" ==> "player"
+                      "valueExpr" ==> sprintf "#%d" objRef
+                      "perms" ==> "r" ]
+
+    corifyInput.onkeydown <- fun ev -> if ev.key = "Enter" then corifyConfirmBtn.click ()
+
+    corifyGroup.appendChild corifyConfirmBtn |> ignore
+
+    corifyBtn.onclick <-
+        fun _ ->
+            corifyGroup.setAttribute ("style", "")
+            corifyInput.focus ()
+
+    header.appendChild corifyBtn |> ignore
+    header.appendChild corifyGroup |> ignore
+
     inspectorContentEl.appendChild header |> ignore
 
     let ownerRow = document.createElement ("div")
@@ -3503,12 +3554,6 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let th = document.createElement ("th")
         th.textContent <- h
         propsHeaderRow.appendChild th |> ignore
-
-    // Column labels are noise for an empty table - hidden until either a
-    // real row exists or the add-trigger reveals them alongside the add
-    // row (see the trigger wiring below).
-    if props.Length = 0 then
-        propsHeaderRow.setAttribute ("style", "display:none")
 
     propsTable.appendChild propsHeaderRow |> ignore
 
@@ -3877,16 +3922,12 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addPropRow.appendChild (mkCell permsWidget) |> ignore
     addPropRow.appendChild (mkCell addValueInput) |> ignore
     addPropRow.appendChild (mkCell addBtn) |> ignore
-    addPropRow.setAttribute ("style", "display:none")
     propsTable.appendChild addPropRow |> ignore
-
-    let propsAddTargets = if props.Length = 0 then [ propsHeaderRow; addPropRow ] else [ addPropRow ]
 
     let propsTitleRow = document.createElement ("div")
     propsTitleRow.classList.add "inspector-section-title-row"
     propsTitleRow.appendChild propsTitle |> ignore
     propsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-props-collapsed" propsTable) |> ignore
-    propsTitleRow.appendChild (mkAddTrigger "Add property" propsAddTargets) |> ignore
 
     propsSection.appendChild propsTitleRow |> ignore
     propsSection.appendChild propsTable |> ignore
@@ -3914,9 +3955,6 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         let th = document.createElement ("th")
         th.textContent <- h
         verbsHeaderRow.appendChild th |> ignore
-
-    if verbs.Length = 0 then
-        verbsHeaderRow.setAttribute ("style", "display:none")
 
     verbsTable.appendChild verbsHeaderRow |> ignore
 
@@ -4225,16 +4263,12 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addVerbRow.appendChild (mkVerbCell prepGroup) |> ignore
     addVerbRow.appendChild (mkVerbCell iobjSelect) |> ignore
     addVerbRow.appendChild (mkVerbCell addVerbBtn) |> ignore
-    addVerbRow.setAttribute ("style", "display:none")
     verbsTable.appendChild addVerbRow |> ignore
-
-    let verbsAddTargets = if verbs.Length = 0 then [ verbsHeaderRow; addVerbRow ] else [ addVerbRow ]
 
     let verbsTitleRow = document.createElement ("div")
     verbsTitleRow.classList.add "inspector-section-title-row"
     verbsTitleRow.appendChild verbsTitle |> ignore
     verbsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-verbs-collapsed" verbsTable) |> ignore
-    verbsTitleRow.appendChild (mkAddTrigger "Add verb" verbsAddTargets) |> ignore
 
     verbsSection.appendChild verbsTitleRow |> ignore
     verbsSection.appendChild verbsTable |> ignore
@@ -5872,6 +5906,8 @@ scratchpadInputEl.onkeydown <-
             ev.preventDefault ()
             runScratchpadEval ()
 
+scratchpadRunBtn.onclick <- fun _ -> runScratchpadEval ()
+
 /// Adds whatever's typed in the Watch panel's own input to the watch list -
 /// same "Enter to submit, then clear the box" shape as the scratchpad's
 /// input above, except this appends to a persisted list instead of running
@@ -6998,7 +7034,10 @@ onWsMessage <-
                         treePermissionRisksSummaryEl.textContent <- "Fix failed: " + String.concat "\n" lines
             elif header.StartsWith("moodev-scratchpad-result") then
                 let ok = headerField "ok: " header = Some "1"
-                scratchpadResultEl.textContent <- (if ok then "" else "Error: ") + String.concat "\n" lines
+                let resultText = (if ok then "" else "Error: ") + String.concat "\n" lines
+                scratchpadResultEl.innerHTML <- ""
+                let segments, _ = Ansi.feed Ansi.initialState resultText
+                Ansi.renderInto scratchpadResultEl segments
             elif header.StartsWith("moodev-watch-result") then
                 // Only trust a reply whose length matches the *current*
                 // watch list - `tickWatch` carries no request id, so a

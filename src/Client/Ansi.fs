@@ -259,6 +259,15 @@ let renderLiteralPreview (text: string) : Segment list =
     let mutable style = defaultStyle
     let mutable i = 0
 
+    // A quoted literal's closing `"` is our own display delimiter, not part
+    // of the value's own content - unlike everything between the quotes, it
+    // should never inherit a color left active by an SGR sequence with no
+    // matching reset (e.g. a value that's just a raw color-setting escape).
+    // The opening quote needs no equivalent handling: it's always appended
+    // before any escape sequence could have changed `style` away from
+    // `defaultStyle`, so it's already correct.
+    let quoted = len >= 2 && text.[0] = '"' && text.[len - 1] = '"'
+
     let flushPlain () =
         if plain.Length > 0 then
             segments.Add { Text = plain.ToString(); Style = style }
@@ -301,6 +310,10 @@ let renderLiteralPreview (text: string) : Segment list =
         elif c = '\x07' then
             flushPlain ()
             segments.Add { Text = "\\a"; Style = style }
+            i <- i + 1
+        elif quoted && i = len - 1 && c = '"' then
+            flushPlain ()
+            segments.Add { Text = "\""; Style = defaultStyle }
             i <- i + 1
         else
             plain.Append(c) |> ignore
