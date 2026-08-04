@@ -94,7 +94,14 @@ let private pumpMooReads (session: Session) (ct: CancellationToken) : Task =
 /// Malformed input (bad JSON, missing `id`/`action`) is silently dropped -
 /// there's no `id` to answer with in that case, and this is a
 /// programmatic-only connection with a single trusted caller (the LSP
-/// process), not a boundary that needs defensive error reporting.
+/// process), not a boundary that needs defensive error reporting. Once
+/// `id`/`action` are known, though, a failure during dispatch itself (e.g.
+/// `handleGetBuiltins`'s live eval throwing) still sends an error response
+/// rather than dropping silently - `id` exists to answer with here, and
+/// silently dropping used to leave the LSP's own `SidecarBridge.sendRequest`
+/// waiting the full request timeout for a reply that would never come,
+/// turning one failed MOO eval into a several-second hang for whatever
+/// hover/completion/etc. call triggered it.
 let private handleRequest
     (session: Session)
     (sendResponse: string -> Task)
@@ -109,13 +116,18 @@ let private handleRequest
             let action = root.GetProperty("action").GetString()
 
             let! responseJson =
-                match action with
-                | "get-builtins" -> LspBridgeActions.handleGetBuiltins id session ct
-                | "resolve-verb-dispatch" ->
-                    let objRef = root.GetProperty("obj").GetInt64()
-                    let verbName = root.GetProperty("verb").GetString()
-                    LspBridgeActions.handleResolveVerbDispatch id session objRef verbName ct
-                | _ -> Task.FromResult(JsonSerializer.Serialize({| id = id; error = "unknown action" |}))
+                task {
+                    try
+                        match action with
+                        | "get-builtins" -> return! LspBridgeActions.handleGetBuiltins id session ct
+                        | "resolve-verb-dispatch" ->
+                            let objRef = root.GetProperty("obj").GetInt64()
+                            let verbName = root.GetProperty("verb").GetString()
+                            return! LspBridgeActions.handleResolveVerbDispatch id session objRef verbName ct
+                        | _ -> return JsonSerializer.Serialize({| id = id; error = "unknown action" |})
+                    with ex ->
+                        return JsonSerializer.Serialize({| id = id; error = ex.Message |})
+                }
 
             do! sendResponse responseJson
         with _ ->

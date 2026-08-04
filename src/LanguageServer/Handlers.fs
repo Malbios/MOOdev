@@ -949,7 +949,8 @@ let computeSemanticTokens
     : Async<SemanticTokenEntry[]> =
     async {
         let refs = AstQuery.collectReferences stmts
-        let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+        let! liveBuiltinsOpt = bridge.GetBuiltins() |> Async.AwaitTask
+        let liveBuiltins = liveBuiltinsOpt |> Option.defaultValue Map.empty
 
         let verbCallTargets =
             refs
@@ -2168,11 +2169,18 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                             | None -> return hoverForUnresolvedVerbCall graph verbName
                         | AstQuery.RefVerbCall(_, _, _) -> return mkHover "Verb call with a computed name - cannot resolve statically."
                         | AstQuery.RefCall(name, _) ->
-                            let! builtins = bridge.GetBuiltins() |> Async.AwaitTask
+                            let! builtinsOpt = bridge.GetBuiltins() |> Async.AwaitTask
 
-                            match Map.tryFind name builtins with
-                            | Some fn -> return mkHover (builtinHoverText fn)
-                            | None -> return mkHover (sprintf "**%s(...)** - not a registered builtin function." name)
+                            match builtinsOpt with
+                            | None ->
+                                return
+                                    mkHover (
+                                        sprintf "**%s(...)** - could not fetch the live builtins list right now; try hovering again in a moment." name
+                                    )
+                            | Some builtins ->
+                                match Map.tryFind name builtins with
+                                | Some fn -> return mkHover (builtinHoverText fn)
+                                | None -> return mkHover (sprintf "**%s(...)** - not a registered builtin function." name)
                         | AstQuery.RefProp(ObjLit 0L, StrLit name) ->
                             match Metadata.Resolver.resolveReceiver graph (Prop(ObjLit 0L, StrLit name, 0, 0)) with
                             | Some objRef -> return mkHover (sprintf "**$%s** -> `#%d (%s)`" name objRef (definerName graph objRef))
@@ -2351,7 +2359,8 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                         AstQuery.boundVariableNames stmts
                         |> List.map (fun name -> mkCompletionItem name CompletionItemKind.Variable None)
 
-                    let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+                    let! liveBuiltinsOpt = bridge.GetBuiltins() |> Async.AwaitTask
+                    let liveBuiltins = liveBuiltinsOpt |> Option.defaultValue Map.empty
 
                     let builtinItems =
                         liveBuiltins
@@ -2395,7 +2404,8 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
                             | AstQuery.RefCall(name, _) -> Some name
                             | _ -> None)
 
-                    let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
+                    let! liveBuiltinsOpt = bridge.GetBuiltins() |> Async.AwaitTask
+                    let liveBuiltins = liveBuiltinsOpt |> Option.defaultValue Map.empty
 
                     match builtinName |> Option.bind (fun name -> Map.tryFind name liveBuiltins) with
                     | None -> return Ok None
@@ -2760,6 +2770,6 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// variable, and live builtin, one flat searchable list (`moocodeDocs`).
     member _.GetMoocodeDocs(_p: obj) : Async<Result<MoocodeDocEntry[], JsonRpc.Error>> =
         async {
-            let! liveBuiltins = bridge.GetBuiltins() |> Async.AwaitTask
-            return Ok(moocodeDocs graph liveBuiltins)
+            let! liveBuiltinsOpt = bridge.GetBuiltins() |> Async.AwaitTask
+            return Ok(moocodeDocs graph (liveBuiltinsOpt |> Option.defaultValue Map.empty))
         }
