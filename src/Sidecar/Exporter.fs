@@ -92,27 +92,73 @@ type EvalRunner = string -> string -> CancellationToken -> Task<JsonDocument>
 /// on-disk map's own key order) so the exporter can look up "does this
 /// referenced object have a corponym" while building `object.moo`/`@verb`
 /// lines.
+///
+/// Called from over a dozen places across this codebase (every `IdeActions`
+/// live-info/tree/search action, plus `Exporter`/`Importer`'s own use) and
+/// - unlike `getAnonVerbs`/`getLiveRootsChunk`'s own tick-exhaustion fixes,
+/// both scoped to a single object or capped result - this one has no room
+/// to just stop early: every caller needs a *complete* corponym map for
+/// correct display-name/export-path resolution, so silently truncating it
+/// would be a correctness bug (an object display's name silently reverting
+/// to its raw un-corponym'd form), not a graceful degrade. Self-limits via
+/// `ticks_left()` and resumes by property-list *index* rather than object
+/// number (same idiom, different cursor shape - there's no `resume_from`
+/// object to splice into a range here), looping until the whole property
+/// list is exhausted. `properties(#0)` itself is a real O(propdef-count)
+/// scan (confirmed against `ToastStunt/src/property.cc`'s `bf_properties`:
+/// `db_for_all_propdefs` walks and builds a fresh list every call, unlike
+/// `children()`'s cheap `var_ref` of an already-maintained list) - re-run
+/// once per chunk here rather than threaded through the resume cursor,
+/// since MOO has no way to carry a value across separate `;;`-eval calls
+/// and this list-build itself is cheap per property (bare name collection,
+/// not a value lookup); the *expensive*, budget-threatening part is
+/// `typeof(#0.(pname))` - a per-property value lookup by dynamic name -
+/// which is what the `ticks_left()` check actually guards.
 let getCorponyms (evalRunner: EvalRunner) (ct: CancellationToken) : Task<Map<int64, string>> =
     task {
-        let statements =
-            """corps = [];
-for pname in (properties(#0))
+        let mutable acc = Map.empty
+        let mutable current = 1L
+        let mutable resumeFrom = 0L
+        let mutable total = 0L
+
+        let mutable keepGoing = true
+
+        while keepGoing do
+            let statements =
+                $"""plist = properties(#0);
+total = length(plist);
+corps = [];
+resume_from = total + 1;
+for i in [{current}..total]
+  if (ticks_left() < 10000)
+    resume_from = i;
+    break;
+  endif
+  pname = plist[i];
   if (typeof(#0.(pname)) == OBJ)
     corps[pname] = tostr(#0.(pname));
   endif
 endfor"""
 
-        let! json = evalRunner statements "corps" ct
-        let root = json.RootElement
+            let! json = evalRunner statements """["corps" -> corps, "resume_from" -> resume_from, "total" -> total]""" ct
+            let root = json.RootElement
 
-        return
-            root.EnumerateObject()
-            |> Seq.map (fun prop ->
-                // Values are "#123" strings (tostr() of an OBJ) - strip the
-                // leading '#' and parse the number.
-                let objnumText = prop.Value.GetString().TrimStart('#')
-                int64 objnumText, prop.Name)
-            |> Map.ofSeq
+            let chunkMap =
+                root.GetProperty("corps").EnumerateObject()
+                |> Seq.map (fun prop ->
+                    // Values are "#123" strings (tostr() of an OBJ) - strip
+                    // the leading '#' and parse the number.
+                    let objnumText = prop.Value.GetString().TrimStart('#')
+                    int64 objnumText, prop.Name)
+                |> Map.ofSeq
+
+            acc <- Map.fold (fun m k v -> Map.add k v m) acc chunkMap
+            resumeFrom <- root.GetProperty("resume_from").GetInt64()
+            total <- root.GetProperty("total").GetInt64()
+            current <- resumeFrom
+            keepGoing <- resumeFrom <= total
+
+        return acc
     }
 
 /// One entry from `function_info()` (no args) - every builtin ToastStunt
