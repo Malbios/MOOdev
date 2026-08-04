@@ -1600,6 +1600,87 @@ endif"""
 /// to shortcut that in a `parent(o)`-per-object data model like MOO's).
 let private maxLiveRoots = 500
 
+/// Per-root verb/property cap within a single chunk - independent of
+/// `maxLiveRoots` (a cap on how many *root objects* the scan returns). A
+/// root candidate can itself carry a large number of directly-defined
+/// verbs/properties (confirmed live: `#0`, the system object, routinely is
+/// parentless *and* verb/property-rich) - without this, finding just one
+/// such root mid-chunk could exhaust the remaining tick budget in a single
+/// object's worth of `verb_info`/`property_info` calls, defeating the
+/// per-object `ticks_left()` check below (which only runs between distinct
+/// object numbers, not between verbs/properties of the *same* object).
+let private maxLiveRootDetail = 200
+
+/// One resumable chunk of the `get-live-roots` scan - same self-limiting,
+/// resume-cursor idiom as `Exporter.getAnonVerbs` (see that function's own
+/// comment), applied here because the *previous* unconditional version of
+/// this scan - `for i in [0..toint(max_object())] ... endfor` with no
+/// `ticks_left()` check at all - reliably died with "Task ran out of
+/// ticks" on a large real-world database (confirmed live against the same
+/// ~633k-object HellMOO-derived world already documented elsewhere in this
+/// file). Worse than the inspector's own tick-exhaustion bug: `get-live-roots`
+/// fires automatically right after every login (see `App.fs`'s
+/// `moodev-login-result` handler), so this failure blocked basic usability
+/// entirely, not just inspecting a specific large object.
+let private getLiveRootsChunk
+    (evalRunner: Exporter.EvalRunner)
+    (startObj: int64)
+    (maxObj: int64)
+    (ct: CancellationToken)
+    : Task<(int64 * string * JsonElement * JsonElement) list * int64> =
+    task {
+        let statements =
+            $"""resume_from = #{maxObj + 1L};
+out = {{}};
+for i in [{startObj}..{maxObj}]
+  if (ticks_left() < 10000)
+    resume_from = toobj(i);
+    break;
+  endif
+  o = toobj(i);
+  if (valid(o) && length(parents(o)) == 0)
+    oname = typeof(o.name) == STR ? o.name | "";
+    overbs = {{}};
+    vlist = verbs(o);
+    for j in [1..length(vlist)]
+      if (length(overbs) >= {maxLiveRootDetail})
+        break;
+      endif
+      vi = verb_info(o, j);
+      va = verb_args(o, j);
+      overbs = {{@overbs, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
+    endfor
+    oprops = {{}};
+    for pn in (properties(o))
+      if (length(oprops) >= {maxLiveRootDetail})
+        break;
+      endif
+      pi = property_info(o, pn);
+      oprops = {{@oprops, ["name" -> pn, "perms" -> pi[2]]}};
+    endfor
+    out = {{@out, ["objref" -> tostr(o), "name" -> oname, "verbs" -> overbs, "properties" -> oprops]}};
+  endif
+endfor"""
+
+        let! json = evalRunner statements """["roots" -> out, "resume_from" -> tostr(resume_from)]""" ct
+        let root = json.RootElement
+
+        let results =
+            root.GetProperty("roots").EnumerateArray()
+            |> Seq.map (fun el ->
+                let objnum = int64 (el.GetProperty("objref").GetString().TrimStart('#'))
+                let name = el.GetProperty("name").GetString()
+                // Cloned rather than kept as a view into `json` - the verb/
+                // property arrays are read later, by which point the
+                // `JsonDocument` backing `json` (owned by this chunk call,
+                // not the caller) may already be disposed.
+                objnum, name, el.GetProperty("verbs").Clone(), el.GetProperty("properties").Clone())
+            |> List.ofSeq
+
+        let resumeFrom = int64 ((root.GetProperty("resume_from").GetString()).TrimStart('#'))
+        return results, resumeFrom
+    }
+
 /// `get-live-roots` - the counterpart to `getLiveChildren` for the tree's
 /// *top level*. `rootRefs` (the client's set of tree entry points) is
 /// computed once from the static corponym export at load time, and the only
@@ -1611,56 +1692,41 @@ let private maxLiveRoots = 500
 /// of anything special about its object number, but because nothing in the
 /// tree's design ever asks "what else has no parent?" after the initial
 /// load. This does exactly that: scans every valid object number for
-/// `length(parents(o)) == 0`, and returns the same per-object structural
-/// summary `getLiveChildren` already builds for a single object's children.
+/// `length(parents(o)) == 0`, chunked via `getLiveRootsChunk` until either
+/// `maxLiveRoots` roots are found or the whole object range is exhausted -
+/// unlike `exportTree`'s own resume loop (a one-shot batch command with no
+/// round-trip budget to worry about), this runs on every login, so it stops
+/// as soon as it has enough roots rather than always walking the full range.
 let getLiveRoots (config: Config) (session: Session) (webSocket: WebSocket) (ct: CancellationToken) : Task<unit> =
     task {
         let evalRunner = evalOnSession session
+        let! maxObj = Exporter.getMaxObject evalRunner ct
 
-        let statements =
-            $"""total = 0;
-out = {{}};
-for i in [0..toint(max_object())]
-  o = toobj(i);
-  if (valid(o) && length(parents(o)) == 0)
-    total = total + 1;
-    if (total <= {maxLiveRoots})
-      oname = typeof(o.name) == STR ? o.name | "";
-      overbs = {{}};
-      vlist = verbs(o);
-      for j in [1..length(vlist)]
-        vi = verb_info(o, j);
-        va = verb_args(o, j);
-        overbs = {{@overbs, ["names" -> vi[3], "perms" -> vi[2], "dobj" -> va[1], "prep" -> va[2], "iobj" -> va[3]]}};
-      endfor
-      oprops = {{}};
-      for pn in (properties(o))
-        pi = property_info(o, pn);
-        oprops = {{@oprops, ["name" -> pn, "perms" -> pi[2]]}};
-      endfor
-      out = {{@out, ["objref" -> tostr(o), "name" -> oname, "verbs" -> overbs, "properties" -> oprops]}};
-    endif
-  endif
-endfor
-result = ["roots" -> out, "truncated" -> ((total > {maxLiveRoots}) ? 1 | 0)];"""
+        let accumulated = ResizeArray<int64 * string * JsonElement * JsonElement>()
+        let mutable current = 0L
+        let mutable scanComplete = false
 
-        let! json = evalRunner statements "result" ct
-        let root = json.RootElement
+        while accumulated.Count < maxLiveRoots && not scanComplete do
+            let! chunkResults, resumeFrom = getLiveRootsChunk evalRunner current maxObj ct
+            accumulated.AddRange(chunkResults)
+            current <- resumeFrom
+            scanComplete <- resumeFrom > maxObj
+
+        let truncated = accumulated.Count > maxLiveRoots || not scanComplete
+
         let! corponymsByObjnum = Exporter.getCorponyms evalRunner ct
-        let truncated = root.GetProperty("truncated").GetInt32() = 1
 
         let firstAlias (nameSpec: string) =
             nameSpec.Split(' ') |> Array.tryHead |> Option.defaultValue nameSpec
 
         let lines =
-            root.GetProperty("roots").EnumerateArray()
-            |> Seq.map (fun r ->
-                let rObjRef = int64 (r.GetProperty("objref").GetString().TrimStart('#'))
-                let liveName = r.GetProperty("name").GetString()
+            accumulated
+            |> Seq.truncate maxLiveRoots
+            |> Seq.map (fun (rObjRef, liveName, verbsEl, propsEl) ->
                 let displayName = formatLiveName corponymsByObjnum rObjRef liveName
 
                 let verbs =
-                    r.GetProperty("verbs").EnumerateArray()
+                    verbsEl.EnumerateArray()
                     |> Seq.map (fun v ->
                         {| name = firstAlias (v.GetProperty("names").GetString())
                            perms = v.GetProperty("perms").GetString()
@@ -1670,7 +1736,7 @@ result = ["roots" -> out, "truncated" -> ((total > {maxLiveRoots}) ? 1 | 0)];"""
                     |> Array.ofSeq
 
                 let properties =
-                    r.GetProperty("properties").EnumerateArray()
+                    propsEl.EnumerateArray()
                     |> Seq.map (fun p ->
                         {| name = p.GetProperty("name").GetString()
                            perms = p.GetProperty("perms").GetString() |})
