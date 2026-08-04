@@ -29,6 +29,31 @@
   access, not just a socket. The script probes for eval support first and stops cleanly,
   without touching anything, if the probe fails.
 
+  A THIRD case, distinct from both of the above: some real, older MOO cores have a native
+  ';'-eval convention that can only run a single bare EXPRESSION per call, not a full
+  multi-statement program - confirmed live against one such world (retro-themed, "OpenBSD 2.8"
+  login banner) by testing each hypothesis directly: `;1+1` => `=> 2` (bare expressions work),
+  but a sequence of statements after the trigger (`;stmt1; stmt2;`) only ever runs `stmt1` (the
+  rest becomes unreachable code), and a genuine STATEMENT construct like `for`/`if`/`try` fails
+  outright with a syntax error - all consistent with (and only fully explained by) the
+  mechanism being "always compile the input as `return INPUT;`", which requires INPUT to be a
+  single expression. This means the existing install steps' `try...except...endtry` "add if
+  missing, never overwrite" logic literally cannot compile on such a world - `try` is a
+  statement, not an expression usable after `return`.
+
+  The script probes for this dialect as a second attempt if the standard probe fails (see
+  -SingleExpressionEval below), and works around the limitation rather than giving up: since
+  fixing #0's flags and installing #0:do_command are each expressible as a short sequence of
+  bare single-expression calls (property assignment, add_verb(), set_verb_code() are all
+  expressions - no control flow needed to just add a verb unconditionally, and do_command has
+  no legitimate pre-existing content worth checking for per the comment below), it bootstraps
+  JUST do_command that way, one bare expression per eval call, then switches every subsequent
+  step over to *that verb's own* ';;'-eval shim instead of the world's native one - which
+  supports full MOO code unconditionally, so the existing user_connected/do_start_script/LSP
+  bridge install logic (all genuinely needing if/try/for) runs completely unmodified through
+  it, exactly as it would against a world whose native eval was never limited in the first
+  place.
+
   do_command and do_start_script are only ever ADDED if they don't already exist - never
   overwritten (neither has any legitimate pre-existing content worth preserving; both are
   purely this project's own invention, so "already exists" just means a prior bootstrap run
@@ -74,13 +99,24 @@
   The MOO server's player-connection port. No default, same reasoning.
 
 .PARAMETER Username
-  Login name to send as `connect <Username> <Password>`. Omit (along with -Password) to send
-  a bare `connect wizard` instead, which is what a Minimal.db-derived world's unconditional
-  do_login_command accepts (see CLAUDE.md's "There is no real login/accounting yet" section) -
-  a real ToastCore world will need real credentials here.
+  Login name to send as `connect <Username> <Password>` (or, with -LegacyNamePasswordPrompt,
+  as a bare name typed in response to a "type your name" style prompt - see that parameter).
+  Omit (along with -Password) to send a bare `connect wizard` instead, which is what a
+  Minimal.db-derived world's unconditional do_login_command accepts (see CLAUDE.md's "There is
+  no real login/accounting yet" section) - a real ToastCore world will need real credentials
+  here.
 
 .PARAMETER Password
   Password for -Username. Ignored if -Username is omitted.
+
+.PARAMETER LegacyNamePasswordPrompt
+  Some real, older cores don't implement the standard `connect <name> <password>` command line
+  convention at all - confirmed live against a retro-themed world whose do_login_command
+  instead prompts "Type your name to log in:" then, on a separate line, "Password:", each read
+  via its own `read()` call. Sending a standard connect line there just gets parsed as the raw
+  name text and fails deep inside do_login_command's own argument handling. This switch sends
+  -Username and -Password as two separate lines instead, with a short pause between them,
+  matching that flow. Requires both -Username and -Password.
 
 .PARAMETER LspBridgePort
   If given, also create and bind the LSP bridge's service character + listener object on
@@ -97,18 +133,28 @@
 .EXAMPLE
   ./bootstrap-moo-world.ps1 -HostName moo.example.com -Port 7777 -Username Wizard -Password hunter2 -LspBridgePort 7780
   # Real ToastCore-derived world with actual accounts.
+
+.EXAMPLE
+  ./bootstrap-moo-world.ps1 -HostName 127.0.0.1 -Port 7781 -Username admin -Password admin -LegacyNamePasswordPrompt -LspBridgePort 7783
+  # A world with a non-standard name/password-prompt login flow (see -LegacyNamePasswordPrompt).
 #>
 param(
     [Parameter(Mandatory)] [string]$HostName,
     [Parameter(Mandatory)] [int]$Port,
     [string]$Username,
     [string]$Password,
+    [switch]$LegacyNamePasswordPrompt,
     [int]$LspBridgePort,
     [switch]$Force
 )
 
 if ($LspBridgePort -and $LspBridgePort -eq $Port) {
     Write-Host "-LspBridgePort must differ from -Port (they're separate listeners on the same server)." -ForegroundColor Red
+    return
+}
+
+if ($LegacyNamePasswordPrompt -and (-not $Username -or -not $Password)) {
+    Write-Host "-LegacyNamePasswordPrompt requires both -Username and -Password." -ForegroundColor Red
     return
 }
 
@@ -139,14 +185,23 @@ function Invoke-NativeEval {
     # quirk for multi-statement bodies (see CLAUDE.md's "There is no real login/accounting
     # yet" -> bootstrap section for the exact same idiom, confirmed live in that context).
     #
+    # -TriggerPrefix overrides that default wire prefix - used two ways elsewhere in this
+    # script: a bare "; " (no no-op statement) for the single-expression-only eval dialect's
+    # bootstrap calls (see this file's own top comment on that dialect - the no-op statement
+    # is exactly what breaks there, since it turns the whole input into "return ;code" i.e.
+    # an immediate no-value return followed by unreachable code), and ";; " once this
+    # script's own do_command shim has been installed on such a world, switching every
+    # subsequent call over to that shim's real, unrestricted eval() instead of the world's
+    # own limited one.
+    #
     # This is a line-based telnet protocol: ANY embedded newline in $Code becomes a
     # separate command to the server, not a continuation - so a multi-line here-string
     # (used here purely for readability in the script source) must be flattened to one
     # physical line before sending, or only its first line is actually evaluated and
     # every line after it gets sent as its own unrecognized top-level command instead.
-    param($Stream, [string]$Code, [int]$WaitMs = 2000)
+    param($Stream, [string]$Code, [int]$WaitMs = 2000, [string]$TriggerPrefix = "; ; ")
     $flatCode = ($Code -replace '\r?\n\s*', ' ').Trim()
-    Send-MooLine $Stream "; ; $flatCode"
+    Send-MooLine $Stream "$TriggerPrefix$flatCode"
     return Read-MooResponse -Stream $Stream -WaitMs $WaitMs
 }
 
@@ -173,7 +228,16 @@ try {
     # banner-suppression quirk CLAUDE.md notes - harmless either way).
     Read-MooResponse -Stream $stream -WaitMs 1000 | Out-Null
 
-    if ($Username) {
+    if ($LegacyNamePasswordPrompt) {
+        # See this parameter's own doc comment - this world's do_login_command reads the
+        # name and password as two separate lines via its own read() calls, not as one
+        # "connect name password" command line at all. A short pause between the two sends
+        # gives the server's own read() a chance to actually be waiting before the second
+        # line arrives (matches the timing already live-verified for this exact flow).
+        Send-MooLine $stream $Username
+        Start-Sleep -Milliseconds 500
+        Send-MooLine $stream $Password
+    } elseif ($Username) {
         Send-MooLine $stream "connect $Username $Password"
     } else {
         Send-MooLine $stream "connect wizard"
@@ -181,30 +245,6 @@ try {
     $loginResponse = Read-MooResponse -Stream $stream -WaitMs 1500
     Write-Host "--- login response ---" -ForegroundColor DarkGray
     Write-Host $loginResponse
-
-    Write-Host "Probing for native eval support..." -ForegroundColor Cyan
-    $probeMarker = "MOODEV_BOOTSTRAP_PROBE_OK"
-    $probeResponse = Invoke-NativeEval -Stream $stream -Code "notify(player, `"$probeMarker`");"
-
-    if ($probeResponse -notmatch [regex]::Escape($probeMarker)) {
-        Write-Host ""
-        Write-Host "Native eval does not appear to work on this world (no '$probeMarker' echoed back)." -ForegroundColor Red
-        Write-Host "Raw probe response was:" -ForegroundColor Red
-        Write-Host $probeResponse
-        Write-Host ""
-        Write-Host "This is expected for a bare Minimal.db-derived world that's never been" -ForegroundColor Yellow
-        Write-Host "bootstrapped at all - there's no eval mechanism to reach over the network yet." -ForegroundColor Yellow
-        Write-Host "That case needs the '-e' emergency console at server LAUNCH time instead" -ForegroundColor Yellow
-        Write-Host "(shell/process access to the MOO host, not just this connection) - see" -ForegroundColor Yellow
-        Write-Host "CLAUDE.md's 'Bootstrap verbs baked into every world' section for that recipe." -ForegroundColor Yellow
-        Write-Host "Also double check -Username/-Password/login actually succeeded above, in case" -ForegroundColor Yellow
-        Write-Host "eval does exist but the connecting account isn't wizard+programmer." -ForegroundColor Yellow
-        return
-    }
-    Write-Host "Native eval confirmed working." -ForegroundColor Green
-
-    Write-Host "Fixing #0's own wizard/programmer flags..." -ForegroundColor Cyan
-    Invoke-NativeEval -Stream $stream -Code "#0.wizard = 1; #0.programmer = 1;" | Out-Null
 
     $doCommandCode = ConvertTo-MooCodeListLiteral -Lines @(
         'if (length(argstr) >= 2 && argstr[1..2] == ";;")',
@@ -216,8 +256,78 @@ try {
         'endif',
         'return 0;'
     )
+
+    Write-Host "Probing for native eval support..." -ForegroundColor Cyan
+    $probeMarker = "MOODEV_BOOTSTRAP_PROBE_OK"
+    $probeResponse = Invoke-NativeEval -Stream $stream -Code "notify(player, `"$probeMarker`");"
+
+    # Every subsequent Invoke-NativeEval call in this script uses this trigger - the world's
+    # own convention by default, switched to this script's own do_command shim if the
+    # single-expression-only fallback below ends up installing it.
+    $evalTrigger = "; ; "
+
+    if ($probeResponse -match [regex]::Escape($probeMarker)) {
+        Write-Host "Native eval confirmed working." -ForegroundColor Green
+    } else {
+        # See this file's own top comment on the single-expression-only eval dialect. A bare
+        # "; CODE" (no no-op leading statement) still only ever runs a single expression, but
+        # that's exactly what every call in this fallback path needs - no control flow.
+        Write-Host "Standard native eval probe failed - trying single-expression-only dialect..." -ForegroundColor Yellow
+        $singleProbeResponse = Invoke-NativeEval -Stream $stream -Code "notify(player, `"$probeMarker`");" -TriggerPrefix "; "
+
+        if ($singleProbeResponse -notmatch [regex]::Escape($probeMarker)) {
+            Write-Host ""
+            Write-Host "Native eval does not appear to work on this world (no '$probeMarker' echoed back," -ForegroundColor Red
+            Write-Host "in either the standard or single-expression-only wire format)." -ForegroundColor Red
+            Write-Host "Raw probe responses were:" -ForegroundColor Red
+            Write-Host $probeResponse
+            Write-Host $singleProbeResponse
+            Write-Host ""
+            Write-Host "This is expected for a bare Minimal.db-derived world that's never been" -ForegroundColor Yellow
+            Write-Host "bootstrapped at all - there's no eval mechanism to reach over the network yet." -ForegroundColor Yellow
+            Write-Host "That case needs the '-e' emergency console at server LAUNCH time instead" -ForegroundColor Yellow
+            Write-Host "(shell/process access to the MOO host, not just this connection) - see" -ForegroundColor Yellow
+            Write-Host "CLAUDE.md's 'Bootstrap verbs baked into every world' section for that recipe." -ForegroundColor Yellow
+            Write-Host "Also double check -Username/-Password/login actually succeeded above, in case" -ForegroundColor Yellow
+            Write-Host "eval does exist but the connecting account isn't wizard+programmer." -ForegroundColor Yellow
+            return
+        }
+
+        Write-Host "Single-expression-only native eval detected - this world's eval can't run" -ForegroundColor Yellow
+        Write-Host "if/try/for at all, only bare expressions. Bootstrapping #0:do_command via a" -ForegroundColor Yellow
+        Write-Host "sequence of bare single-expression calls, then switching every remaining step" -ForegroundColor Yellow
+        Write-Host "over to that shim's own unrestricted eval()..." -ForegroundColor Yellow
+
+        # Order matters, matches CLAUDE.md's own '-e' emergency-console recipe for the same
+        # reason: do_command is owned by #0, so it runs with #0's permissions - eval() inside
+        # it needs #0 already wizard+programmer, or every call through the freshly-installed
+        # shim would throw E_PERM before ever reaching user code.
+        Invoke-NativeEval -Stream $stream -Code "#0.wizard = 1" -TriggerPrefix "; " | Out-Null
+        Invoke-NativeEval -Stream $stream -Code "#0.programmer = 1" -TriggerPrefix "; " | Out-Null
+
+        $existsProbe = Invoke-NativeEval -Stream $stream -Code 'verb_info(#0, "do_command")' -TriggerPrefix "; "
+        if ($existsProbe -match '=>') {
+            Write-Host "  #0:do_command already exists, using it directly." -ForegroundColor Yellow
+        } else {
+            Invoke-NativeEval -Stream $stream -Code 'add_verb(#0, {#0, "rxd", "do_command"}, {"none", "none", "none"})' -TriggerPrefix "; " | Out-Null
+            $setResult = Invoke-NativeEval -Stream $stream -Code "set_verb_code(#0, `"do_command`", $doCommandCode)" -TriggerPrefix "; "
+            if ($setResult -notmatch '=>\s*\{\}') {
+                Write-Host "  Failed to install #0:do_command via single-expression eval - raw response:" -ForegroundColor Red
+                Write-Host $setResult
+                return
+            }
+            Write-Host "  #0:do_command installed via bare single-expression calls." -ForegroundColor Green
+        }
+
+        $evalTrigger = ";; "
+        Write-Host "Switched to #0:do_command's own eval shim for everything remaining." -ForegroundColor Green
+    }
+
+    Write-Host "Fixing #0's own wizard/programmer flags..." -ForegroundColor Cyan
+    Invoke-NativeEval -Stream $stream -Code "#0.wizard = 1; #0.programmer = 1;" -TriggerPrefix $evalTrigger | Out-Null
+
     Write-Host "Installing #0:do_command (skips if it already exists)..." -ForegroundColor Cyan
-    $r = Invoke-NativeEval -Stream $stream -Code @"
+    $r = Invoke-NativeEval -Stream $stream -TriggerPrefix $evalTrigger -Code @"
 try
   verb_info(#0, "do_command");
   notify(player, "MOODEV_DO_COMMAND_EXISTS_SKIPPED");
@@ -228,7 +338,12 @@ except (E_VERBNF)
 endtry
 "@
     if ($r -match 'MOODEV_DO_COMMAND_ADDED') { Write-Host "  added" -ForegroundColor Green }
-    elseif ($r -match 'MOODEV_DO_COMMAND_EXISTS_SKIPPED') { Write-Host "  already existed, left untouched" -ForegroundColor Yellow }
+    elseif ($r -match 'MOODEV_DO_COMMAND_EXISTS_SKIPPED') {
+        # Also the expected (and correct) outcome right after the single-expression
+        # fallback above installed do_command itself - this step just re-confirms it
+        # through the newly-switched-to shim, nothing left to do.
+        Write-Host "  already existed, left untouched" -ForegroundColor Yellow
+    }
     else { Write-Host "  unexpected response:`n$r" -ForegroundColor Red }
 
     $userConnectedCode = ConvertTo-MooCodeListLiteral -Lines @(
@@ -238,7 +353,7 @@ endtry
     Write-Host "Installing #0:user_connected (adds if missing; appends the moodev hook if the" -ForegroundColor Cyan
     Write-Host "verb already exists without it - e.g. a real ToastCore world's own MCP/confunc" -ForegroundColor Cyan
     Write-Host "logic - never overwrites; skips if the hook's already there)..." -ForegroundColor Cyan
-    $r = Invoke-NativeEval -Stream $stream -Code @"
+    $r = Invoke-NativeEval -Stream $stream -TriggerPrefix $evalTrigger -Code @"
 try
   existing = verb_code(#0, "user_connected", 0, 1);
   has_hook = 0;
@@ -270,7 +385,7 @@ endtry
         'return eval(@args);'
     )
     Write-Host "Installing #0:do_start_script (owned by the connecting player; skips if it already exists)..." -ForegroundColor Cyan
-    $r = Invoke-NativeEval -Stream $stream -Code @"
+    $r = Invoke-NativeEval -Stream $stream -TriggerPrefix $evalTrigger -Code @"
 try
   verb_info(#0, "do_start_script");
   notify(player, "MOODEV_DO_START_SCRIPT_EXISTS_SKIPPED");
@@ -288,7 +403,7 @@ endtry
     if ($LspBridgePort) {
         Write-Host "Checking if something's already listening on -LspBridgePort $LspBridgePort..." -ForegroundColor Cyan
         $checkCode = "found = 0; for l in (listeners()) if (l[`"port`"] == $LspBridgePort) found = l[`"object`"]; endif endfor notify(player, `"MOODEV_LSP_PORT_CHECK `" + toliteral(found));"
-        $r = Invoke-NativeEval -Stream $stream -Code $checkCode
+        $r = Invoke-NativeEval -Stream $stream -TriggerPrefix $evalTrigger -Code $checkCode
 
         if ($r -match 'MOODEV_LSP_PORT_CHECK (#-?\d+|0)') {
             $existing = $Matches[1]
@@ -313,7 +428,7 @@ endtry
                 'endif',
                 'return 0;'
             )
-            $r = Invoke-NativeEval -Stream $stream -Code @"
+            $r = Invoke-NativeEval -Stream $stream -TriggerPrefix $evalTrigger -Code @"
 svc = create(#-1);
 svc.wizard = 1;
 svc.programmer = 1;
