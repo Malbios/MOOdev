@@ -4,6 +4,7 @@ open Browser
 open Browser.Types
 open Fable.Core
 open Fable.Core.JsInterop
+open Language
 
 // Minimal binding for the Web Encoding API's TextDecoder - not covered by
 // Fable.Browser.Dom, and this is the only place we need it. `decode` is
@@ -57,6 +58,7 @@ let private settingsCloseBtn = document.getElementById ("settings-close")
 let private settingWordWrapEl = document.getElementById ("setting-wordwrap") :?> HTMLInputElement
 let private settingFontSizeEl = document.getElementById ("setting-fontsize") :?> HTMLInputElement
 let private settingMinimapEl = document.getElementById ("setting-minimap") :?> HTMLInputElement
+let private settingSugarModeEl = document.getElementById ("setting-sugar-mode") :?> HTMLInputElement
 let private settingForgetLoginBtn = document.getElementById ("setting-forget-login")
 let private settingForgetLoginStatusEl = document.getElementById ("setting-forget-login-status")
 let private settingMooHostEl = document.getElementById ("setting-moo-host") :?> HTMLInputElement
@@ -474,6 +476,19 @@ module private Settings =
     let setHideEmptyLeaves (enabled: bool) : unit =
         window.localStorage.setItem (hideEmptyLeavesKey, (if enabled then "on" else "off"))
 
+    let private sugarModeKey = "moodev-sugar-mode" // "on" | "off"
+
+    /// Default OFF - an experimental, editor-only dialect (no trailing
+    /// `;`, indentation implies the block closer) still being wired up
+    /// (Phase 2 of the feature; hover/go-to-def position mapping for a
+    /// sugar-displayed tab isn't generalized yet, see Phase 4). Read
+    /// directly (not cached), same reasoning as `hideEmptyLeavesEnabled` -
+    /// only checked at the moment a verb is fetched/saved, not a hot path.
+    let sugarModeEnabled () : bool = loadString sugarModeKey "off" = "on"
+
+    let setSugarMode (enabled: bool) : unit =
+        window.localStorage.setItem (sugarModeKey, (if enabled then "on" else "off"))
+
     let private colorRulesKey = "moodev-tree-color-rules"
 
     /// `int64` is a real JS `BigInt` under Fable - `JSON.stringify` throws on
@@ -542,6 +557,7 @@ module private Settings =
         settingFontSizeEl.value <- string fontSize
         settingMinimapEl.``checked`` <- minimap
         treeFilterHideEmptyLeavesEl.``checked`` <- hideEmptyLeavesEnabled ()
+        settingSugarModeEl.``checked`` <- sugarModeEnabled ()
 
         settingWordWrapEl.onchange <- fun _ -> applyAndSaveFromControls ()
         settingFontSizeEl.onchange <- fun _ -> applyAndSaveFromControls ()
@@ -550,6 +566,9 @@ module private Settings =
         // just Monaco (unlike the three above) - wired separately, later in
         // this file, once `renderTree` exists (this module is defined
         // before it).
+        // No redraw needed for sugar mode - it only affects verbs
+        // fetched/saved from this point on, not anything already open.
+        settingSugarModeEl.onchange <- fun _ -> setSugarMode settingSugarModeEl.``checked``
 
         settingForgetLoginBtn.onclick <-
             fun _ ->
@@ -884,6 +903,17 @@ let mutable private tabContent: Map<int64 * string, string> = Map.empty
 /// `getIndentDelta` callback.
 let mutable private tabIndentDeltas: Map<int64 * string, int[]> = Map.empty
 
+/// Each currently sugar-displayed tab's `Language.Sugar.LineMap` - present
+/// only when `Settings.sugarModeEnabled ()` was on and `Sugar.toSugar`
+/// succeeded for that verb at fetch time; absent otherwise (sugar mode off,
+/// or that verb's real text didn't convert cleanly, in which case it falls
+/// back to showing raw real text - see the `moodev-edit-content` handler).
+/// Not yet consumed anywhere (Phase 4 generalizes `LspClient`'s position
+/// mapping to use it) - captured now so hover/go-to-def/etc. can be gated
+/// off for a sugar-displayed tab in the meantime rather than silently
+/// pointing at the wrong line. Same lifecycle as `tabIndentDeltas`.
+let mutable private tabSugarMaps: Map<int64 * string, Sugar.LineMap> = Map.empty
+
 /// Leading whitespace character count of `line` - `0` for an empty line
 /// (matches `indentationRules`' own treatment: nothing to offset).
 let private leadingWhitespaceLength (line: string) : int =
@@ -1180,9 +1210,18 @@ treeNewObjectBtn.onclick <-
     fun _ -> sendAction [ "action" ==> "create-object"; "parentExpr" ==> "#-1" ]
 
 /// Turns the editor's current content into the line array `IdeActions.saveVerb`
-/// expects for its JSON `code` field.
-let private codeLines (source: string) : string[] =
-    source.Replace("\r\n", "\n").Split('\n')
+/// expects for its JSON `code` field - converting sugared text back to real
+/// MOOcode first when sugar mode is on (`Sugar.toReal`), since the MOO
+/// server, git-tracked exports, and every other tool must only ever see
+/// real MOOcode. `Error` (an orphan `elseif`/`else`/`except`/`finally` at a
+/// non-matching indentation - a structurally malformed sugar buffer) means
+/// the caller should show the message and send nothing, rather than
+/// sending corrupted MOOcode to the server - cheaper and faster than a
+/// round trip for something already known to be wrong client-side.
+let private codeLines (source: string) : Result<string[], string> =
+    let desugared = if Settings.sugarModeEnabled () then Sugar.toReal source |> Result.map (fun r -> r.Text) else Ok source
+
+    desugared |> Result.map (fun s -> s.Replace("\r\n", "\n").Split('\n'))
 
 /// Asks the server to load a verb - unconditionally, no "is this already
 /// open" check (that's `openOrSwitchToVerb`'s job). The `moodev-edit-content`
@@ -1287,11 +1326,14 @@ let private scheduleSyntaxCheck (target: int64 * string * string) : unit =
                 (fun () ->
                     syntaxCheckTimer <- None
 
-                    sendAction
-                        [ "action" ==> "check-verb-syntax"
-                          "obj" ==> int objRef
-                          "verb" ==> verbName
-                          "code" ==> codeLines code ])
+                    match codeLines code with
+                    | Ok lines ->
+                        sendAction
+                            [ "action" ==> "check-verb-syntax"
+                              "obj" ==> int objRef
+                              "verb" ==> verbName
+                              "code" ==> lines ]
+                    | Error msg -> editorDiagnosticsEl.textContent <- msg)
                 800
         )
 
@@ -1333,13 +1375,22 @@ let private saveIfDirtyAsync () : Async<bool> =
     | Some(objRef, verb, code) ->
         let key = (objRef, verb)
 
-        if not (Set.contains key saveInFlight) then
-            saveInFlight <- Set.add key saveInFlight
-            sendAction [ "action" ==> "save-verb"; "obj" ==> int objRef; "verb" ==> verb; "code" ==> codeLines code ]
+        match codeLines code with
+        | Error msg ->
+            // Structurally malformed sugar - nothing to send. `isDirty`
+            // stays `true` (matches this function's own "only
+            // `moodev-edit-result` clears it, on a confirmed `ok: 1`"
+            // contract) so the next blur retries once the user fixes it.
+            editorDiagnosticsEl.textContent <- msg
+            async { return false }
+        | Ok lines ->
+            if not (Set.contains key saveInFlight) then
+                saveInFlight <- Set.add key saveInFlight
+                sendAction [ "action" ==> "save-verb"; "obj" ==> int objRef; "verb" ==> verb; "code" ==> lines ]
 
-        Async.FromContinuations(fun (resolve, _, _) ->
-            let existing = pendingSaveResolvers |> Map.tryFind key |> Option.defaultValue []
-            pendingSaveResolvers <- Map.add key (resolve :: existing) pendingSaveResolvers)
+            Async.FromContinuations(fun (resolve, _, _) ->
+                let existing = pendingSaveResolvers |> Map.tryFind key |> Option.defaultValue []
+                pendingSaveResolvers <- Map.add key (resolve :: existing) pendingSaveResolvers)
 
 editor.onDidBlurEditorWidget (fun () -> saveIfDirtyAsync () |> Async.Ignore |> Async.StartImmediate) |> ignore
 
@@ -2351,6 +2402,7 @@ and private closeTabImmediate (objRef: int64, verbName: string) : unit =
     failedSaveTabs <- Set.remove key failedSaveTabs
     pendingSaveResolvers <- Map.remove key pendingSaveResolvers
     tabIndentDeltas <- Map.remove key tabIndentDeltas
+    tabSugarMaps <- Map.remove key tabSugarMaps
 
     if wasActive then
         // `switchToTab` below still sees `activeTab = VerbTab(objRef,
@@ -6055,7 +6107,35 @@ onWsMessage <-
 
             if header.StartsWith("moodev-edit-content") then
                 let content = String.concat "\n" lines
-                editor.setValue content
+                let tabKey = headerField "object: #" header, headerField "verb: " header
+
+                // Sugar mode (Phase 2 of the feature): the editor displays
+                // a sugared rendering of the real MOOcode `content` just
+                // fetched - `toReal` converts back on save (see
+                // `codeLines`'s call sites below). `Error` (a shape
+                // `toSugar`'s corpus tests haven't hit, or the round trip
+                // would be lossy for this specific verb) falls back to
+                // showing raw real text with a visible notice, never
+                // blocking editing - `tabSugarMaps` gets no entry for this
+                // tab either way, so hover/go-to-def degrade gracefully
+                // (Phase 4 gates on its absence) rather than pointing at
+                // the wrong line.
+                let displayContent, sugarUnavailable =
+                    match tabKey with
+                    | Some objNum, Some verb when Settings.sugarModeEnabled () ->
+                        match System.Int64.TryParse objNum with
+                        | true, objRef ->
+                            match Sugar.toSugar content with
+                            | Ok sugar ->
+                                tabSugarMaps <- Map.add (objRef, verb) sugar.Map tabSugarMaps
+                                sugar.Text, false
+                            | Error _ ->
+                                tabSugarMaps <- Map.remove (objRef, verb) tabSugarMaps
+                                content, true
+                        | false, _ -> content, false
+                    | _ -> content, false
+
+                editor.setValue displayContent
                 // `indentationRules` alone only governs newly-typed lines -
                 // it has no retroactive effect on content that arrives via
                 // `setValue`, which is how every verb loads. Most of the
@@ -6068,7 +6148,12 @@ onWsMessage <-
                 // reindented) content is a clean baseline, not something
                 // the user has edited yet, so undo that.
                 setDirty false
-                editorDiagnosticsEl.textContent <- ""
+
+                editorDiagnosticsEl.textContent <-
+                    if sugarUnavailable then
+                        "Sugared display unavailable for this verb (falling back to real MOOcode) - saving still works normally."
+                    else
+                        ""
                 // Monaco reuses one editor instance (and its one underlying
                 // model) across every verb tab - `setValue` just replaces
                 // that model's text, it never creates a new model per verb -
@@ -6077,16 +6162,22 @@ onWsMessage <-
                 // before.
                 Monaco.setErrorMarkers editor []
 
-                match headerField "object: #" header, headerField "verb: " header with
+                match tabKey with
                 | Some objNum, Some verb ->
                     match System.Int64.TryParse objNum with
                     | true, objRef ->
-                        tabContent <- Map.add (objRef, verb) content tabContent
-                        // `lines` is the raw, un-reindented text exactly as
-                        // the server sent it - compare it against the model
-                        // *after* the reindent above already ran, capturing
-                        // this fetch's raw-vs-displayed offset before
-                        // anything else touches the buffer.
+                        tabContent <- Map.add (objRef, verb) displayContent tabContent
+                        // `lines` is the raw, un-reindented real text
+                        // exactly as the server sent it, compared against
+                        // the model *after* the reindent above already ran.
+                        // With sugar mode on and any block structure in
+                        // this verb, the displayed line count no longer
+                        // matches `lines`' own count - `recordIndentDelta`
+                        // already treats a line-count mismatch as "no
+                        // adjustment" rather than computing garbage, so
+                        // this degrades safely on its own; Phase 4 replaces
+                        // this whole per-line-column scheme with one that
+                        // also remaps the line index via `tabSugarMaps`.
                         recordIndentDelta objRef verb (List.ofArray lines) (editor.getModel ())
                         // A fresh load is a clean baseline - any earlier
                         // failed/in-flight save for this tab no longer
@@ -6105,6 +6196,7 @@ onWsMessage <-
                                 openVerbTabs <- openVerbTabs |> List.mapi (fun i t -> if i = idx then (objRef, verb) else t)
                                 tabContent <- Map.remove oldPreview tabContent
                                 tabIndentDeltas <- Map.remove oldPreview tabIndentDeltas
+                                tabSugarMaps <- Map.remove oldPreview tabSugarMaps
                                 tabOrder <- tabOrder |> List.map (fun t -> if t = VerbTab oldPreview then VerbTab(objRef, verb) else t)
                             | None ->
                                 openVerbTabs <- openVerbTabs @ [ (objRef, verb) ]
@@ -6960,7 +7052,18 @@ Monaco.registerRenameAction editor (fun () -> runRenameSymbolFlow ())
 Monaco.registerShowHoverKeybinding editor
 
 Monaco.wireLsp
-    (fun () -> currentVerbDoc ())
+    // `None` for a sugar-displayed tab - interim gate until Phase 4
+    // generalizes `LspClient`'s position mapping to remap *lines*, not
+    // just columns (`tabIndentDeltas`' existing scheme). Every LSP feature
+    // (hover/definition/completion/signature-help/document-highlight/
+    // references) already treats "no current document" as "nothing to do"
+    // for the game tab/inspector tab, so this reuses that exact path
+    // rather than needing its own separate off-switch per feature - a
+    // silently wrong jump is worse than a temporarily missing one.
+    (fun () ->
+        match currentVerbDoc () with
+        | Some(o, v) when Map.containsKey (o, v) tabSugarMaps -> None
+        | other -> other)
     (fun objRef verbName line col ->
         if activeTab = VerbTab(objRef, verbName) then
             // Same document (e.g. a local variable's definition, which

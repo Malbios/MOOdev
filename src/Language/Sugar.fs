@@ -113,13 +113,12 @@ let private tokensByLine (tokens: Token[]) : Map<int, Token[]> =
 
 /// Real MOOcode (as `verb_code()` returns it) -> sugared display text.
 /// Drops a line whose only token is a closer keyword (checked by exact
-/// character span, not just "one token" - a trailing comment after the
-/// keyword, e.g. `endif /* done */`, is real content and must survive, so
-/// this only drops the line when nothing but whitespace remains once the
-/// keyword's own span is removed); strips a line's trailing semicolon token
-/// the same character-precise way (so a same-line trailing comment after
-/// the `;` survives too); everything else passes through completely
-/// unchanged.
+/// character span, not just "one token" - a trailing block comment right
+/// after the keyword is real content and must survive, so this only drops
+/// the line when nothing but whitespace remains once the keyword's own
+/// span is removed); strips a line's trailing semicolon token the same
+/// character-precise way (so a same-line trailing comment after the `;`
+/// survives too); everything else passes through completely unchanged.
 let toSugar (source: string) : Result<SugarResult, string> =
     match tokenize source with
     | { Error = Some e } -> Error(sprintf "Line %d: %s" e.Line e.Message)
