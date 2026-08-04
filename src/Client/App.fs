@@ -6507,6 +6507,26 @@ onWsMessage <-
 
                 mergeLiveRoots roots
                 renderTree ()
+            elif header.StartsWith("moodev-live-info-error") then
+                // Checked before the plain "moodev-live-info" prefix below,
+                // same "-error variant first" ordering this file's other
+                // "-result"/plain pairs already follow - otherwise the plain
+                // branch's own `StartsWith` would swallow this too and try
+                // (and fail) to JSON-parse the error text as a payload.
+                // `BridgeHandler.evalOnSession`'s own timeout firing - the
+                // underlying MOO task died mid-eval without ever responding
+                // (e.g. ran out of ticks on a richly-inherited real-world
+                // object) - surfaces here instead of leaving the inspector
+                // stuck on "Loading..." forever.
+                match headerField "object: #" header with
+                | Some objNum ->
+                    match System.Int64.TryParse objNum with
+                    | true, objRef when activeTab = InspectorTab objRef ->
+                        let message = lines |> Array.tryHead |> Option.defaultValue "Failed to load."
+                        inspectorContentEl.textContent <- sprintf "#%d - failed to load." objRef
+                        inspectorDiagnosticsEl.textContent <- message
+                    | _ -> ()
+                | None -> ()
             elif header.StartsWith("moodev-live-info") then
                 // Inspector fallback for an object the static graph never
                 // heard of (see `loadInspector`'s `None` arm) - same
