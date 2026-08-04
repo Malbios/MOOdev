@@ -1214,6 +1214,21 @@ html, body {
   color: #f77;
 }
 
+.inspector-collapse-btn {
+  background: none;
+  border: none;
+  color: #999;
+  cursor: pointer;
+  padding: 0 0.3em;
+  font-family: inherit;
+  font-size: 0.9em;
+  line-height: 1;
+}
+
+.inspector-collapse-btn:hover {
+  color: #ccc;
+}
+
 .inspector-inline-edit-group {
   display: inline-flex;
   align-items: center;

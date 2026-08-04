@@ -127,7 +127,6 @@ let private verbParentDiffPaneEl = document.getElementById ("verb-parent-diff-pa
 let private verbParentDiffHeaderEl = document.getElementById ("verb-parent-diff-header")
 let private verbParentDiffEditorEl = document.getElementById ("verb-parent-diff-editor")
 let private verbParentDiffCloseBtn = document.getElementById ("verb-parent-diff-close-btn")
-let private editorCallGraphEl = document.getElementById ("editor-call-graph")
 let private sidebarViewHistoryEl = document.getElementById ("sidebar-view-history")
 let private historySearchInputEl = document.getElementById ("history-search-input") :?> HTMLInputElement
 let private historySearchResultsEl = document.getElementById ("history-search-results")
@@ -179,6 +178,8 @@ let private viewInheritanceGraphBtn = document.getElementById ("view-inheritance
 let private sidebarViewInheritanceGraphEl = document.getElementById ("sidebar-view-inheritance-graph")
 let private viewVerbMetricsBtn = document.getElementById ("view-verb-metrics")
 let private sidebarViewVerbMetricsEl = document.getElementById ("sidebar-view-verb-metrics")
+let private viewCallGraphBtn = document.getElementById ("view-call-graph")
+let private sidebarViewCallGraphEl = document.getElementById ("sidebar-view-call-graph")
 let private viewEnvDoctorBtn = document.getElementById ("view-env-doctor")
 let private sidebarViewEnvDoctorEl = document.getElementById ("sidebar-view-env-doctor")
 let private envDoctorSummaryEl = document.getElementById ("env-doctor-summary")
@@ -641,6 +642,7 @@ type private SidebarView =
     | WatchView
     | InheritanceGraphView
     | VerbMetricsView
+    | CallGraphView
     | EnvDoctorView
     | WorldHealthView
 
@@ -2153,18 +2155,20 @@ let rec private switchToTab (tab: OpenTab) : unit =
             // is a tab switch, not a user edit.
             setDirty false
             updateCompareParentButton o v
-            updateCallGraph o v
 
         showPaneFor tab
         renderTabs ()
         renderTree ()
         persistTabs ()
 
-        // Keeps the standalone Inheritance graph view in sync with
-        // whichever inspector tab is now active, without requiring a
-        // manual re-click of that view's own activity-bar button.
+        // Keeps the standalone Inheritance graph / Call graph views in sync
+        // with whichever tab is now active, without requiring a manual
+        // re-click of that view's own activity-bar button.
         if activeSidebarView = InheritanceGraphView then
             renderInheritanceGraphView ()
+
+        if activeSidebarView = CallGraphView then
+            renderCallGraphView ()
 
 and private isTabStillOpen (tab: OpenTab) : bool =
     match tab with
@@ -2368,22 +2372,32 @@ and private renderCallGraph
         container.appendChild title |> ignore
         container.appendChild svg |> ignore
 
-/// Fetches and renders the call graph for whichever `VerbTab(objRef,
-/// verbName)` is now active - called once whenever the plain editor view
-/// for a verb tab is shown, same call sites as `updateCompareParentButton`.
-/// Clears immediately (synchronously) so switching tabs never briefly shows
-/// the previous verb's stale graph while the real answer is still in
-/// flight.
-and private updateCallGraph (objRef: int64) (verbName: string) : unit =
-    editorCallGraphEl.innerHTML <- ""
+/// Renders the standalone Call graph sidebar view (own activity-bar button,
+/// not an always-visible strip under the editor - see `renderCallGraph`'s
+/// own doc comment) for whichever `VerbTab` is the current `activeTab`, if
+/// any. Clears immediately (synchronously) so switching tabs never briefly
+/// shows the previous verb's stale graph while the real answer is still in
+/// flight. Re-run from `switchToTab` (below) whenever `activeTab` changes
+/// while this view is the active one, mirroring
+/// `renderInheritanceGraphView`'s own re-sync convention.
+and private renderCallGraphView () : unit =
+    sidebarViewCallGraphEl.innerHTML <- ""
 
-    async {
-        let! callees, callers = LspClient.getCallGraphAsync objRef verbName
+    match activeTab with
+    | VerbTab(objRef, verbName) ->
+        async {
+            let! callees, callers = LspClient.getCallGraphAsync objRef verbName
 
-        if activeTab = VerbTab(objRef, verbName) then
-            renderCallGraph editorCallGraphEl objRef verbName callees callers
-    }
-    |> Async.StartImmediate
+            if activeTab = VerbTab(objRef, verbName) then
+                renderCallGraph sidebarViewCallGraphEl objRef verbName callees callers
+        }
+        |> Async.StartImmediate
+    | GameTab
+    | InspectorTab _ ->
+        let placeholder = document.createElement ("div")
+        placeholder.classList.add "tree-color-rules-empty"
+        placeholder.textContent <- "Open a verb to see its call graph."
+        sidebarViewCallGraphEl.appendChild placeholder |> ignore
 
 /// Actually tears down an open verb tab - no save-state check at all. Only
 /// safe to call once it's already known there's nothing worth saving left
@@ -2745,6 +2759,34 @@ and private mkAddTrigger (label: string) (targets: HTMLElement list) : HTMLEleme
 
     triggerBtn
 
+/// A "▾"/"▸" toggle that shows/hides `contentEl` - a genuinely different
+/// concept from `mkAddTrigger` above (that one reveals an *add row*; this
+/// one collapses content that's already rendered). Persisted globally across
+/// every object's inspector, not per-object, via `storageKey` - same
+/// localStorage convention `Sidebar` (App.fs:308-323) already uses for the
+/// whole-sidebar collapse, just scoped to one inspector section instead of
+/// the whole pane.
+and private mkCollapseTrigger (storageKey: string) (contentEl: HTMLElement) : HTMLElement =
+    let triggerBtn = document.createElement ("button")
+    triggerBtn.classList.add "inspector-collapse-btn"
+
+    let mutable collapsed = window.localStorage.getItem storageKey = "1"
+
+    let apply () =
+        contentEl.setAttribute ("style", (if collapsed then "display:none" else ""))
+        triggerBtn.textContent <- (if collapsed then "▸" else "▾")
+        triggerBtn.title <- (if collapsed then "Expand" else "Collapse")
+
+    apply ()
+
+    triggerBtn.onclick <-
+        fun _ ->
+            collapsed <- not collapsed
+            window.localStorage.setItem (storageKey, (if collapsed then "1" else "0"))
+            apply ()
+
+    triggerBtn
+
 /// Renders a titled list of clickable object links into `container` - shared
 /// by the inspector pane's Parents/Children sections. Each entry opens that
 /// object's own inspector on click. `onAdd`, when `Some (singular label,
@@ -2754,12 +2796,16 @@ and private mkAddTrigger (label: string) (targets: HTMLElement list) : HTMLEleme
 /// control floating below it), matching "new line after the last existing
 /// item, or first if none" for the empty case too, since it's simply the
 /// last child of a container that otherwise only holds existing items.
+/// `collapseKey`, when `Some storageKey`, adds a `mkCollapseTrigger` for the
+/// list itself - `None` for Parents (only Children/Properties/Verbs are
+/// meant to be collapsible, not Parents).
 and private renderObjRefList
     (container: HTMLElement)
     (title: string)
     (refs: (int64 * string) list)
     (onRemove: (int64 -> unit) option)
     (onAdd: (string * (string -> unit)) option)
+    (collapseKey: string option)
     : unit =
     let titleRow = document.createElement ("div")
     titleRow.classList.add "inspector-section-title-row"
@@ -2774,6 +2820,10 @@ and private renderObjRefList
 
     let list = document.createElement ("div")
     list.classList.add "inspector-refs"
+
+    match collapseKey with
+    | Some key -> titleRow.appendChild (mkCollapseTrigger key list) |> ignore
+    | None -> ()
 
     for refObj, name in refs do
         let item = document.createElement ("span")
@@ -3415,6 +3465,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         (toRefList (unbox info?parents))
         (Some(fun parentRef -> sendAction [ "action" ==> "remove-parent"; "obj" ==> int objRef; "parent" ==> int parentRef ]))
         (Some("parent", fun expr -> sendAction [ "action" ==> "add-parent"; "obj" ==> int objRef; "parentExpr" ==> expr ]))
+        None
 
     // No per-item removal here - removing a child is already possible from
     // *that* child's own Parents section (removing this object from its
@@ -3425,11 +3476,23 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
         (toRefList (unbox info?children))
         None
         (Some("child", fun expr -> sendAction [ "action" ==> "add-child"; "obj" ==> int objRef; "childExpr" ==> expr ]))
+        (Some "moodev-inspector-children-collapsed")
 
     let propsSection = document.createElement ("div")
     let propsTitle = document.createElement ("div")
     propsTitle.classList.add "inspector-section-title"
-    let props: obj[] = unbox info?properties
+    // Own properties (`definerRef = objRef`) always sort last, unchanged
+    // from before this sort existed - `ancestorChainStatements` appends the
+    // object itself last to the ancestor chain (IdeActions.fs), so
+    // `getLiveInfo` already emits them last. Only the *inherited* portion
+    // was in non-numeric BFS discovery order; `Array.sortBy` is stable, so
+    // this preserves each definer's own declaration order as the tiebreak.
+    let props: obj[] =
+        (unbox info?properties: obj[])
+        |> Array.sortBy (fun p ->
+            let d = int64 (p?definerRef: float)
+            if d = objRef then System.Int64.MaxValue else d)
+
     propsTitle.textContent <- sprintf "Properties (%d)" props.Length
 
     let propsTable = document.createElement ("table")
@@ -3822,6 +3885,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let propsTitleRow = document.createElement ("div")
     propsTitleRow.classList.add "inspector-section-title-row"
     propsTitleRow.appendChild propsTitle |> ignore
+    propsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-props-collapsed" propsTable) |> ignore
     propsTitleRow.appendChild (mkAddTrigger "Add property" propsAddTargets) |> ignore
 
     propsSection.appendChild propsTitleRow |> ignore
@@ -3832,7 +3896,14 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let verbsSection = document.createElement ("div")
     let verbsTitle = document.createElement ("div")
     verbsTitle.classList.add "inspector-section-title"
-    let verbs: obj[] = unbox info?verbs
+    // Same "own last, inherited sorted by ascending definer id" rule as
+    // `props` above.
+    let verbs: obj[] =
+        (unbox info?verbs: obj[])
+        |> Array.sortBy (fun v ->
+            let d = int64 (v?definerRef: float)
+            if d = objRef then System.Int64.MaxValue else d)
+
     verbsTitle.textContent <- sprintf "Verbs (%d)" verbs.Length
 
     let verbsTable = document.createElement ("table")
@@ -4162,6 +4233,7 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let verbsTitleRow = document.createElement ("div")
     verbsTitleRow.classList.add "inspector-section-title-row"
     verbsTitleRow.appendChild verbsTitle |> ignore
+    verbsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-verbs-collapsed" verbsTable) |> ignore
     verbsTitleRow.appendChild (mkAddTrigger "Add verb" verbsAddTargets) |> ignore
 
     verbsSection.appendChild verbsTitleRow |> ignore
@@ -4306,6 +4378,9 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderVerbMetricsTable ()
         }
         |> Async.StartImmediate
+    | CallGraphView ->
+        activateOnlySidebarView sidebarViewCallGraphEl
+        renderCallGraphView ()
     | EnvDoctorView ->
         activateOnlySidebarView sidebarViewEnvDoctorEl
         if isLoggedIn then loadEnvDoctor () else (envDoctorListEl.innerHTML <- ""; envDoctorSummaryEl.textContent <- "")
@@ -4349,6 +4424,7 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewWatchBtn, WatchView
           viewInheritanceGraphBtn, InheritanceGraphView
           viewVerbMetricsBtn, VerbMetricsView
+          viewCallGraphBtn, CallGraphView
           viewEnvDoctorBtn, EnvDoctorView
           viewWorldHealthBtn, WorldHealthView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
@@ -5774,6 +5850,7 @@ viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
 viewWatchBtn.onclick <- fun _ -> onActivityBtnClick WatchView
 viewInheritanceGraphBtn.onclick <- fun _ -> onActivityBtnClick InheritanceGraphView
 viewVerbMetricsBtn.onclick <- fun _ -> onActivityBtnClick VerbMetricsView
+viewCallGraphBtn.onclick <- fun _ -> onActivityBtnClick CallGraphView
 viewEnvDoctorBtn.onclick <- fun _ -> onActivityBtnClick EnvDoctorView
 viewWorldHealthBtn.onclick <- fun _ -> onActivityBtnClick WorldHealthView
 
@@ -6216,7 +6293,10 @@ onWsMessage <-
                         showingVerbHistory <- false
                         showingParentDiff <- false
                         updateCompareParentButton objRef verb
-                        updateCallGraph objRef verb
+
+                        if activeSidebarView = CallGraphView then
+                            renderCallGraphView ()
+
                         showPaneFor activeTab
                         renderTabs ()
                         // Refresh the tree's highlight to follow whatever
