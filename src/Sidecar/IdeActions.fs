@@ -2380,6 +2380,58 @@ endtry"""
                 ct
     }
 
+/// Builds `runTestVerb`'s eval statements - split out from the function
+/// itself purely so a unit test can assert the computed-dispatch call is
+/// correctly formed, same reasoning `buildCheckVerbSyntaxStatements` above
+/// gives for its own split (that one broke once from an un-tested string-
+/// concatenation mistake that only surfaced as an indefinite hang, not a
+/// visible error - worth guarding structurally here too rather than
+/// trusting the interpolation by eye).
+let buildRunTestVerbStatements (objRef: int64) (verbName: string) : string =
+    let verbLit = "\"" + verbName.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""
+    $"""ok = 0; errtext = ""; try #{objRef}:({verbLit})(); ok = 1; except err (ANY) errtext = tostr(err[2]); endtry"""
+
+/// `run-test-verb {obj, verb}` - the in-IDE test runner's execution step
+/// (discovery is a separate static scan, `Handlers.findTestVerbs` on the
+/// LanguageServer side - this is the live half). Calls the verb for real
+/// over this session's own connection via MOO's computed-dispatch syntax
+/// (`obj:(nameExpr)(...)`, same form this project's own MCP negotiation
+/// already relies on - `#0:user_connected`'s `$mcp:(verb)(@args)`), wrapped
+/// in the exact same `ok`/`errtext` try/except idiom `killTask`/
+/// `evalScratchpad` already use above: passing is returning normally,
+/// failing is any raised MOO error - a test signals failure by calling
+/// `raise()` (or letting a genuine runtime error propagate), not through a
+/// shared `$assert` library object, matching this project's "no MOO-side
+/// machinery beyond the `#0` bootstrap verbs" philosophy. Deliberately not
+/// capturing/asserting on `notify()` output - no existing precedent solves
+/// that here (`evalScratchpad`'s own doc comment above notes the same gap),
+/// and the MOO-Test project this feature was modeled on sidesteps it the
+/// same way. A hung test (infinite loop, tick exhaustion) surfaces as
+/// `evalOnSession`'s own existing 30s timeout rather than a new timeout of
+/// its own.
+let runTestVerb
+    (webSocket: WebSocket)
+    (session: Session)
+    (objRef: int64)
+    (verbName: string)
+    (ct: CancellationToken)
+    : Task<unit> =
+    task {
+        let statements = buildRunTestVerbStatements objRef verbName
+
+        let resultHeader (ok: bool) =
+            sprintf "moodev-test-run-result object: #%d verb: %s ok: %d" objRef verbName (if ok then 1 else 0)
+
+        try
+            let! json = evalOnSession session statements """["ok" -> ok, "errtext" -> errtext]""" ct
+            let root = json.RootElement
+            let ok = root.GetProperty("ok").GetInt32() = 1
+            let errtext = root.GetProperty("errtext").GetString()
+            do! sendWire webSocket (resultHeader ok) (if ok then [] else [ errtext ]) ct
+        with :? TimeoutException as ex ->
+            do! sendWire webSocket (resultHeader false) [ ex.Message ] ct
+    }
+
 /// The "Live watch dashboard" panel's one action: evaluates every watched
 /// expression in `exprs`, in order, in a single round trip - not
 /// `exprs.Length` separate `evalScratchpad`-style calls, since this fires on
