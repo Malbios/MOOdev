@@ -265,6 +265,17 @@ type IStandaloneCodeEditor =
     /// technically-moved off-screen.
     abstract revealPositionInCenter: position: obj -> unit
     abstract getModel: unit -> ITextModel
+    /// Captures scroll position, cursor/selection, and folded regions as one
+    /// opaque snapshot - meaningless outside a `restoreViewState` call on
+    /// this same editor. Since this app reuses one editor instance (and
+    /// model) across every verb tab via `setValue` rather than a model per
+    /// tab, a caller must save/restore per tab itself (keyed by which tab
+    /// the state came from) - Monaco has no notion of "tab" to do that for.
+    abstract saveViewState: unit -> obj
+    /// Reapplies a snapshot from `saveViewState` - only ever called with a
+    /// state actually produced for *this* tab (see `tabViewStates`'s own
+    /// comment), never with a `None`/missing lookup passed through.
+    abstract restoreViewState: state: obj -> unit
 
 /// Creates a standalone editor in the given DOM element, defaulting to the
 /// "moocode" language and a dark theme matching the terminal's own styling.

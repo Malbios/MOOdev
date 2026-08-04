@@ -921,6 +921,18 @@ let mutable private tabIndentDeltas: Map<int64 * string, int[]> = Map.empty
 /// `tabIndentDeltas`.
 let mutable private tabSugarMaps: Map<int64 * string, Sugar.LineMap> = Map.empty
 
+/// Each verb tab's own scroll/cursor snapshot (`Monaco.saveViewState`),
+/// captured right before switching away from it - since this app reuses one
+/// editor instance/model across every tab via `setValue` rather than a model
+/// per tab, Monaco itself has no memory of "where was I scrolled to in tab
+/// X" once `setValue` swaps in tab Y's content; this map is that memory.
+/// Reapplied in `switchToTab` when switching back into a tab that has an
+/// entry, right after the fresh content is loaded - a state saved against
+/// one tab's own (generally different-length) content is only ever restored
+/// against that same tab's content, never a different one's. Cleared on tab
+/// close, same lifecycle as `tabContent` above.
+let mutable private tabViewStates: Map<int64 * string, obj> = Map.empty
+
 /// Leading whitespace character count of `line` - `0` for an empty line
 /// (matches `indentationRules`' own treatment: nothing to offset).
 let private leadingWhitespaceLength (line: string) : int =
@@ -2189,6 +2201,15 @@ let private renderWaifEditor
 let rec private switchToTab (tab: OpenTab) : unit =
     if tab <> activeTab then
         cacheCurrentEditorContent ()
+
+        // Capture the tab being left's own scroll/cursor position before its
+        // content is swapped out from under it - see `tabViewStates`'s own
+        // comment for why this can't just be Monaco's problem to solve.
+        (match activeTab with
+         | VerbTab(o, v) -> tabViewStates <- Map.add (o, v) (editor.saveViewState ()) tabViewStates
+         | GameTab
+         | InspectorTab _ -> ())
+
         tabHistory <- activeTab :: (tabHistory |> List.filter (fun t -> t <> activeTab))
         activeTab <- tab
         showingVerbHistory <- false
@@ -2203,6 +2224,10 @@ let rec private switchToTab (tab: OpenTab) : unit =
             // is a tab switch, not a user edit.
             setDirty false
             updateCompareParentButton o v
+
+            match Map.tryFind (o, v) tabViewStates with
+            | Some state -> editor.restoreViewState state
+            | None -> ()
 
         showPaneFor tab
         renderTabs ()
@@ -2465,6 +2490,7 @@ and private closeTabImmediate (objRef: int64, verbName: string) : unit =
     pendingSaveResolvers <- Map.remove key pendingSaveResolvers
     tabIndentDeltas <- Map.remove key tabIndentDeltas
     tabSugarMaps <- Map.remove key tabSugarMaps
+    tabViewStates <- Map.remove key tabViewStates
 
     if wasActive then
         // `switchToTab` below still sees `activeTab = VerbTab(objRef,
@@ -2814,11 +2840,22 @@ and private mkAddTrigger (label: string) (targets: HTMLElement list) : HTMLEleme
 /// localStorage convention `Sidebar` (App.fs:308-323) already uses for the
 /// whole-sidebar collapse, just scoped to one inspector section instead of
 /// the whole pane.
-and private mkCollapseTrigger (storageKey: string) (contentEl: HTMLElement) : HTMLElement =
+and private mkCollapseTrigger (storageKey: string) (contentEl: HTMLElement) (isEmpty: bool) : HTMLElement =
     let triggerBtn = document.createElement ("button")
     triggerBtn.classList.add "inspector-collapse-btn"
 
-    let mutable collapsed = window.localStorage.getItem storageKey = "1"
+    // No stored preference yet (first time this section is ever seen)
+    // defaults to collapsed when there's existing content to hide, but
+    // stays expanded when the section is empty - an empty Properties/Verbs/
+    // Children list has nothing to hide, and collapsing it would only bury
+    // the always-visible add row behind an extra click right when it's
+    // most wanted (creating the first one). An explicit stored "0"/"1"
+    // (the user's own past toggle) always wins over this default.
+    let mutable collapsed =
+        match window.localStorage.getItem storageKey with
+        | "1" -> true
+        | "0" -> false
+        | _ -> not isEmpty
 
     let apply () =
         contentEl.setAttribute ("style", (if collapsed then "display:none" else ""))
@@ -2870,7 +2907,7 @@ and private renderObjRefList
     list.classList.add "inspector-refs"
 
     match collapseKey with
-    | Some key -> titleRow.appendChild (mkCollapseTrigger key list) |> ignore
+    | Some key -> titleRow.appendChild (mkCollapseTrigger key list (refs.Length = 0)) |> ignore
     | None -> ()
 
     for refObj, name in refs do
@@ -3940,6 +3977,11 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     addBtn.textContent <- "+"
     addBtn.title <- "Add property"
 
+    // Enter in the value field - the last field you'd naturally fill in -
+    // submits the row the same way clicking "+" does, instead of requiring
+    // a mouse trip to the button after typing everything.
+    addValueInput.onkeydown <- fun ev -> if ev.key = "Enter" then addBtn.click ()
+
     addBtn.onclick <-
         fun _ ->
             let name = addNameInput.value.Trim()
@@ -3974,7 +4016,12 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let propsTitleRow = document.createElement ("div")
     propsTitleRow.classList.add "inspector-section-title-row"
     propsTitleRow.appendChild propsTitle |> ignore
-    propsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-props-collapsed" propsTable) |> ignore
+    // "Empty" for the default-collapse decision means no *own* property -
+    // an object that only inherits from a parent still has nothing of its
+    // own to look at, and collapsing would only bury the add row right when
+    // it's most wanted (creating the object's first own property).
+    let propsHasOwn = props |> Array.exists (fun p -> int64 (p?definerRef: float) = objRef)
+    propsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-props-collapsed" propsTable (not propsHasOwn)) |> ignore
 
     propsSection.appendChild propsTitleRow |> ignore
     propsSection.appendChild propsTable |> ignore
@@ -4315,7 +4362,9 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
     let verbsTitleRow = document.createElement ("div")
     verbsTitleRow.classList.add "inspector-section-title-row"
     verbsTitleRow.appendChild verbsTitle |> ignore
-    verbsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-verbs-collapsed" verbsTable) |> ignore
+    // Same own-vs-inherited reasoning as `propsHasOwn` above.
+    let verbsHasOwn = verbs |> Array.exists (fun v -> int64 (v?definerRef: float) = objRef)
+    verbsTitleRow.appendChild (mkCollapseTrigger "moodev-inspector-verbs-collapsed" verbsTable (not verbsHasOwn)) |> ignore
 
     verbsSection.appendChild verbsTitleRow |> ignore
     verbsSection.appendChild verbsTable |> ignore
@@ -6371,6 +6420,7 @@ onWsMessage <-
                                 tabContent <- Map.remove oldPreview tabContent
                                 tabIndentDeltas <- Map.remove oldPreview tabIndentDeltas
                                 tabSugarMaps <- Map.remove oldPreview tabSugarMaps
+                                tabViewStates <- Map.remove oldPreview tabViewStates
                                 tabOrder <- tabOrder |> List.map (fun t -> if t = VerbTab oldPreview then VerbTab(objRef, verb) else t)
                             | None ->
                                 openVerbTabs <- openVerbTabs @ [ (objRef, verb) ]
@@ -7156,12 +7206,27 @@ onWsMessage <-
                     // A rename's blast radius isn't limited to whichever verb
                     // was open when F2 was pressed - refresh every currently
                     // open verb tab rather than trying to track exactly which
-                    // ones the server touched. Inspector tabs don't need this
-                    // (`loadInspector`'s "always fresh" rule already re-fetches
-                    // on every activation, so a stale one self-corrects the
-                    // next time it's clicked).
+                    // ones the server touched.
                     for renameObjRef, renameVerbName in openVerbTabs do
                         fetchVerb renameObjRef renameVerbName
+
+                    // The renamed object's own inspector tab (if open) needs
+                    // an explicit refresh too, same as every other mutating
+                    // inspector action (`moodev-prop-add-result` etc.) - the
+                    // common case is renaming an object while its own
+                    // inspector is the *already-active* tab, so there's no
+                    // later "switch into this tab" event left to trigger a
+                    // self-correcting reload from. Without this, the tree
+                    // view (kept in sync via `syncTreeNodeFromLiveInfo`,
+                    // itself only ever triggered by a `loadInspector` fetch)
+                    // never learns about the new name until something else
+                    // happens to reactivate that tab.
+                    match headerField "object: #" header with
+                    | Some objNum ->
+                        match System.Int64.TryParse objNum with
+                        | true, renamedObjRef when activeTab = InspectorTab renamedObjRef -> loadInspector renamedObjRef None
+                        | _ -> ()
+                    | None -> ()
                 else
                     window.alert ("Rename failed:\n" + String.concat "\n" lines)
             elif header.StartsWith("moodev-bulk-replace-result") then
