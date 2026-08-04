@@ -1126,6 +1126,18 @@ let private currentVerbDoc () : (int64 * string) option =
 let private sendAction (fields: (string * obj) list) : unit =
     ws.send (JS.JSON.stringify (createObj fields))
 
+/// The generic `moodev-prop-add-result` refresh below only fires when the
+/// mutated object matches the *currently open* inspector tab - true for the
+/// ordinary add-property row (you add to the object you're viewing), but
+/// never true for the "corify" action, which always targets `#0` while some
+/// other object's inspector is open. Without this, a corify's success or
+/// failure was entirely invisible: the input just sat there open forever,
+/// whether it worked or not. Correlated as a plain FIFO queue rather than by
+/// name, since the wire response (`object: #0 ok: %d`, see `IdeActions.fs`)
+/// carries no property name to match against - safe because a single
+/// websocket connection's responses arrive in request order.
+let mutable private pendingCorifyConfirms : (HTMLElement * HTMLInputElement) list = []
+
 /// The "Live watch dashboard" panel's own persisted state - a plain list of
 /// user-typed MOO expressions (`moodev-watch-expressions` in localStorage,
 /// same JSON-array-of-strings convention `Settings.loadColorRules`/
@@ -3432,6 +3444,8 @@ and private renderInspectorStructure (objRef: int64) (info: obj) (highlightProp:
             let name = corifyInput.value.Trim()
 
             if name <> "" then
+                pendingCorifyConfirms <- pendingCorifyConfirms @ [ (corifyGroup, corifyInput) ]
+
                 sendAction
                     [ "action" ==> "add-property"
                       "obj" ==> 0
@@ -6674,6 +6688,22 @@ onWsMessage <-
                 // row now exists) rather than just clearing diagnostics -
                 // `loadInspector`'s own "always fresh" round-trip already
                 // covers that, same as every other inspector action.
+                //
+                // A corify confirm is also an `add-property` on `#0`, always
+                // targeted from some *other* object's open inspector - see
+                // `pendingCorifyConfirms`'s own comment for why that needs
+                // separate, tab-independent handling here.
+                (match headerField "object: #" header, pendingCorifyConfirms with
+                 | Some "0", (corifyGroup, corifyInput) :: rest ->
+                     pendingCorifyConfirms <- rest
+
+                     if headerField "ok: " header = Some "1" then
+                         corifyGroup.setAttribute ("style", "display:none")
+                         corifyInput.value <- ""
+                     else
+                         inspectorDiagnosticsEl.textContent <- String.concat "\n" lines
+                 | _ -> ())
+
                 match headerField "object: #" header with
                 | Some objNum ->
                     match System.Int64.TryParse objNum with
