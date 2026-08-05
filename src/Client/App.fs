@@ -79,7 +79,6 @@ let private viewErrorsBtn = document.getElementById ("view-errors")
 let private viewDeadCodeBtn = document.getElementById ("view-dead-code")
 let private viewGotchasBtn = document.getElementById ("view-gotchas")
 let private viewTodosBtn = document.getElementById ("view-todos")
-let private viewTestsBtn = document.getElementById ("view-tests")
 let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
@@ -150,10 +149,6 @@ let private treeGotchasListEl = document.getElementById ("tree-gotchas-list")
 let private sidebarViewTodosEl = document.getElementById ("sidebar-view-todos")
 let private treeTodosSummaryEl = document.getElementById ("tree-todos-summary")
 let private treeTodosListEl = document.getElementById ("tree-todos-list")
-let private sidebarViewTestsEl = document.getElementById ("sidebar-view-tests")
-let private treeTestsSummaryEl = document.getElementById ("tree-tests-summary")
-let private treeTestsListEl = document.getElementById ("tree-tests-list")
-let private testsRunAllBtn = document.getElementById ("tests-run-all-btn")
 let private sidebarViewBulkReplaceEl = document.getElementById ("sidebar-view-bulk-replace")
 let private bulkReplaceSearchInputEl = document.getElementById ("bulk-replace-search-input") :?> HTMLInputElement
 let private bulkReplaceReplaceInputEl = document.getElementById ("bulk-replace-replace-input") :?> HTMLInputElement
@@ -641,7 +636,6 @@ type private SidebarView =
     | DeadCodeView
     | GotchasView
     | TodosView
-    | TestsView
     | BulkReplaceView
     | PermissionRisksView
     | DocsView
@@ -1318,23 +1312,6 @@ let mutable private saveInFlight: Set<int64 * string> = Set.empty
 /// resolved back when the user blurred away from it.
 let mutable private failedSaveTabs: Set<int64 * string> = Set.empty
 
-/// Continuations waiting to learn a specific in-flight test run's outcome
-/// (`ok`, `errtext`) - same "map of waiters keyed by (objRef, verbName)"
-/// shape `pendingSaveResolvers` below uses for saves. A list per key isn't
-/// needed here the way it is for saves (nothing else re-triggers the same
-/// test run while one's in flight), but kept as a list anyway for the exact
-/// same shape/removal code as `pendingSaveResolvers` - one fewer thing to
-/// get subtly wrong copying it.
-let mutable private pendingTestRunResolvers: Map<int64 * string, (bool * string -> unit) list> = Map.empty
-
-/// Every row `renderTestsResults` currently has on screen, in display
-/// order - what `testsRunAllBtn`'s click handler iterates sequentially
-/// (each test shares the one live eval connection every other Sidecar
-/// action already does, so running them in parallel would have overlapping
-/// `evalOnSession` calls stomp on each other - sequential also keeps
-/// results appearing in a stable, readable order).
-let mutable private currentTestRows: (int64 * string * Browser.Types.HTMLButtonElement * HTMLElement) list = []
-
 /// Continuations waiting to learn a specific in-flight save's outcome -
 /// resolved and cleared by the `moodev-edit-result` handler once that tab's
 /// response arrives. A list, not a single slot, since more than one caller
@@ -1471,19 +1448,6 @@ let private saveIfDirtyAsync () : Async<bool> =
                 let existing = pendingSaveResolvers |> Map.tryFind key |> Option.defaultValue []
                 pendingSaveResolvers <- Map.add key (resolve :: existing) pendingSaveResolvers)
 
-/// Sends `run-test-verb` and awaits its own `moodev-test-run-result` -
-/// same `Async.FromContinuations` + pending-resolvers-map shape as
-/// `saveIfDirtyAsync` above, so "Run all" (which needs to await each test
-/// in turn, not fire all of them at once down the one shared eval
-/// connection) can just `let!` this in a loop.
-let private runTestVerbAsync (objRef: int64) (verbName: string) : Async<bool * string> =
-    sendAction [ "action" ==> "run-test-verb"; "obj" ==> int objRef; "verb" ==> verbName ]
-
-    Async.FromContinuations(fun (resolve, _, _) ->
-        let key = (objRef, verbName)
-        let existing = pendingTestRunResolvers |> Map.tryFind key |> Option.defaultValue []
-        pendingTestRunResolvers <- Map.add key (resolve :: existing) pendingTestRunResolvers)
-
 editor.onDidBlurEditorWidget (fun () -> saveIfDirtyAsync () |> Async.Ignore |> Async.StartImmediate) |> ignore
 
 // Keeps the status bar's cursor-position readout live.
@@ -1539,7 +1503,6 @@ let private allSidebarViews =
       sidebarViewDeadCodeEl
       sidebarViewGotchasEl
       sidebarViewTodosEl
-      sidebarViewTestsEl
       sidebarViewBulkReplaceEl
       sidebarViewPermissionRisksEl
       sidebarViewDocsEl
@@ -4504,16 +4467,6 @@ and private switchToSidebarView (view: SidebarView) : unit =
             renderTodosResults results
         }
         |> Async.StartImmediate
-    | TestsView ->
-        activateOnlySidebarView sidebarViewTestsEl
-        treeTestsSummaryEl.textContent <- "Scanning..."
-        treeTestsListEl.innerHTML <- ""
-
-        async {
-            let! results = LspClient.findTestVerbsAsync ()
-            renderTestsResults results
-        }
-        |> Async.StartImmediate
     | BulkReplaceView ->
         // No auto-search on switch, unlike every other scan view here -
         // there's no default query to run one against.
@@ -4607,7 +4560,6 @@ and private switchToSidebarView (view: SidebarView) : unit =
           viewDeadCodeBtn, DeadCodeView
           viewGotchasBtn, GotchasView
           viewTodosBtn, TodosView
-          viewTestsBtn, TestsView
           viewBulkReplaceBtn, BulkReplaceView
           viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
@@ -5101,77 +5053,6 @@ and private renderGotchasResults (results: (int64 * string * string)[]) : unit =
             li.textContent <- sprintf "#%d:%s - %s" objRef verbName (gotchaKindLabel kind)
 
         treeGotchasListEl.appendChild li |> ignore
-
-/// Runs one discovered test verb and updates that row's own status/Run
-/// button in place - shared by each row's individual "Run" click and by
-/// "Run all" (`testsRunAllBtn.onclick` below), so both go through the exact
-/// same update logic instead of two copies drifting apart.
-and private runOneTestRow
-    (objRef: int64)
-    (verbName: string)
-    (runBtn: Browser.Types.HTMLButtonElement)
-    (statusEl: HTMLElement)
-    : Async<unit> =
-    async {
-        runBtn.disabled <- true
-        statusEl.textContent <- "Running..."
-        statusEl.title <- ""
-        statusEl.classList.remove "test-pass"
-        statusEl.classList.remove "test-fail"
-
-        let! ok, errtext = runTestVerbAsync objRef verbName
-
-        runBtn.disabled <- false
-        statusEl.textContent <- if ok then "PASS" else "FAIL"
-        statusEl.title <- if ok then "" else errtext
-        statusEl.classList.add (if ok then "test-pass" else "test-fail")
-    }
-
-/// Renders `moodev/findTestVerbs`' results into the Test runner sidebar
-/// view - same clickable-label + trailing action button shape
-/// `renderPermissionRisksResults` uses for its own "Fix" button, with a
-/// status indicator (not-yet-run/running/pass/fail) alongside "Run" rather
-/// than the row disappearing on success (a test is meant to be re-run, not
-/// resolved-and-removed like a permission-risk fix).
-and private renderTestsResults (results: (int64 * string)[]) : unit =
-    treeTestsSummaryEl.textContent <-
-        if results.Length = 0 then
-            "No test verbs found (name/alias starting with \"test_\")."
-        else
-            sprintf "%d test(s) found." results.Length
-
-    treeTestsListEl.innerHTML <- ""
-    currentTestRows <- []
-
-    for objRef, verbName in results do
-        let li = document.createElement ("li")
-        li.classList.add "picker-item"
-        li.classList.add "inspector-link"
-
-        let label = document.createElement ("span")
-        label.classList.add "inspector-link"
-        label.textContent <- sprintf "#%d:%s" objRef verbName
-        label.onclick <- fun _ -> openOrSwitchToVerb objRef verbName
-
-        let statusEl = document.createElement ("span")
-        statusEl.classList.add "test-status"
-
-        let runBtn = document.createElement ("button") :?> Browser.Types.HTMLButtonElement
-        runBtn.classList.add "picker-fix-btn"
-        runBtn.textContent <- "Run"
-        runBtn.title <- "Run this test"
-
-        runBtn.onclick <-
-            fun ev ->
-                ev.stopPropagation () |> ignore
-                runOneTestRow objRef verbName runBtn statusEl |> Async.StartImmediate
-
-        li.appendChild label |> ignore
-        li.appendChild statusEl |> ignore
-        li.appendChild runBtn |> ignore
-        treeTestsListEl.appendChild li |> ignore
-
-        currentTestRows <- currentTestRows @ [ (objRef, verbName, runBtn, statusEl) ]
 
 /// Renders `moodev/findTodos`' results into the TODO/FIXME sidebar view -
 /// same flat-list shape as `renderGotchasResults`, one entry per hit,
@@ -6105,15 +5986,6 @@ viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
 viewDeadCodeBtn.onclick <- fun _ -> onActivityBtnClick DeadCodeView
 viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
 viewTodosBtn.onclick <- fun _ -> onActivityBtnClick TodosView
-viewTestsBtn.onclick <- fun _ -> onActivityBtnClick TestsView
-
-testsRunAllBtn.onclick <-
-    fun _ ->
-        async {
-            for objRef, verbName, runBtn, statusEl in currentTestRows do
-                do! runOneTestRow objRef verbName runBtn statusEl
-        }
-        |> Async.StartImmediate
 viewBulkReplaceBtn.onclick <- fun _ -> onActivityBtnClick BulkReplaceView
 viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
@@ -7288,30 +7160,6 @@ onWsMessage <-
                     if activeSidebarView = TasksView then loadTasks ()
                 elif not (Array.isEmpty lines) then
                     window.alert (String.concat "\n" lines)
-            elif header.StartsWith("moodev-test-run-result") then
-                // Resolves `runOneTestRow`'s own `runTestVerbAsync` await
-                // regardless of which sidebar view is currently active -
-                // unlike every "only refresh if this tab/view is active"
-                // handler elsewhere, this one always has a real, still-live
-                // DOM element (the row's own status span/Run button,
-                // captured directly in the pending resolver's closure) to
-                // update, no re-render needed.
-                match headerField "object: #" header, headerField "verb: " header with
-                | Some objNum, Some verb ->
-                    match System.Int64.TryParse objNum with
-                    | true, objRef ->
-                        let key = (objRef, verb)
-                        let ok = headerField "ok: " header = Some "1"
-                        let errtext = if ok then "" else String.concat "\n" lines
-
-                        match pendingTestRunResolvers |> Map.tryFind key with
-                        | Some resolvers ->
-                            pendingTestRunResolvers <- Map.remove key pendingTestRunResolvers
-                            for resolve in resolvers do
-                                resolve (ok, errtext)
-                        | None -> ()
-                    | _ -> ()
-                | _ -> ()
             elif header.StartsWith("moodev-permission-risk-fix-result") then
                 // Re-scanning on success (rather than surgically removing
                 // just the fixed row) keeps this in sync with whatever else

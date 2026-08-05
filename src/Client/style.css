@@ -994,21 +994,6 @@ html, body {
   cursor: default;
 }
 
-.test-status {
-  font-size: 0.85em;
-  flex-shrink: 0;
-  color: #999;
-}
-
-.test-status.test-pass {
-  color: #6c6;
-}
-
-.test-status.test-fail {
-  color: #e66;
-  cursor: help;
-}
-
 .inspector-flags {
   display: flex;
   flex-wrap: wrap;

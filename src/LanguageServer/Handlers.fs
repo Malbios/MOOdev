@@ -579,31 +579,6 @@ let findTodos (graph: Graph) : TodoEntry[] =
             | _ -> []))
     |> Array.ofSeq
 
-/// One discovered test verb - `VerbName` is whichever alias actually
-/// matched the naming convention (not necessarily the primary/first name),
-/// since that's the name a caller would use to invoke it.
-type TestVerbEntry = { ObjRef: ObjRef; VerbName: string }
-
-/// Corpus-wide test-verb scanner for the in-IDE test runner: any verb with
-/// a `test_`-prefixed name/alias, snake_case matching this project's own
-/// verb-naming convention elsewhere (`do_command`, `handle_verb_programmed`).
-/// Deliberately just a naming convention, not a dedicated parent/class -
-/// no new baked-in MOO object needed (see `moo-vcs-plan.md`'s "no MOO-side
-/// machinery beyond the `#0` bootstrap verbs" philosophy). Static-graph-only,
-/// same as every other scanner in this file - actually *running* a test
-/// needs a live eval() round trip through Sidecar (`IdeActions.runTestVerb`),
-/// which this deliberately has nothing to do with.
-let findTestVerbs (graph: Graph) : TestVerbEntry[] =
-    graph.Objects
-    |> Map.toSeq
-    |> Seq.collect (fun (num, o) ->
-        o.Verbs
-        |> Seq.choose (fun v ->
-            v.Meta.Names
-            |> List.tryFind (fun n -> n.StartsWith("test_"))
-            |> Option.map (fun name -> { ObjRef = num; VerbName = name })))
-    |> Array.ofSeq
-
 /// One line-based substring occurrence for the "Bulk find-and-replace"
 /// sidebar view's preview step - one row per *occurrence* (not per line
 /// the way `IdeActions.searchContent` is), since a replace UI needs to
@@ -2777,14 +2752,6 @@ type MooLspServer(_client: MooLspClient, graph: Graph, bridge: SidecarBridge.Sid
     /// starting with `TODO:`/`FIXME:`, corpus-wide.
     member _.GetTodos(_p: obj) : Async<Result<TodoEntry[], JsonRpc.Error>> =
         async { return Ok(findTodos graph) }
-
-    /// Custom method (`moodev/findTestVerbs`, no params) - the in-IDE test
-    /// runner's own discovery step: every `test_`-prefixed verb, corpus-wide.
-    /// Static-graph-only, same caveat every other scanner here has (stale
-    /// until `moodev/reloadGraph` + a fresh export) - running a discovered
-    /// test is a separate, live Sidecar action (`run-test-verb`).
-    member _.GetTestVerbs(_p: obj) : Async<Result<TestVerbEntry[], JsonRpc.Error>> =
-        async { return Ok(findTestVerbs graph) }
 
     /// Custom method (`moodev/findTextOccurrences {query}`) - the "Bulk
     /// find-and-replace" sidebar view's search step: every occurrence of
