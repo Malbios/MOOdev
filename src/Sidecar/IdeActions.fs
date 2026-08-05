@@ -27,7 +27,14 @@ type Config =
       /// `envDoctorCheck` reads this today, to confirm the dedicated
       /// listener is actually bound (`listen()` doesn't persist across a
       /// MOO restart, so this must always be a live check).
-      LspBridgePort: int }
+      LspBridgePort: int
+      /// Repo-relative root of the `ToastStunt` submodule (`Moo:ToastStuntRoot`) -
+      /// where `UnitTestRunner` finds the `build/moo` binary and
+      /// `run/survive.db` baseline to boot an isolated, throwaway test MOO
+      /// from. Not part of `currentTarget`/"reconfigure-target" - this is a
+      /// fixed local-machine path, never something a live MOO switch should
+      /// touch.
+      ToastStuntRoot: string }
 
 /// Not `private` - `Program.fs`'s `"get-moo-target"`/`"reconfigure-target"`
 /// actions send responses this same way but don't operate on a live MOO
@@ -46,7 +53,7 @@ let sendWire (webSocket: WebSocket) (header: string) (lines: string list) (ct: C
 /// the object's full name-spec exactly. Sets a local `idx` (0 if not
 /// found), same fix `Survive/VCS/3_capture_verb.moo` needed historically
 /// (see `FORMAT.md` §4) and `Exporter.fs` already applies.
-let private resolveVerbIndexStatements (o: string) (verbNameLiteral: string) : string =
+let resolveVerbIndexStatements (o: string) (verbNameLiteral: string) : string =
     $"""vlist = verbs({o}); idx = 0; for i in [1..length(vlist)] if ({verbNameLiteral} in explode(vlist[i], " ")) idx = i; endif endfor"""
 
 /// `ide_fetch(objRef, verbName)` replacement. `verb_code()` flags are

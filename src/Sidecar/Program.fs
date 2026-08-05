@@ -429,6 +429,16 @@ let private buildTryDispatch
                         let code = root.GetProperty("code").EnumerateArray() |> Seq.map (fun e -> e.GetString()) |> List.ofSeq
                         do! IdeActions.checkVerbSyntax session webSocket (getObj ()) (getStr "verb") code ct
                         return true
+                    | "run-tests-isolated" ->
+                        let requests =
+                            root.GetProperty("tests").EnumerateArray()
+                            |> Seq.map (fun t ->
+                                { UnitTestRunner.ObjRef = t.GetProperty("obj").GetInt64()
+                                  UnitTestRunner.TestVerb = t.GetProperty("verb").GetString() })
+                            |> List.ofSeq
+
+                        do! UnitTestRunner.runIsolatedTests config session webSocket requests ct
+                        return true
                     | "get-properties" ->
                         do! IdeActions.getProperties config session webSocket (getObj ()) ct
                         return true
@@ -777,6 +787,7 @@ let main args =
         let gitAuthorName = app.Configuration.GetValue<string>("Moo:GitAuthorName", "MOOdy")
         let gitAuthorEmail = app.Configuration.GetValue<string>("Moo:GitAuthorEmail", "moody@localhost")
         let wipRetentionDays = app.Configuration.GetValue<float>("Moo:WipRetentionDays", 14.0)
+        let toastStuntRoot = app.Configuration.GetValue<string>("Moo:ToastStuntRoot", "../../ToastStunt")
 
         // Runs once per sidecar start rather than as a persistent timer - every
         // dev session already starts the sidecar fresh (test.ps1/`dotnet watch
@@ -815,7 +826,8 @@ let main args =
                               SessionId = Guid.NewGuid().ToString("N")
                               GitAuthorName = gitAuthorName
                               GitAuthorEmail = gitAuthorEmail
-                              LspBridgePort = currentTarget.LspBridgePort }
+                              LspBridgePort = currentTarget.LspBridgePort
+                              ToastStuntRoot = toastStuntRoot }
 
                         let tryDispatch = buildTryDispatch ideConfig
                         let endpoint: MooEndpoint = { Host = currentTarget.Host; Port = currentTarget.Port }

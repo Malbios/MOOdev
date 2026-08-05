@@ -422,6 +422,20 @@ let findTodosAsync () : Async<(int64 * string * int * string * string)[]> =
                     int64 (o?objRef: float), (o?verbName: string), int (o?line: float), (o?text: string), (o?kind: string))
     }
 
+/// Custom method (`moodev/findTestVerbs`, no params) - the in-IDE test
+/// runner's discovery step (matches `Handlers.MooLspServer.GetTestVerbs`/
+/// `Handlers.findTestVerbs`): every `test_`-prefixed verb, corpus-wide.
+let findTestVerbsAsync () : Async<(int64 * string)[]> =
+    async {
+        let! result = requestAsync "moodev/findTestVerbs" (createObj [])
+
+        if isNullOrUndefined result then
+            return [||]
+        else
+            let items: obj[] = unbox result
+            return items |> Array.map (fun o -> int64 (o?objRef: float), (o?verbName: string))
+    }
+
 /// Custom method (`moodev/findTextOccurrences {query}`) - the "Bulk
 /// find-and-replace" sidebar view's search step (matches
 /// `Handlers.MooLspServer.GetTextOccurrences`/`Handlers.findTextOccurrences`).

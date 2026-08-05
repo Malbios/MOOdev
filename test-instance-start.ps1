@@ -227,7 +227,7 @@ git -C $treeDir -c user.name="Test Instance" -c user.email="test-instance@moo.lo
 # processes accumulated across sessions this way). A single OS process per
 # service, exactly like the MOO binary's own launch pattern above.
 Write-Host "Starting Sidecar..."
-$sidecarArgs = "--Moo:Port=$Port --Moo:TreeDir=`"$treeDir`" --Moo:LspBridgePort=$LspBridgeMooPort --urls http://127.0.0.1:$SidecarPort"
+$sidecarArgs = "--Moo:Port=$Port --Moo:TreeDir=`"$treeDir`" --Moo:LspBridgePort=$LspBridgeMooPort --Moo:ToastStuntRoot=`"$repoRoot\ToastStunt`" --urls http://127.0.0.1:$SidecarPort"
 $sidecarProc = Start-Process $sidecarExe -ArgumentList $sidecarArgs -WindowStyle Hidden -RedirectStandardOutput $sidecarLogPath -RedirectStandardError "$sidecarLogPath.err" -PassThru
 $sidecarProc.Id | Out-File $sidecarPidPath -Force
 

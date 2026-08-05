@@ -353,7 +353,7 @@ if (Test-PortInUse -Port $SidecarPort) {
     # confirmed live that the exe still lands in and runs from the isolated
     # `OutputPath` with no `BaseIntermediateOutputPath` override at all.
     $sidecarOutDir = Join-Path $moodevRoot "src\Sidecar\bin\watch-$Database"
-    $sidecarScript = "dotnet watch run --no-hot-reload --project `"$sidecarProj`" --property:OutputPath=`"$sidecarOutDir\`" --Moo:Port=$MooPort --Moo:TreeDir=`"$treeDir`" --Moo:LspBridgePort=$LspBridgeMooPort --urls http://127.0.0.1:$SidecarPort"
+    $sidecarScript = "dotnet watch run --no-hot-reload --project `"$sidecarProj`" --property:OutputPath=`"$sidecarOutDir\`" --Moo:Port=$MooPort --Moo:TreeDir=`"$treeDir`" --Moo:LspBridgePort=$LspBridgeMooPort --Moo:ToastStuntRoot=`"$moodevRoot\ToastStunt`" --urls http://127.0.0.1:$SidecarPort"
     $tabSegments += New-TabSegment -ScriptText $sidecarScript -WorkingDirectory $moodevRoot -Title "Sidecar ($Database)"
 }
 
