@@ -71,25 +71,18 @@
       <button id="view-tree" class="activity-btn" title="Object tree" aria-label="Object tree">◇</button>
       <button id="view-history" class="activity-btn" title="History" aria-label="History">🕐</button>
       <button id="view-tasks" class="activity-btn" title="Tasks" aria-label="Tasks">▶</button>
-      <button id="view-server-status" class="activity-btn" title="Server status" aria-label="Server status">📡</button>
       <button id="view-errors" class="activity-btn" title="Errors" aria-label="Errors">⚠</button>
-      <button id="view-dead-code" class="activity-btn" title="Find dead code" aria-label="Find dead code">🪦</button>
-      <button id="view-gotchas" class="activity-btn" title="MOOcode gotchas" aria-label="MOOcode gotchas">🐛</button>
-      <button id="view-todos" class="activity-btn" title="TODO/FIXME scanner" aria-label="TODO/FIXME scanner">📝</button>
-      <button id="view-tests" class="activity-btn" title="Test runner" aria-label="Test runner">🧪</button>
-      <button id="view-permission-risks" class="activity-btn" title="Permission flag audit" aria-label="Permission flag audit">🔐</button>
-      <button id="view-property-search" class="activity-btn" title="Object search by property value" aria-label="Object search by property value">🔍</button>
-      <button id="view-bulk-replace" class="activity-btn" title="Bulk find-and-replace" aria-label="Bulk find-and-replace">🔁</button>
       <button id="view-docs" class="activity-btn" title="MOOcode docs" aria-label="MOOcode docs">📖</button>
       <button id="view-scratchpad" class="activity-btn" title="Eval scratchpad" aria-label="Eval scratchpad">🧮</button>
-      <button id="view-watch" class="activity-btn" title="Watch dashboard" aria-label="Watch dashboard">👁</button>
-      <button id="view-inheritance-graph" class="activity-btn" title="Inheritance graph" aria-label="Inheritance graph">🌳</button>
-      <button id="view-verb-metrics" class="activity-btn" title="Verb complexity metrics" aria-label="Verb complexity metrics">📏</button>
-      <button id="view-call-graph" class="activity-btn" title="Call graph" aria-label="Call graph">📞</button>
-      <button id="view-env-doctor" class="activity-btn" title="Environment doctor" aria-label="Environment doctor">🩺</button>
-      <button id="view-world-health" class="activity-btn" title="World-health dashboard" aria-label="World-health dashboard">💚</button>
+      <button id="view-more-tools" class="activity-btn" title="More tools" aria-label="More tools">🧰</button>
     </div>
     <div id="sidebar">
+      <div id="sidebar-view-more-tools" class="sidebar-view">
+        <div class="sidebar-filter-wrap">
+          <input id="more-tools-filter" type="text" class="sidebar-filter" placeholder="filter tools..." autocomplete="off" spellcheck="false" />
+        </div>
+        <ul id="more-tools-list" class="picker-list"></ul>
+      </div>
       <div id="sidebar-view-tree" class="sidebar-view">
         <div class="sidebar-filter-wrap">
           <input id="tree-filter" type="text" class="sidebar-filter" placeholder="filter..." autocomplete="off" spellcheck="false" />

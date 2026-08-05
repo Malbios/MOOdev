@@ -74,17 +74,13 @@ let private activityBarEl = document.getElementById ("activity-bar")
 let private viewTreeBtn = document.getElementById ("view-tree")
 let private viewHistoryBtn = document.getElementById ("view-history")
 let private viewTasksBtn = document.getElementById ("view-tasks")
-let private viewServerStatusBtn = document.getElementById ("view-server-status")
 let private viewErrorsBtn = document.getElementById ("view-errors")
-let private viewDeadCodeBtn = document.getElementById ("view-dead-code")
-let private viewGotchasBtn = document.getElementById ("view-gotchas")
-let private viewTodosBtn = document.getElementById ("view-todos")
-let private viewTestsBtn = document.getElementById ("view-tests")
-let private viewPermissionRisksBtn = document.getElementById ("view-permission-risks")
 let private viewDocsBtn = document.getElementById ("view-docs")
 let private viewScratchpadBtn = document.getElementById ("view-scratchpad")
-let private viewPropertySearchBtn = document.getElementById ("view-property-search")
-let private viewBulkReplaceBtn = document.getElementById ("view-bulk-replace")
+let private viewMoreToolsBtn = document.getElementById ("view-more-tools")
+let private sidebarViewMoreToolsEl = document.getElementById ("sidebar-view-more-tools")
+let private moreToolsFilterEl = document.getElementById ("more-tools-filter") :?> HTMLInputElement
+let private moreToolsListEl = document.getElementById ("more-tools-list")
 
 let private sidebarEl = document.getElementById ("sidebar")
 let private sidebarViewTreeEl = document.getElementById ("sidebar-view-tree")
@@ -176,21 +172,15 @@ let private sidebarViewPropertySearchEl = document.getElementById ("sidebar-view
 let private propertySearchNameInputEl = document.getElementById ("property-search-name-input") :?> HTMLInputElement
 let private propertySearchExprInputEl = document.getElementById ("property-search-expr-input") :?> HTMLInputElement
 let private propertySearchResultsEl = document.getElementById ("property-search-results")
-let private viewWatchBtn = document.getElementById ("view-watch")
 let private sidebarViewWatchEl = document.getElementById ("sidebar-view-watch")
 let private watchAddInputEl = document.getElementById ("watch-add-input") :?> HTMLInputElement
 let private watchListEl = document.getElementById ("watch-list")
-let private viewInheritanceGraphBtn = document.getElementById ("view-inheritance-graph")
 let private sidebarViewInheritanceGraphEl = document.getElementById ("sidebar-view-inheritance-graph")
-let private viewVerbMetricsBtn = document.getElementById ("view-verb-metrics")
 let private sidebarViewVerbMetricsEl = document.getElementById ("sidebar-view-verb-metrics")
-let private viewCallGraphBtn = document.getElementById ("view-call-graph")
 let private sidebarViewCallGraphEl = document.getElementById ("sidebar-view-call-graph")
-let private viewEnvDoctorBtn = document.getElementById ("view-env-doctor")
 let private sidebarViewEnvDoctorEl = document.getElementById ("sidebar-view-env-doctor")
 let private envDoctorSummaryEl = document.getElementById ("env-doctor-summary")
 let private envDoctorListEl = document.getElementById ("env-doctor-list")
-let private viewWorldHealthBtn = document.getElementById ("view-world-health")
 let private sidebarViewWorldHealthEl = document.getElementById ("sidebar-view-world-health")
 let private worldHealthListEl = document.getElementById ("world-health-list")
 
@@ -653,8 +643,35 @@ type private SidebarView =
     | CallGraphView
     | EnvDoctorView
     | WorldHealthView
+    | MoreToolsView
 
 let mutable private activeSidebarView: SidebarView = TreeView
+
+/// The long tail of diagnostic/audit tools, reached through the "More
+/// tools" (🧰) overflow panel instead of their own permanent activity-bar
+/// icon - the bar was creeping toward 20 icons as these accumulated one
+/// feature at a time, each individually reasonable but collectively
+/// crowding out the handful of views actually used every session (tree,
+/// history, tasks, errors, scratchpad, docs - those alone still get a
+/// pinned icon). `(icon, label, view)` drives both the filterable list
+/// itself (`renderMoreToolsResults`) and which underlying view counts as
+/// "inside the overflow menu" for `viewMoreToolsBtn`'s own active-highlight
+/// state.
+let private overflowTools: (string * string * SidebarView) list =
+    [ "📡", "Server status", ServerStatusView
+      "🪦", "Find dead code", DeadCodeView
+      "🐛", "MOOcode gotchas", GotchasView
+      "📝", "TODO/FIXME scanner", TodosView
+      "🧪", "Test runner", TestsView
+      "🔐", "Permission flag audit", PermissionRisksView
+      "🔍", "Object search by property value", PropertySearchView
+      "🔁", "Bulk find-and-replace", BulkReplaceView
+      "👁", "Watch dashboard", WatchView
+      "🌳", "Inheritance graph", InheritanceGraphView
+      "📏", "Verb complexity metrics", VerbMetricsView
+      "📞", "Call graph", CallGraphView
+      "🩺", "Environment doctor", EnvDoctorView
+      "💚", "World-health dashboard", WorldHealthView ]
 
 /// The property name the most recent Property search was run with -
 /// captured at dispatch time so the results handler can pass it through to
@@ -1567,7 +1584,8 @@ let private showPaneFor (tab: OpenTab) : unit =
 /// The mutually-exclusive views under `#sidebar` - same `activateOnly`
 /// pattern as `allPanes`/`showPaneFor` above, one level down.
 let private allSidebarViews =
-    [ sidebarViewTreeEl
+    [ sidebarViewMoreToolsEl
+      sidebarViewTreeEl
       sidebarViewHistoryEl
       sidebarViewTasksEl
       sidebarViewServerStatusEl
@@ -4490,6 +4508,10 @@ and private switchToSidebarView (view: SidebarView) : unit =
 
     match view with
     | TreeView -> activateOnlySidebarView sidebarViewTreeEl
+    | MoreToolsView ->
+        activateOnlySidebarView sidebarViewMoreToolsEl
+        moreToolsFilterEl.value <- ""
+        renderMoreToolsResults ()
     | HistoryView ->
         activateOnlySidebarView sidebarViewHistoryEl
 
@@ -4638,24 +4660,17 @@ and private switchToSidebarView (view: SidebarView) : unit =
         [ viewTreeBtn, TreeView
           viewHistoryBtn, HistoryView
           viewTasksBtn, TasksView
-          viewServerStatusBtn, ServerStatusView
           viewErrorsBtn, ErrorsView
-          viewDeadCodeBtn, DeadCodeView
-          viewGotchasBtn, GotchasView
-          viewTodosBtn, TodosView
-          viewTestsBtn, TestsView
-          viewBulkReplaceBtn, BulkReplaceView
-          viewPermissionRisksBtn, PermissionRisksView
           viewDocsBtn, DocsView
-          viewScratchpadBtn, EvalScratchpadView
-          viewPropertySearchBtn, PropertySearchView
-          viewWatchBtn, WatchView
-          viewInheritanceGraphBtn, InheritanceGraphView
-          viewVerbMetricsBtn, VerbMetricsView
-          viewCallGraphBtn, CallGraphView
-          viewEnvDoctorBtn, EnvDoctorView
-          viewWorldHealthBtn, WorldHealthView ] do
+          viewScratchpadBtn, EvalScratchpadView ] do
         if v = view then btn.classList.add "active" else btn.classList.remove "active"
+
+    let isOverflowView = overflowTools |> List.exists (fun (_, _, v) -> v = view)
+
+    if view = MoreToolsView || isOverflowView then
+        viewMoreToolsBtn.classList.add "active"
+    else
+        viewMoreToolsBtn.classList.remove "active"
 
 /// Renders `search-history`'s results - each clickable (when it resolved to
 /// a live objnum; see `IdeActions.searchHistory`'s own comment on why an
@@ -5187,6 +5202,33 @@ and private renderTestsResults (results: (int64 * string)[]) : unit =
         treeTestsListEl.appendChild li |> ignore
 
         currentTestRows <- currentTestRows @ [ row ]
+
+/// Renders the "More tools" overflow panel's filtered list - the 14
+/// diagnostic/audit views in `overflowTools` that no longer get their own
+/// permanent activity-bar icon. Filters by `moreToolsFilterEl`'s current
+/// text against each tool's label (`matchesFilter`, the same substring
+/// match the command palette uses), re-rendering on every keystroke - no
+/// debounce needed, this list is at most 14 items. Clicking a row switches
+/// straight to that tool's own view via `switchToSidebarView` directly
+/// (not `onActivityBtnClick`, which isn't in scope from inside this
+/// mutually-recursive group and also adds a "collapse if already active"
+/// toggle that doesn't make sense for a list row the way it does for a
+/// persistent icon).
+and private renderMoreToolsResults () : unit =
+    let filterText = moreToolsFilterEl.value
+
+    let visible =
+        overflowTools |> List.filter (fun (_, label, _) -> matchesFilter filterText label)
+
+    moreToolsListEl.innerHTML <- ""
+
+    for icon, label, view in visible do
+        let li = document.createElement ("li")
+        li.classList.add "picker-item"
+        li.classList.add "inspector-link"
+        li.textContent <- icon + "  " + label
+        li.onclick <- fun _ -> switchToSidebarView view
+        moreToolsListEl.appendChild li |> ignore
 
 /// Renders `moodev/findTodos`' results into the TODO/FIXME sidebar view -
 /// same flat-list shape as `renderGotchasResults`, one entry per hit,
@@ -6115,24 +6157,12 @@ let private onActivityBtnClick (view: SidebarView) : unit =
 viewTreeBtn.onclick <- fun _ -> onActivityBtnClick TreeView
 viewHistoryBtn.onclick <- fun _ -> onActivityBtnClick HistoryView
 viewTasksBtn.onclick <- fun _ -> onActivityBtnClick TasksView
-viewServerStatusBtn.onclick <- fun _ -> onActivityBtnClick ServerStatusView
 viewErrorsBtn.onclick <- fun _ -> onActivityBtnClick ErrorsView
-viewDeadCodeBtn.onclick <- fun _ -> onActivityBtnClick DeadCodeView
-viewGotchasBtn.onclick <- fun _ -> onActivityBtnClick GotchasView
-viewTodosBtn.onclick <- fun _ -> onActivityBtnClick TodosView
-viewTestsBtn.onclick <- fun _ -> onActivityBtnClick TestsView
-testsRunAllBtn.onclick <- fun _ -> runTestsBatch currentTestRows
-viewBulkReplaceBtn.onclick <- fun _ -> onActivityBtnClick BulkReplaceView
-viewPermissionRisksBtn.onclick <- fun _ -> onActivityBtnClick PermissionRisksView
 viewDocsBtn.onclick <- fun _ -> onActivityBtnClick DocsView
 viewScratchpadBtn.onclick <- fun _ -> onActivityBtnClick EvalScratchpadView
-viewPropertySearchBtn.onclick <- fun _ -> onActivityBtnClick PropertySearchView
-viewWatchBtn.onclick <- fun _ -> onActivityBtnClick WatchView
-viewInheritanceGraphBtn.onclick <- fun _ -> onActivityBtnClick InheritanceGraphView
-viewVerbMetricsBtn.onclick <- fun _ -> onActivityBtnClick VerbMetricsView
-viewCallGraphBtn.onclick <- fun _ -> onActivityBtnClick CallGraphView
-viewEnvDoctorBtn.onclick <- fun _ -> onActivityBtnClick EnvDoctorView
-viewWorldHealthBtn.onclick <- fun _ -> onActivityBtnClick WorldHealthView
+viewMoreToolsBtn.onclick <- fun _ -> onActivityBtnClick MoreToolsView
+testsRunAllBtn.onclick <- fun _ -> runTestsBatch currentTestRows
+moreToolsFilterEl.oninput <- fun _ -> renderMoreToolsResults ()
 
 docsSearchInputEl.oninput <- fun _ -> renderDocsList (docsSearchInputEl.value)
 
